@@ -1,0 +1,32 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Node / Next.js
+node_modules/
+apps/web/.next/
+apps/web/test-results/
+apps/web/playwright-report/
+apps/web/tsconfig.tsbuildinfo
+packages/*/dist/
+coverage/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Local secrets and runtime state
+.env
+.env.local
+.env.*.local
+.ticketmaster_sync_state.json
+
+# Claude / personal assistant config
+.claude/
+
+# Internal-only docs (not for public repo)
+docs/internal/

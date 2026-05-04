@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling>=1.24.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "truth-of-fun"
+version = "0.1.0"
+description = "Multi-source event aggregation and recommendation backend."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "fastapi",
+  "uvicorn[standard]",
+  "sqlmodel",
+  "psycopg2-binary",
+  "geoalchemy2",
+  "pydantic-settings",
+  "alembic",
+  "pytest",
+  "httpx",
+  "playwright",
+  "playwright-stealth",
+  "anthropic",
+  "python-Levenshtein",
+  "pyjwt[crypto]",
+  "redis",
+  "bcrypt",
+  "email-validator",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]

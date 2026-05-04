@@ -1,0 +1,48 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: truth-of-fun-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: truth_of_fun
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d truth_of_fun"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: truth-of-fun-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/truth_of_fun
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: truth-of-fun-worker
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker"]
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/truth_of_fun
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

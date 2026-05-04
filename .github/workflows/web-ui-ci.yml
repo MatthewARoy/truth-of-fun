@@ -1,0 +1,37 @@
+name: web-ui-ci
+
+on:
+  push:
+    paths:
+      - "apps/web/**"
+      - "packages/api-client/**"
+      - ".github/workflows/web-ui-ci.yml"
+      - "package.json"
+  pull_request:
+    paths:
+      - "apps/web/**"
+      - "packages/api-client/**"
+      - ".github/workflows/web-ui-ci.yml"
+      - "package.json"
+
+jobs:
+  web-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - name: Install dependencies
+        run: npm install
+      - name: Build shared api client
+        run: npm run api-client:build
+      - name: Lint web app
+        run: npm run web:lint
+      - name: Typecheck web app
+        run: npm run web:typecheck
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+      - name: Run web tests
+        run: npm run web:test
