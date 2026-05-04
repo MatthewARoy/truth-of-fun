@@ -52,7 +52,7 @@ export default function RecommendationsPage() {
       {loading ? <InlineNotice>Loading recommendations...</InlineNotice> : null}
       {error ? <InlineNotice tone="error">Error: {error}</InlineNotice> : null}
       {!loading && !error && items.length === 0 ? <InlineNotice>No recommendations yet.</InlineNotice> : null}
-      <div className="grid gap-3">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {items.map((item) => (
           <EventCard
             key={item.id}

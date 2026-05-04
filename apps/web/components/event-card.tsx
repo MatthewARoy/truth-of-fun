@@ -80,7 +80,28 @@ export function EventCard({ event, showRecommendationFields, folderOptions = [],
   }
 
   return (
-    <Card className="space-y-3">
+    <Card padding="none" className="flex flex-col">
+      {event.image_url ? (
+        <div className="relative aspect-[16/9] w-full overflow-hidden bg-slate-800">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={event.image_url}
+            alt={event.title}
+            loading="lazy"
+            className="h-full w-full object-cover transition-transform duration-300 hover:scale-105"
+            onError={(e) => {
+              const parent = e.currentTarget.parentElement;
+              if (parent) parent.style.display = "none";
+            }}
+          />
+          {showRecommendationFields ? (
+            <div className="absolute right-2 top-2 rounded-full bg-brand-500/90 px-2.5 py-1 text-xs font-semibold text-white shadow-lg backdrop-blur">
+              {showRecommendationFields.matchScore}% match
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      <div className="flex flex-1 flex-col gap-3 p-4">
       <div className="space-y-1">
         <h3 className="text-lg font-semibold">{event.title}</h3>
         <p className="text-sm text-slate-300">
@@ -90,13 +111,19 @@ export function EventCard({ event, showRecommendationFields, folderOptions = [],
 
       <p className="text-sm text-slate-300 line-clamp-3">{event.description || "No description available."}</p>
 
-      <p className="text-sm text-slate-400">Friends interested: {event.friends_interested}</p>
+      {event.friends_interested > 0 ? (
+        <p className="text-sm text-slate-400">Friends interested: {event.friends_interested}</p>
+      ) : null}
 
-      {showRecommendationFields ? (
+      {showRecommendationFields && !event.image_url ? (
         <div className="flex flex-wrap items-center gap-2 text-xs text-brand-200">
           <Badge active>Match {showRecommendationFields.matchScore}</Badge>
-          <span>Matched vibes: {showRecommendationFields.matchedVibes.join(", ") || "None"}</span>
         </div>
+      ) : null}
+      {showRecommendationFields && showRecommendationFields.matchedVibes.length > 0 ? (
+        <p className="text-xs text-brand-200">
+          Matched: {showRecommendationFields.matchedVibes.join(", ")}
+        </p>
       ) : null}
 
       <div className="flex flex-wrap items-center gap-2">
@@ -175,6 +202,7 @@ export function EventCard({ event, showRecommendationFields, folderOptions = [],
 
       {status ? <InlineNotice tone="success">{status}</InlineNotice> : null}
       {error ? <InlineNotice tone="error">{error}</InlineNotice> : null}
+      </div>
     </Card>
   );
 }

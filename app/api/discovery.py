@@ -14,7 +14,7 @@ from app.core.security import get_current_user, get_optional_user
 from app.models.event import Event
 from app.models.user import User
 from app.models.user_signal import UserSignal
-from app.services.concierge import parse_intent_prompt, sequence_itinerary
+from app.services.concierge import parse_intent_async, sequence_itinerary
 from app.services.recommender import RecommenderService, ScoredEvent
 from app.services.user_profile import UserProfileService
 
@@ -472,12 +472,12 @@ def get_recommendations(
 
 
 @router.post("/concierge/itinerary", response_model=ConciergeResponse)
-def build_concierge_itinerary(
+async def build_concierge_itinerary(
     *,
     payload: ConciergeRequest,
     session: Session = Depends(get_session),
 ) -> ConciergeResponse:
-    parsed = parse_intent_prompt(payload.query)
+    parsed = await parse_intent_async(payload.query)
     limit = max(3, min(int(payload.limit), 100))
 
     anchor_stmt = (
