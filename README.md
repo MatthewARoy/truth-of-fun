@@ -78,9 +78,10 @@ flowchart LR
 
 |  |  |
 | --- | --- |
-| **Home** — landing page <br/> ![Home](./docs/screenshots/01-home.jpg) | **Explore** — filtered feed of deduped events <br/> ![Explore](./docs/screenshots/02-explore.jpg) |
-| **Plan something** — natural-language concierge <br/> ![Planner](./docs/screenshots/03-planner.jpg) | **Onboarding** — vibe-picker for cold-start signal <br/> ![Onboarding](./docs/screenshots/04-onboarding-vibes.jpg) |
-| **For You** — multi-signal personalized recommendations <br/> ![Recommendations](./docs/screenshots/05-recommendations.jpg) | |
+| **Home** — landing page <br/> ![Home](./docs/screenshots/01-home.jpg) | **Explore** — deduped, filtered, image-rich event grid <br/> ![Explore](./docs/screenshots/02-explore.jpg) |
+| **Map view** — venues plotted from PostGIS geometry <br/> ![Map](./docs/screenshots/03-explore-map.jpg) | **Plan something** — natural-language → itinerary <br/> ![Planner](./docs/screenshots/04-planner.jpg) |
+| **For You** — multi-signal personalized recommendations <br/> ![Recommendations](./docs/screenshots/05-recommendations.jpg) | **Onboarding** — vibe-picker for cold-start signal <br/> ![Onboarding](./docs/screenshots/06-onboarding-vibes.jpg) |
+| **Source health** — live status of all 11 ingestion sources <br/> ![Source health](./docs/screenshots/07-admin-sources.jpg) | |
 
 ## Quick start
 
@@ -136,8 +137,9 @@ All runtime config is read from environment variables — see [`.env.example`](.
 
 ## Documentation
 
+- [Architecture](./docs/architecture.md) — pipeline, dedupe heuristic, scoring weights, intelligence plane
 - [API contract (v1)](./docs/api-contract-v1.md) — request/response shapes for all 19 endpoints
-- [Frontend architecture](./docs/frontend-architecture.md) — web/mobile shared-client strategy
+- [Frontend architecture](./docs/frontend-architecture.md) — shared-client strategy
 - [Input agents](./docs/input-agents/README.md) — per-source ingestion specs
 - [Integration testability matrix](./docs/INTEGRATIONS.md) — which sources need credentials
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import dynamic from "next/dynamic";
 import type { EventResponse, EventsQuery } from "@truth-of-fun/api-client";
 import { apiClient } from "@/lib/api/client";
 import { EventCard } from "@/components/event-card";
@@ -9,6 +10,13 @@ import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/cn";
+
+const EventMap = dynamic(
+  () => import("@/components/event-map").then((m) => m.EventMap),
+  { ssr: false, loading: () => <div className="h-[480px] rounded-ui border border-slate-800 bg-slate-900" /> }
+);
+
+type View = "list" | "map";
 
 const TIME_PRESETS = [
   { value: "", label: "Any time" },
@@ -36,6 +44,8 @@ export default function ExplorePage() {
   const [activeCategory, setActiveCategory] = useState("");
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(true);
+  const [view, setView] = useState<View>("list");
+  const [selectedId, setSelectedId] = useState<number | null>(null);
   const PAGE_SIZE = 20;
 
   const fetchEvents = useCallback(async (reset: boolean) => {
@@ -172,11 +182,37 @@ export default function ExplorePage() {
         ))}
       </div>
 
-      <p className="text-sm text-slate-500">
-        {loading && events.length === 0
-          ? "Loading events..."
-          : `${displayed.length} event${displayed.length !== 1 ? "s" : ""}`}
-      </p>
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-slate-500">
+          {loading && events.length === 0
+            ? "Loading events..."
+            : `${displayed.length} event${displayed.length !== 1 ? "s" : ""}`}
+        </p>
+        <div className="flex gap-1 rounded-ui border border-slate-800 bg-slate-900 p-1">
+          <button
+            type="button"
+            onClick={() => setView("list")}
+            className={cn(
+              "rounded-md px-3 py-1 text-xs transition",
+              view === "list" ? "bg-brand-500/20 text-brand-100" : "text-slate-400 hover:text-slate-200"
+            )}
+            aria-pressed={view === "list"}
+          >
+            List
+          </button>
+          <button
+            type="button"
+            onClick={() => setView("map")}
+            className={cn(
+              "rounded-md px-3 py-1 text-xs transition",
+              view === "map" ? "bg-brand-500/20 text-brand-100" : "text-slate-400 hover:text-slate-200"
+            )}
+            aria-pressed={view === "map"}
+          >
+            Map
+          </button>
+        </div>
+      </div>
 
       {loading && events.length === 0 ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -188,6 +224,12 @@ export default function ExplorePage() {
             </Card>
           ))}
         </div>
+      ) : view === "map" ? (
+        <EventMap
+          events={displayed}
+          selectedId={selectedId}
+          onSelect={(id) => setSelectedId(id)}
+        />
       ) : (
         <>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">

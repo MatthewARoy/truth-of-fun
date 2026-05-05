@@ -21,10 +21,28 @@ const API_BASE = process.env.API_BASE || "http://127.0.0.1:8000";
 const SHOTS = [
   { name: "01-home", path: "/", waitFor: 'h2:has-text("fragmented")' },
   { name: "02-explore", path: "/explore", waitFor: 'h3', extraDelayMs: 1500 },
-  { name: "03-planner", path: "/planner", waitFor: 'button:has-text("Build itinerary")', interact: "planner" },
-  { name: "04-onboarding-vibes", path: "/login", waitFor: 'h2', interact: "vibes" },
+  { name: "03-explore-map", path: "/explore", waitFor: 'h3', extraDelayMs: 1500, interact: "map" },
+  { name: "04-planner", path: "/planner", waitFor: 'button:has-text("Build itinerary")', interact: "planner" },
   { name: "05-recommendations", path: "/recommendations", waitFor: 'h2', auth: true, extraDelayMs: 1500 },
+  { name: "06-onboarding-vibes", path: "/login", waitFor: 'h2', interact: "vibes" },
+  { name: "07-admin-sources", path: "/admin/sources", waitFor: 'h2:has-text("Source Health")', interact: "stubHealth", extraDelayMs: 600 },
 ];
+
+const DEMO_HEALTH = {
+  sources: [
+    { name: "ticketmaster", status: "healthy", last_run_at: new Date(Date.now() - 12 * 60 * 1000).toISOString(), last_event_count: 487, consecutive_zeros: 0 },
+    { name: "eventbrite", status: "healthy", last_run_at: new Date(Date.now() - 12 * 60 * 1000).toISOString(), last_event_count: 312, consecutive_zeros: 0 },
+    { name: "meetup", status: "healthy", last_run_at: new Date(Date.now() - 12 * 60 * 1000).toISOString(), last_event_count: 156, consecutive_zeros: 0 },
+    { name: "funcheap_sf", status: "healthy", last_run_at: new Date(Date.now() - 12 * 60 * 1000).toISOString(), last_event_count: 78, consecutive_zeros: 0 },
+    { name: "19hz", status: "degraded", last_run_at: new Date(Date.now() - 12 * 60 * 1000).toISOString(), last_event_count: 0, consecutive_zeros: 1 },
+    { name: "luma", status: "failing", last_run_at: new Date(Date.now() - 12 * 60 * 1000).toISOString(), last_event_count: 0, consecutive_zeros: 3 },
+    { name: "dothebay", status: "healthy", last_run_at: new Date(Date.now() - 12 * 60 * 1000).toISOString(), last_event_count: 92, consecutive_zeros: 0 },
+    { name: "sfstation", status: "healthy", last_run_at: new Date(Date.now() - 12 * 60 * 1000).toISOString(), last_event_count: 64, consecutive_zeros: 0 },
+    { name: "minnesotastreet", status: "healthy", last_run_at: new Date(Date.now() - 12 * 60 * 1000).toISOString(), last_event_count: 14, consecutive_zeros: 0 },
+    { name: "reddit", status: "healthy", last_run_at: new Date(Date.now() - 12 * 60 * 1000).toISOString(), last_event_count: 23, consecutive_zeros: 0 },
+    { name: "eddies_list", status: "unknown", last_run_at: null, last_event_count: null, consecutive_zeros: 0 },
+  ],
+};
 
 async function authenticate(context) {
   const email = `demo-${Date.now()}@example.com`;
@@ -52,11 +70,17 @@ async function authenticate(context) {
   }
 
   await context.addInitScript((payload) => {
-    window.localStorage.setItem(
-      "bae_auth",
-      JSON.stringify({ token: payload.token, email: payload.email, userId: payload.userId })
-    );
+    window.__authInjected = true;
+    try {
+      window.localStorage.setItem(
+        "tof_auth",
+        JSON.stringify({ token: payload.token, email: payload.email, userId: payload.userId })
+      );
+    } catch (e) {
+      window.__authError = String(e);
+    }
   }, { token, email: body.email, userId: body.user_id });
+  console.log(`  authed as ${body.email}`);
 }
 
 async function capture() {
@@ -77,24 +101,21 @@ async function capture() {
     const page = await context.newPage();
     const url = `${WEB_BASE}${shot.path}`;
     console.log(`-> ${shot.name}  ${url}`);
+    await page.goto(url, { waitUntil: "domcontentloaded" });
     if (shot.auth) {
-      // 1) Land on /explore so AuthProvider mounts and primes apiClient from localStorage.
-      // 2) Wait for authed nav (the email span proves token is set).
-      // 3) Navigate via Next.js Link (client-side routing) so AuthProvider stays mounted
-      //    and apiClient still has the token when the protected page mounts.
-      await page.goto(`${WEB_BASE}/explore`, { waitUntil: "domcontentloaded" });
+      // Verify the AuthProvider picked up our injected token.
       try {
         await page.waitForSelector('header span:has-text("@")', { timeout: 5000 });
-      } catch {}
-      await page.waitForTimeout(300);
-      const linkLabel = shot.path.startsWith("/recommendations") ? "For You" : null;
-      if (linkLabel) {
-        await page.click(`nav a:has-text("${linkLabel}")`);
-      } else {
-        await page.goto(url, { waitUntil: "domcontentloaded" });
+      } catch {
+        const debug = await page.evaluate(() => ({
+          tof_auth: window.localStorage.getItem("tof_auth"),
+          injected: window.__authInjected,
+          token: window.__authToken,
+          err: window.__authError,
+          keys: Object.keys(window.localStorage),
+        }));
+        console.warn(`  warn: header email not visible. debug:`, JSON.stringify(debug));
       }
-    } else {
-      await page.goto(url, { waitUntil: "domcontentloaded" });
     }
 
     if (shot.waitFor) {
@@ -122,6 +143,33 @@ async function capture() {
       } catch (e) {
         console.warn("  warn: vibe-picker advance failed:", e.message);
       }
+    }
+
+    if (shot.interact === "map") {
+      try {
+        await page.click('button:has-text("Map")');
+        // Wait for Leaflet tiles to settle
+        await page.waitForSelector('.leaflet-tile-loaded', { timeout: 8000 });
+        await page.waitForTimeout(1200);
+      } catch (e) {
+        console.warn("  warn: map toggle failed:", e.message);
+      }
+    }
+
+    if (shot.interact === "stubHealth") {
+      // The shot is already navigated; reload after intercepting will not
+      // re-trigger React fetch, so we route BEFORE navigating.
+      // (We re-do the navigation here under the route override.)
+      await page.route("**/health/sources", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(DEMO_HEALTH),
+        });
+      });
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.waitForSelector('h2:has-text("Source Health")', { timeout: 5000 });
+      await page.waitForSelector('table tbody tr', { timeout: 3000 });
     }
 
     if (shot.interact === "planner") {

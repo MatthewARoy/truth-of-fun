@@ -13,6 +13,9 @@ export type EventResponse = {
   currency: string | null;
   status: string;
   friends_interested: number;
+  distance_miles?: number | null;
+  lat?: number | null;
+  lng?: number | null;
 };
 
 export type RecommendationResponse = EventResponse & {
@@ -120,4 +123,12 @@ export type AuthResponse = {
   token_type: string;
   user_id: number;
   email: string;
+};
+
+export type SourceHealthEntry = {
+  name: string;
+  status: "healthy" | "degraded" | "failing" | "unknown";
+  last_run_at: string | null;
+  last_event_count: number | null;
+  consecutive_zeros: number;
 };

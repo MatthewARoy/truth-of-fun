@@ -13,6 +13,7 @@ import type {
   OnboardingRequest,
   OnboardingResponse,
   RecommendationResponse,
+  SourceHealthEntry,
 } from "./types";
 
 export class ApiClientError extends Error {
@@ -148,6 +149,11 @@ export class TruthOfFunApiClient {
       method: "POST",
       body: JSON.stringify(payload),
     });
+  }
+
+  // Health
+  async getSourceHealth(): Promise<{ sources: SourceHealthEntry[] }> {
+    return this.request<{ sources: SourceHealthEntry[] }>("/health/sources");
   }
 
   // Folders

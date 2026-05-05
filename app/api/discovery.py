@@ -39,6 +39,8 @@ class EventResponse(BaseModel):
     status: str
     friends_interested: int = 0
     distance_miles: float | None = None
+    lat: float | None = None
+    lng: float | None = None
 
 
 class RecommendationResponse(EventResponse):
@@ -92,7 +94,35 @@ class OnboardingResponse(BaseModel):
     preferred_vibes: list[str]
 
 
+def _extract_lat_lng(event: Event) -> tuple[float | None, float | None]:
+    """Extract (lat, lng) from a PostGIS POINT.
+
+    Parses EWKB hex directly so we don't require Shapely as a hard dep.
+    EWKB layout for a 2D POINT with SRID: 1 byte endian + 4 bytes type
+    (with SRID flag set) + 4 bytes SRID + 8 bytes X + 8 bytes Y.
+    """
+    import struct
+
+    location = getattr(event, "location", None)
+    if location is None:
+        return None, None
+    try:
+        raw = bytes(location.data) if hasattr(location, "data") else None
+        if raw is None:
+            hex_str = getattr(location, "desc", None) or str(location)
+            raw = bytes.fromhex(hex_str)
+        if len(raw) < 25:
+            return None, None
+        endian = "<" if raw[0] == 1 else ">"
+        # Skip 1 byte endian + 4 bytes type + 4 bytes SRID = 9 bytes
+        x, y = struct.unpack(f"{endian}dd", raw[9:25])
+        return float(y), float(x)
+    except Exception:
+        return None, None
+
+
 def _serialize_event(event: Event, *, friends_interested: int = 0) -> EventResponse:
+    lat, lng = _extract_lat_lng(event)
     return EventResponse(
         id=int(event.id or 0),
         title=event.title,
@@ -108,6 +138,8 @@ def _serialize_event(event: Event, *, friends_interested: int = 0) -> EventRespo
         currency=event.currency,
         status=event.status,
         friends_interested=friends_interested,
+        lat=lat,
+        lng=lng,
     )
 
 
@@ -503,23 +535,30 @@ async def build_concierge_itinerary(
         )
 
     radius_meters = 0.5 * 1609.34
-    support_stmt = (
-        select(Event)
-        .where(
-            Event.id != anchor.id,
-            Event.start_at >= parsed.window_start,
-            Event.start_at <= parsed.window_end,
-            Event.source_tier >= 3,
-            func.ST_DWithin(
-                func.Geography(Event.location),
-                func.Geography(anchor.location),
-                radius_meters,
-            ),
+    anchor_lat, anchor_lng = _extract_lat_lng(anchor)
+    if anchor_lat is None or anchor_lng is None:
+        support_events = []
+    else:
+        anchor_point = func.ST_SetSRID(
+            func.ST_MakePoint(anchor_lng, anchor_lat), 4326
         )
-        .order_by(Event.start_at.asc())
-        .limit(limit)
-    )
-    support_events = session.exec(support_stmt).all()
+        support_stmt = (
+            select(Event)
+            .where(
+                Event.id != anchor.id,
+                Event.start_at >= parsed.window_start,
+                Event.start_at <= parsed.window_end,
+                Event.source_tier >= 3,
+                func.ST_DWithin(
+                    cast(Event.location, Geography),
+                    cast(anchor_point, Geography),
+                    radius_meters,
+                ),
+            )
+            .order_by(Event.start_at.asc())
+            .limit(limit)
+        )
+        support_events = session.exec(support_stmt).all()
     sequenced = sequence_itinerary(anchor=anchor, support_events=support_events)
 
     itinerary = [
