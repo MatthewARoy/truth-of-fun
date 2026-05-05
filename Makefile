@@ -58,4 +58,4 @@ demo: db-up migrate seed
 	@echo "Then open http://localhost:3000"
 
 screenshots:
-	$(PY) -c "import asyncio; from scripts.capture_screenshots import main; asyncio.run(main())"
+	node scripts/capture_screenshots.mjs

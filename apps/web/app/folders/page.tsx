@@ -4,12 +4,14 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import type { FolderResponse } from "@truth-of-fun/api-client";
 import { apiClient } from "@/lib/api/client";
+import { useAuth } from "@/lib/auth-context";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { InlineNotice } from "@/components/ui/inline-notice";
 import { Input } from "@/components/ui/input";
 
 export default function FoldersPage() {
+  const { ready, token } = useAuth();
   const [folders, setFolders] = useState<FolderResponse[]>([]);
   const [newName, setNewName] = useState("");
   const [loading, setLoading] = useState(true);
@@ -29,8 +31,13 @@ export default function FoldersPage() {
   }
 
   useEffect(() => {
+    if (!ready) return;
+    if (!token) {
+      setLoading(false);
+      return;
+    }
     void loadFolders();
-  }, []);
+  }, [ready, token]);
 
   async function createFolder() {
     if (!newName.trim()) {
@@ -62,9 +69,14 @@ export default function FoldersPage() {
           Create
         </Button>
       </Card>
-      {loading ? <InlineNotice>Loading folders...</InlineNotice> : null}
+      {ready && !token ? (
+        <InlineNotice tone="info">Sign in to create and share vibe folders.</InlineNotice>
+      ) : null}
+      {loading && token ? <InlineNotice>Loading folders...</InlineNotice> : null}
       {error ? <InlineNotice tone="error">Error: {error}</InlineNotice> : null}
-      {!loading && !error && folders.length === 0 ? <InlineNotice>No folders yet.</InlineNotice> : null}
+      {ready && token && !loading && !error && folders.length === 0 ? (
+        <InlineNotice>No folders yet — create one above.</InlineNotice>
+      ) : null}
       <ul className="space-y-2">
         {folders.map((folder) => (
           <li key={folder.id} className="rounded-ui border border-slate-800 bg-slate-900 p-3">

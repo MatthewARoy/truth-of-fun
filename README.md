@@ -34,7 +34,7 @@ The hard parts aren't the scrapers. They're:
 | **Ranking** | Multi-signal scoring: vibe match (50%) + popularity (25%) + freshness (15%) + diversity (10%). 30-day half-life decay on user behavioral signals. Consecutive-category penalty for spread. |
 | **Concierge** | Anchor + pre/post sequencing within a 0.5-mile radius of the main event. Inserts 30-minute travel buffers between stops. |
 | **Social** | Shared shortlist folders, soft-RSVP votes, public share tokens, friends-interested counts on event cards. |
-| **Frontend** | Next.js 15 / React 19 / Tailwind. Typed API client shared with future mobile (`packages/api-client`). |
+| **Frontend** | Next.js 15 / React 19 / Tailwind. Typed API client (`packages/api-client`) consumable by any client (web today, mobile later). |
 | **Infra** | FastAPI (async) + SQLModel + Alembic + Redis. Docker Compose for local. Production guard refuses to boot if `JWT_SECRET_KEY` is unset outside development. |
 
 ## Architecture
@@ -115,7 +115,6 @@ app/                  FastAPI backend (~7,800 LoC Python)
   core/               config (with prod guard), database, security
 alembic/              Database migrations
 apps/web/             Next.js frontend (~2,200 LoC TS)
-apps/mobile/          (placeholder for future mobile client)
 packages/api-client/  Shared TypeScript HTTP client + types
 scripts/              seed_demo.py, capture_screenshots.mjs
 docs/                 Public architecture and contract docs

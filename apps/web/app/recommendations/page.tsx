@@ -7,14 +7,17 @@ import { Card } from "@/components/ui/card";
 import { InlineNotice } from "@/components/ui/inline-notice";
 import { useRecommendations } from "@/hooks/use-recommendations";
 import { apiClient } from "@/lib/api/client";
+import { useAuth } from "@/lib/auth-context";
 import { readTimeToValueSeconds } from "@/lib/ux-metrics";
 
 export default function RecommendationsPage() {
+  const { ready, token } = useAuth();
   const { items, loading, error, loadRecommendations } = useRecommendations();
   const [folders, setFolders] = useState<FolderResponse[]>([]);
   const [metrics, setMetrics] = useState<{ toResults: number | null; toFirstSave: number | null } | null>(null);
 
   useEffect(() => {
+    if (!ready || !token) return;
     async function bootstrap() {
       await loadRecommendations();
       try {
@@ -26,7 +29,7 @@ export default function RecommendationsPage() {
       setMetrics(readTimeToValueSeconds());
     }
     void bootstrap();
-  }, [loadRecommendations]);
+  }, [ready, token, loadRecommendations]);
 
   async function addEventToFolder(eventId: number, folderId: number) {
     await apiClient.addFolderItem(folderId, eventId);
@@ -49,9 +52,14 @@ export default function RecommendationsPage() {
           </p>
         ) : null}
       </Card>
+      {ready && !token ? (
+        <InlineNotice tone="info">Sign in to see personalized recommendations.</InlineNotice>
+      ) : null}
       {loading ? <InlineNotice>Loading recommendations...</InlineNotice> : null}
       {error ? <InlineNotice tone="error">Error: {error}</InlineNotice> : null}
-      {!loading && !error && items.length === 0 ? <InlineNotice>No recommendations yet.</InlineNotice> : null}
+      {ready && token && !loading && !error && items.length === 0 ? (
+        <InlineNotice>No recommendations yet — try saving a few events first.</InlineNotice>
+      ) : null}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {items.map((item) => (
           <EventCard

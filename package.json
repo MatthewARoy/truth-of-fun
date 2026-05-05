@@ -12,8 +12,7 @@
     "web:typecheck": "npm run typecheck --workspace @truth-of-fun/web",
     "web:test": "npm run test --workspace @truth-of-fun/web",
     "web:test:e2e": "npm run test:e2e --workspace @truth-of-fun/web",
-    "api-client:build": "npm run build --workspace @truth-of-fun/api-client",
-    "mobile:info": "npm run info --workspace @truth-of-fun/mobile"
+    "api-client:build": "npm run build --workspace @truth-of-fun/api-client"
   },
   "overrides": {
     "next@15.5.15": {

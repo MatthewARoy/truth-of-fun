@@ -3,8 +3,7 @@
 ## Layout
 
 - `apps/web`: Next.js website implementation.
-- `apps/mobile`: reserved for future mobile app.
-- `packages/api-client`: shared endpoint contracts and HTTP client.
+- `packages/api-client`: shared endpoint contracts and HTTP client (consumable by any future client).
 
 ## Reuse Strategy
 
@@ -16,4 +15,4 @@
 
 1. Do not make direct `fetch()` calls in page components; use `@truth-of-fun/api-client`.
 2. Keep route-level rendering concerns (`page.tsx`) separate from data hooks (`hooks/*`).
-3. Add new endpoints to `api-client` first, then consume in web/mobile apps.
+3. Add new endpoints to `api-client` first, then consume in client apps.

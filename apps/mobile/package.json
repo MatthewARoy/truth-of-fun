@@ -1,8 +1,0 @@
-{
-  "name": "@truth-of-fun/mobile",
-  "version": "0.1.0",
-  "private": true,
-  "scripts": {
-    "info": "echo \"Mobile app scaffold pending. Reuse @truth-of-fun/api-client when building.\""
-  }
-}

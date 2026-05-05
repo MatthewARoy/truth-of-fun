@@ -5,7 +5,7 @@ from sqlalchemy import engine_from_config, pool
 from sqlmodel import SQLModel
 
 from app.core.config import get_settings
-from app.models import ApiKeyInventory, ApiKeyUsageSnapshot, Event, User  # noqa: F401
+import app.models  # noqa: F401  -- registers all SQLModel tables for autogenerate
 
 config = context.config
 

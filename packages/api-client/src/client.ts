@@ -31,7 +31,7 @@ type RequestOptions = {
   retries?: number;
 };
 
-export class BayAreaEventApiClient {
+export class TruthOfFunApiClient {
   private readonly baseUrl: string;
   private token: string | null = null;
 
