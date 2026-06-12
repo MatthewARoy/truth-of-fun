@@ -17,24 +17,42 @@ services:
       timeout: 5s
       retries: 10
 
+  # The api image runs `alembic upgrade head` on startup (see Dockerfile CMD),
+  # so a compose-only deployment always has the fully migrated schema. Its
+  # healthcheck hits /health, which only passes once migrations are done and
+  # the database is reachable.
   api:
     build:
       context: .
       dockerfile: Dockerfile
+      target: api
     container_name: truth-of-fun-api
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/truth_of_fun
+      # To enable AAIM key rotation, uncomment these (and the redis service
+      # below), then see "Enabling AAIM key rotation" in docs/architecture.md:
+      #   AAIM_ENABLED: "true"
+      #   REDIS_URL: redis://redis:6379/0
     depends_on:
       db:
         condition: service_healthy
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
 
   worker:
     build:
       context: .
       dockerfile: Dockerfile
+      # The worker stage bundles Playwright Chromium for the FuncheapSF and
+      # Luma connectors (see Dockerfile).
+      target: worker
     container_name: truth-of-fun-worker
     restart: unless-stopped
     command: ["python", "-m", "app.worker"]
@@ -43,6 +61,28 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      # Wait for the api container to be healthy so its startup migrations
+      # have finished before the worker touches the schema.
+      api:
+        condition: service_healthy
+
+  # Optional: Redis for AAIM key rotation. Disabled by default — start it with
+  #   docker compose --profile aaim up -d redis
+  # then set AAIM_ENABLED=true and REDIS_URL on the api/worker services and
+  # seed keys as described in docs/architecture.md ("Enabling AAIM key
+  # rotation").
+  redis:
+    image: redis:7-alpine
+    container_name: truth-of-fun-redis
+    profiles: ["aaim"]
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
 volumes:
   postgres_data:

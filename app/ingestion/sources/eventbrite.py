@@ -9,6 +9,7 @@ from app.ingestion.contracts import CanonicalEvent
 from app.ingestion.contracts import ComplianceModel
 from app.ingestion.contracts import LocationModel
 from app.ingestion.contracts import OffersModel
+from app.ingestion.contracts import OrganizerModel
 from app.ingestion.contracts import SourceMetadata
 from app.ingestion.input_agent import InputAgentSource
 from app.ingestion.venue_cache import lookup_venue_coordinates
@@ -90,7 +91,9 @@ class EventbriteSource(InputAgentSource):
                 copyright_risk="medium",
                 notes="Scraped listing metadata only; deep-link to Eventbrite source.",
             ),
-            category_tags=["creator-economy", "community"],
+            organizer=OrganizerModel(name=self._pick_first_str(raw_item, "organizer_name")),
+            # Only data actually present on the card; semantic tagging happens downstream.
+            category_tags=[],
         )
 
     def _extract_listing_candidates(self, html: str) -> list[dict[str, str]]:
@@ -102,8 +105,8 @@ class EventbriteSource(InputAgentSource):
         candidates: list[dict[str, str]] = []
         for attrs_pre, href, attrs_post, body in cards:
             source_url = href if href.startswith("http") else f"https://www.eventbrite.com{href}"
-            if "/e/" not in source_url and "/d/" in source_url:
-                continue
+            if "/e/" not in source_url:
+                continue  # Only event detail pages, not nav/category/help links
 
             body_clean = self._strip_tags(body)
             if not body_clean:
@@ -114,6 +117,7 @@ class EventbriteSource(InputAgentSource):
             date_text = self._extract_date_text(body_clean)
             price_text = self._extract_price_text(body_clean)
             location_text = self._extract_location_text(body_clean)
+            organizer_name = self._extract_organizer_text(body_clean)
 
             candidates.append(
                 {
@@ -123,6 +127,7 @@ class EventbriteSource(InputAgentSource):
                     "date_text": date_text or "",
                     "price_text": price_text or "",
                     "location_text": location_text or "",
+                    "organizer_name": organizer_name or "",
                 }
             )
         return candidates
@@ -163,6 +168,14 @@ class EventbriteSource(InputAgentSource):
             flags=re.IGNORECASE,
         )
         return money_match.group(0).strip() if money_match else None
+
+    def _extract_organizer_text(self, body_clean: str) -> str | None:
+        """Extract organizer from a 'By Organizer Name' card segment."""
+        match = re.search(r"(?:^|\||·)\s*By\s+([^|·]+)", body_clean)
+        if match:
+            name = match.group(1).strip()
+            return name or None
+        return None
 
     def _extract_location_text(self, body_clean: str) -> str | None:
         separators = ["|", " · ", " - "]

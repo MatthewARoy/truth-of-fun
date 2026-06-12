@@ -10,6 +10,7 @@ from sqlalchemy import cast, func, text
 from sqlmodel import Session, select
 
 from app.core.database import get_session
+from app.core.localtime import LOCAL_TZ
 from app.core.security import get_current_user, get_optional_user
 from app.models.event import Event
 from app.models.user import User
@@ -37,10 +38,14 @@ class EventResponse(BaseModel):
     price: float | None
     currency: str | None
     status: str
-    friends_interested: int = 0
+    people_interested: int = 0
     distance_miles: float | None = None
     lat: float | None = None
     lng: float | None = None
+    organizer_name: str | None = None
+    attendee_count: int = 0
+    location_confidence: float = 1.0
+    is_free: bool = False
 
 
 class RecommendationResponse(EventResponse):
@@ -121,7 +126,7 @@ def _extract_lat_lng(event: Event) -> tuple[float | None, float | None]:
         return None, None
 
 
-def _serialize_event(event: Event, *, friends_interested: int = 0) -> EventResponse:
+def _serialize_event(event: Event, *, people_interested: int = 0) -> EventResponse:
     lat, lng = _extract_lat_lng(event)
     return EventResponse(
         id=int(event.id or 0),
@@ -137,9 +142,15 @@ def _serialize_event(event: Event, *, friends_interested: int = 0) -> EventRespo
         price=float(event.price) if event.price is not None else None,
         currency=event.currency,
         status=event.status,
-        friends_interested=friends_interested,
+        people_interested=people_interested,
         lat=lat,
         lng=lng,
+        organizer_name=event.organizer_name,
+        attendee_count=event.attendee_count or 0,
+        location_confidence=event.location_confidence
+        if event.location_confidence is not None
+        else 1.0,
+        is_free=bool(event.is_free),
     )
 
 
@@ -182,7 +193,7 @@ def _apply_concierge_geography_filter(stmt: object, geography: str | None) -> ob
     )
 
 
-def _friends_interested_counts(*, session: Session, event_ids: list[int]) -> dict[int, int]:
+def _people_interested_counts(*, session: Session, event_ids: list[int]) -> dict[int, int]:
     if not event_ids:
         return {}
     rows = session.exec(
@@ -196,18 +207,29 @@ def _friends_interested_counts(*, session: Session, event_ids: list[int]) -> dic
     return {int(event_id): int(count) for event_id, count in rows if event_id is not None}
 
 
-def _apply_time_preset(*, time_preset: str | None) -> tuple[datetime | None, datetime | None]:
+def _apply_time_preset(
+    *, time_preset: str | None, now: datetime | None = None
+) -> tuple[datetime | None, datetime | None]:
+    """Resolve a preset to a UTC window computed in SF local time."""
     if not time_preset:
         return None, None
-    now = datetime.now(timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    local_now = now.astimezone(LOCAL_TZ)
     if time_preset == "tonight":
-        end_of_day = datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=timezone.utc)
-        return now, end_of_day
+        # Ends 3 AM local the next morning so late shows still count as tonight.
+        end_local = (local_now + timedelta(days=1)).replace(
+            hour=3, minute=0, second=0, microsecond=0
+        )
+        return now, end_local.astimezone(timezone.utc)
     if time_preset == "this_weekend":
-        days_to_friday = (4 - now.weekday()) % 7
-        friday = (now + timedelta(days=days_to_friday)).replace(hour=17, minute=0, second=0, microsecond=0)
-        monday = (friday + timedelta(days=3)).replace(hour=6, minute=0, second=0, microsecond=0)
-        return friday, monday
+        days_to_friday = (4 - local_now.weekday()) % 7
+        friday_local = (local_now + timedelta(days=days_to_friday)).replace(
+            hour=17, minute=0, second=0, microsecond=0
+        )
+        monday_local = (friday_local + timedelta(days=3)).replace(
+            hour=6, minute=0, second=0, microsecond=0
+        )
+        return friday_local.astimezone(timezone.utc), monday_local.astimezone(timezone.utc)
     return None, None
 
 
@@ -328,7 +350,7 @@ def search_events(
         for row in results:
             events_with_distance.append((row, None))
 
-    counts = _friends_interested_counts(
+    counts = _people_interested_counts(
         session=session,
         event_ids=[int(ev.id or 0) for ev, _ in events_with_distance if ev.id is not None],
     )
@@ -336,7 +358,7 @@ def search_events(
     response: list[EventResponse] = []
     for event, distance_meters in events_with_distance:
         event_resp = _serialize_event(
-            event, friends_interested=counts.get(int(event.id or 0), 0)
+            event, people_interested=counts.get(int(event.id or 0), 0)
         )
         if distance_meters is not None:
             event_resp.distance_miles = round(distance_meters / 1609.34, 2)
@@ -462,10 +484,13 @@ def get_recommendations(
     stmt = select(Event).where(Event.start_at >= now_utc).order_by(Event.start_at.asc())
     upcoming_events = session.exec(stmt).all()
 
-    # Popularity counts: one aggregated query instead of loading all signals.
+    # Popularity = distinct users with engagement signals, one aggregated query.
     pop_rows = session.exec(
-        select(UserSignal.event_id, func.count())
-        .where(UserSignal.event_id.isnot(None))
+        select(UserSignal.event_id, func.count(func.distinct(UserSignal.user_id)))
+        .where(
+            UserSignal.event_id.isnot(None),
+            UserSignal.signal_type.in_(["save", "click", "external_ticket_click"]),
+        )
         .group_by(UserSignal.event_id)
     ).all()
     popularity_counts: dict[int, int] = {
@@ -485,13 +510,13 @@ def get_recommendations(
     paged = scored_events[offset : offset + limit]
 
     recommendations: list[RecommendationResponse] = []
-    counts = _friends_interested_counts(
+    counts = _people_interested_counts(
         session=session,
         event_ids=[int(se.event.id or 0) for se in paged if se.event.id is not None],
     )
     for se in paged:
         base = _serialize_event(
-            se.event, friends_interested=counts.get(int(se.event.id or 0), 0)
+            se.event, people_interested=counts.get(int(se.event.id or 0), 0)
         )
         recommendations.append(
             RecommendationResponse(

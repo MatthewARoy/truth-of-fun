@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -16,6 +16,7 @@ from app.ingestion.scraper_utils import (
     DEFAULT_SF_LAT,
     DEFAULT_SF_LON,
     SF_TZ,
+    parse_12h_to_24h,
     parse_date_range,
     parse_datetime_flexible,
     strip_html_tags,
@@ -80,9 +81,9 @@ class MinnesotaStreetSource(InputAgentSource):
                 default_minute=0,
             )
             if start_time:
-                end_time = start_time.replace(hour=19, minute=0, second=0)
+                end_local = self._parse_end_time(time_text, start_time)
+                end_time = end_local.astimezone(timezone.utc) if end_local else None
                 start_time = start_time.astimezone(timezone.utc)
-                end_time = end_time.astimezone(timezone.utc)
         else:
             # Exhibition window: "Feb 14–Mar 28, 2026"
             date_range = raw_item.get("date_range", "")
@@ -130,36 +131,73 @@ class MinnesotaStreetSource(InputAgentSource):
             category_tags=[event_kind, "arts", "gallery"],
         )
 
+    def _parse_end_time(self, time_text: str, start_local: datetime) -> datetime | None:
+        """Parse the explicit end time from a range like '5PM-7PM'. None if absent."""
+        times = re.findall(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", time_text, re.IGNORECASE)
+        if len(times) < 2:
+            return None
+        hour_raw, minute_raw, meridiem = times[1]
+        hour = parse_12h_to_24h(int(hour_raw), meridiem)
+        minute = int(minute_raw or 0)
+        end_local = start_local.replace(hour=hour, minute=minute, second=0)
+        if end_local < start_local:
+            end_local += timedelta(days=1)
+        return end_local
+
     def _extract_candidates(
         self, html: str, *, event_kind: str = EVENT_KIND_EXHIBITION
     ) -> list[dict[str, Any]]:
-        """Extract event/exhibition candidates from HTML."""
+        """Extract event/exhibition candidates from the site's Drupal HTML."""
         candidates: list[dict[str, Any]] = []
         seen: set[str] = set()
 
         if event_kind == EVENT_KIND_RECEPTION:
-            # Events page: "Opening Reception: No Coward Soul" "Sat, Mar 14, 5PM-7PM" "1275 Minnesota St" "Hashimoto Contemporary"
-            # Pattern: ### Opening Reception: Title, then date/time, venue, gallery
-            reception_pattern = re.compile(
-                r"(?:Opening\s+Reception:\s+)?([^\n#]+?)\s*\n\s*(?:Sat|Sun|Mon|Tue|Wed|Thu|Fri)[a-z]*,\s*([^\n]+?)\s*\n\s*(\d+\s+[^\n]+?)\s*\n\s*([^\n]+)",
-                re.IGNORECASE,
-            )
-            for m in reception_pattern.finditer(html):
-                title = strip_html_tags(m.group(1)).strip()
-                time_text = m.group(2).strip()
-                venue = m.group(3).strip()
-                gallery = m.group(4).strip()
+            # Events page rows look like:
+            #   <div class="item item-row row event-row">
+            #     <div class="column sm-6 md-2 font-small hidden-xs">
+            #       Sat, Jun 13, 4PM-6PM <br> 1275 Minnesota St<br> Ruth Asawa Lanier, Inc.</div>
+            #     ... <h3 class="font-large"><a href="/events/...">Title</a></h3> ...
+            row_starts = [m.start() for m in re.finditer(r'<div class="item item-row row event-row">', html)]
+            for i, start in enumerate(row_starts):
+                end = row_starts[i + 1] if i + 1 < len(row_starts) else len(html)
+                block = html[start:end]
+
+                info_match = re.search(
+                    r'<div class="column[^"]*font-small hidden-xs">(.*?)</div>',
+                    block,
+                    re.DOTALL,
+                )
+                title_match = re.search(
+                    r'<h3 class="font-large">\s*<a\s+href="(/events/[^"]+)"[^>]*>(.*?)</a>',
+                    block,
+                    re.DOTALL,
+                )
+                if not info_match or not title_match:
+                    continue
+
+                info_lines = [
+                    strip_html_tags(part)
+                    for part in re.split(r"<br\s*/?>", info_match.group(1))
+                ]
+                info_lines = [line for line in info_lines if line]
+                if not info_lines:
+                    continue
+                time_text = info_lines[0]
+                venue = info_lines[1] if len(info_lines) > 1 else ""
+                gallery = info_lines[2] if len(info_lines) > 2 else ""
+
+                href = title_match.group(1).strip()
+                title = strip_html_tags(title_match.group(2))
                 if not title or len(title) < 3:
                     continue
-                key = f"{title}|{time_text}"
-                if key in seen:
+                if href in seen:
                     continue
-                seen.add(key)
+                seen.add(href)
                 candidates.append(
                     {
                         "title": title,
-                        "source_url": f"{self.base_url}/events/all",
-                        "source_record_id": f"reception-{title[:40]}",
+                        "source_url": f"{self.base_url}{href}",
+                        "source_record_id": f"reception-{href.rstrip('/').split('/')[-1]}",
                         "event_kind": EVENT_KIND_RECEPTION,
                         "time_text": time_text,
                         "venue_text": venue,
@@ -167,60 +205,34 @@ class MinnesotaStreetSource(InputAgentSource):
                         "date_range": None,
                     }
                 )
-
-            # Simpler: ### Title followed by date
-            alt = re.compile(
-                r"###\s+([^\n]+)\s*\n\s*[^\n]*?(Sat|Sun|Mon|Tue|Wed|Thu|Fri)[a-z]*,\s*([^\n]+)",
-                re.IGNORECASE,
-            )
-            for m in alt.finditer(html):
-                title = strip_html_tags(m.group(1)).strip()
-                if "Opening Reception" in title:
-                    title = title.replace("Opening Reception:", "").replace("Opening Reception", "").strip()
-                time_text = f"{m.group(2)}, {m.group(3)}"
-                if not title or len(title) < 3:
-                    continue
-                key = f"{title}|{time_text}"
-                if key in seen:
-                    continue
-                seen.add(key)
-                candidates.append(
-                    {
-                        "title": title,
-                        "source_url": f"{self.base_url}/events/all",
-                        "source_record_id": f"reception-{title[:40]}",
-                        "event_kind": EVENT_KIND_RECEPTION,
-                        "time_text": time_text,
-                        "venue_text": "1275 Minnesota St",
-                        "gallery": "",
-                        "date_range": None,
-                    }
-                )
         else:
-            # Exhibitions: "Dialogues 2026" "Feb 14–Mar 28, 2026" "1275 Minnesota St / SFArtsED"
-            # ### Title, then date range, then venue/gallery
+            # Exhibitions page items look like:
+            #   <h3 class="font-large"><a href="/exhibitions/1275-minnesota-st/slug"
+            #     title="Title"><span class="div-link"></span> Title</a></h3>
+            #   <p class="font-small"> Jun 6–Jul 18, 2026<br> 1275 Minnesota St / re.riddle</p>
             exh_pattern = re.compile(
-                r"###\s+([^\n]+)\s*\n\s*([A-Za-z]{3}\s+\d{1,2}[–\-][^\n]+?)\s*\n\s*([^\n]+)",
-                re.IGNORECASE,
+                r'<h3 class="font-large">\s*<a\s+href="(/exhibitions/[^"]+)"[^>]*>(.*?)</a>\s*</h3>\s*'
+                r'<p class="font-small">\s*([^<]+?)\s*<br\s*/?>\s*([^<]+?)\s*</p>',
+                re.DOTALL,
             )
             for m in exh_pattern.finditer(html):
-                title = strip_html_tags(m.group(1)).strip()
-                date_range = m.group(2).strip()
-                venue_gallery = m.group(3).strip()
+                href = m.group(1).strip()
+                title = strip_html_tags(m.group(2))
+                date_range = m.group(3).strip()
+                venue_gallery = m.group(4).strip()
                 if not title or len(title) < 3:
                     continue
-                key = f"{title}|{date_range}"
-                if key in seen:
+                if href in seen:
                     continue
-                seen.add(key)
-                parts = venue_gallery.split("/")
-                venue = parts[0].strip() if parts else venue_gallery
-                gallery = parts[1].strip() if len(parts) > 1 else ""
+                seen.add(href)
+                parts = [part.strip() for part in venue_gallery.split("/")]
+                venue = parts[0] if parts else venue_gallery
+                gallery = " / ".join(parts[1:]) if len(parts) > 1 else ""
                 candidates.append(
                     {
                         "title": title,
-                        "source_url": f"{self.base_url}/exhibitions",
-                        "source_record_id": f"exhibition-{title[:40]}",
+                        "source_url": f"{self.base_url}{href}",
+                        "source_record_id": f"exhibition-{href.rstrip('/').split('/')[-1]}",
                         "event_kind": EVENT_KIND_EXHIBITION,
                         "time_text": None,
                         "venue_text": venue,

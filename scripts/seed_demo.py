@@ -299,6 +299,27 @@ def seed(*, reset: bool = False) -> None:
                     continue
                 session.add(_make_event(template, venue=venue, start_at=start_at, suffix=suffix))
                 inserted += 1
+
+        # A handful of same-day events so the "Tonight" preset and "tonight"
+        # concierge queries have results immediately after seeding.
+        true_now = datetime.now(timezone.utc)
+        for tonight_idx, hours_ahead in enumerate((1, 3, 5)):
+            template = EVENT_TEMPLATES[tonight_idx % len(EVENT_TEMPLATES)]
+            venue = rng.choice(VENUES)
+            suffix = f"tonight-{tonight_idx}-{template['source_name']}"
+            key = (template["source_name"], f"demo-{suffix}")
+            if key in existing_keys:
+                skipped += 1
+                continue
+            session.add(
+                _make_event(
+                    template,
+                    venue=venue,
+                    start_at=true_now + timedelta(hours=hours_ahead),
+                    suffix=suffix,
+                )
+            )
+            inserted += 1
         session.commit()
 
     print(f"[seed] inserted={inserted} skipped={skipped} total_templates={len(EVENT_TEMPLATES)}")

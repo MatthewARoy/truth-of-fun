@@ -102,56 +102,75 @@ class SFStationSource(InputAgentSource):
         )
 
     def _extract_candidates(self, html: str) -> list[dict[str, Any]]:
-        """Extract event candidates from calendar HTML."""
+        """Extract event candidates from calendar HTML.
+
+        The calendar renders each event as a schema.org Event block:
+            <div class="event-wrapper" itemscope itemtype="http://schema.org/Event">
+              <div class="event-date hidden" itemprop="startDate" content="2026-06-11">...
+              <div class="event-time hidden">12:30pm - 1:30pm</div>
+              <h4><a href="/slug-e1024101"><span itemprop="name">Title</span></a></h4>
+              at ... <a href="/venue-b6842"><span itemprop="name">Venue</span></a> ...
+        Event detail pages use -e<id> slugs; venue pages use -b<id> slugs.
+        Blocks without an explicit startDate are dropped - dates are never guessed.
+        """
         candidates: list[dict[str, Any]] = []
         seen: set[str] = set()
 
-        # SF Station structure: date blocks with event titles and venue links
-        # Pattern: 2026-03-02, time range, title, venue link, address
-        # Event blocks often have structure like: <h4> or similar for title
-        # Links to venue pages: /venue-name-b12345
-        # Event links may be in format with date
+        block_starts = [m.start() for m in re.finditer(r'<div class="event-wrapper"[^>]*>', html)]
+        for i, start in enumerate(block_starts):
+            end = block_starts[i + 1] if i + 1 < len(block_starts) else len(html)
+            block = html[start:end]
 
-        # Match event entries - look for date ISO + time + title + venue pattern
-        # From fetched content: "2026-03-02" "7:15 pm - 9:00 pm" "Haight Laughsbury Comedy Show" at "O'Reilly's Pub"
-        block_pattern = re.compile(
-            r"(\d{4}-\d{2}-\d{2})\s*\n\s*(\d{4}-\d{2}-\d{2})?\s*\n\s*([\d:apm\s\-]+)\s*\n\s*(?:MON|TUE|WED|THU|FRI|SAT|SUN)\s*\n\s*(?:MON|TUE|WED|THU|FRI|SAT|SUN)\s*\n\s*####\s+([^\n]+)\s*\n\s*at\s+\[([^\]]+)\]\(([^)]+)\)",
-            re.IGNORECASE | re.MULTILINE,
-        )
-        for m in block_pattern.finditer(html):
-            date_iso = m.group(1)
-            time_text = m.group(3).strip()
-            title = m.group(4).strip()
-            venue_name = m.group(5).strip()
-            venue_url = m.group(6).strip()
-            if venue_url.startswith("/"):
-                venue_url = f"{self.base_url}{venue_url}"
-            source_url = venue_url  # Use venue as source for now; event detail may differ
-            key = f"{title}|{date_iso}|{time_text}"
+            date_match = re.search(
+                r'itemprop="startDate"\s+content="(\d{4}-\d{2}-\d{2})"', block
+            )
+            if not date_match:
+                continue  # No explicit date on the card - drop, never fabricate
+            date_iso = date_match.group(1)
+
+            title_match = re.search(
+                r'<h4>\s*<a\s+href="(/[^"]*-e\d+)"[^>]*>\s*<span itemprop="name">([^<]+)</span>',
+                block,
+            )
+            if not title_match:
+                continue
+            href = title_match.group(1).strip()
+            title = title_match.group(2).strip()
+            if not title:
+                continue
+
+            key = f"{href}|{date_iso}"
             if key in seen:
                 continue
             seen.add(key)
 
-            # Extract address from following content (e.g. "1840 Haight Street San Francisco, CA")
-            addr_match = re.search(
-                r"(\d+\s+[A-Za-z0-9\s]+(?:Street|St|Avenue|Ave|Blvd|Road|Rd|Way|Drive|Dr)\.?\s+[A-Za-z\s,]+CA)",
-                html[m.end() : m.end() + 300],
+            time_match = re.search(r'<div class="event-time hidden">([^<]*)</div>', block)
+            time_text = time_match.group(1).strip() if time_match else ""
+
+            venue_match = re.search(
+                r'<a\s+href="/[^"]*-b\d+"[^>]*>\s*<span itemprop="name">([^<]+)</span>',
+                block,
             )
+            venue_name = venue_match.group(1).strip() if venue_match else None
+
+            addr_match = re.search(r'itemprop="streetAddress">([^<]+)<', block)
             address = addr_match.group(1).strip() if addr_match else None
 
-            # Price: FREE or [Buy Tickets]| [RSVP]
             price_text = None
-            price_ctx = html[m.end() : m.end() + 400]
-            if re.search(r"\bFREE\b", price_ctx, re.IGNORECASE):
+            if re.search(r"\bFREE\b", block):
                 price_text = "Free"
-            elif re.search(r"\[Buy Tickets\]|\[Register\]|\[RSVP\]", price_ctx):
-                price_text = None  # Paid, amount not in listing
+            else:
+                price_match = re.search(
+                    r'class="event-price"[^>]*content="(\d+(?:\.\d{2})?)"', block
+                )
+                if price_match:
+                    price_text = f"${price_match.group(1)}"
 
             candidates.append(
                 {
                     "title": title,
-                    "source_url": source_url,
-                    "source_record_id": f"{date_iso}-{title[:30]}",
+                    "source_url": f"{self.base_url}{href}",
+                    "source_record_id": f"{date_iso}-{href.rstrip('/').split('/')[-1]}",
                     "date_iso": date_iso,
                     "time_text": time_text,
                     "venue_name": venue_name,
@@ -160,44 +179,6 @@ class SFStationSource(InputAgentSource):
                     "category_tags": [],
                 }
             )
-
-        # Fallback: simpler pattern for different HTML structure
-        if not candidates:
-            # Alternative: href to event/venue + title
-            alt_pattern = re.compile(
-                r'<a\s+[^>]*href=["\'](https?://(?:www\.)?sfstation\.com/[^"\']+)["\'][^>]*>([^<]+)</a>',
-                re.IGNORECASE,
-            )
-            for m in alt_pattern.finditer(html):
-                url = m.group(1)
-                title = m.group(2).strip()
-                if not title or len(title) < 5 or "calendar" in url or "event/add" in url:
-                    continue
-                if any(skip in url for skip in ["/about", "/contact", "/subscribe", "/terms"]):
-                    continue
-                key = f"{title}|{url}"
-                if key in seen:
-                    continue
-                seen.add(key)
-                # Try to get date from context
-                ctx = html[max(0, m.start() - 300) : m.end() + 200]
-                date_iso = None
-                dm = re.search(r"(\d{4}-\d{2}-\d{2})", ctx)
-                if dm:
-                    date_iso = dm.group(1)
-                candidates.append(
-                    {
-                        "title": title,
-                        "source_url": url,
-                        "source_record_id": url.rstrip("/").split("/")[-1] or url,
-                        "date_iso": date_iso,
-                        "time_text": "",
-                        "venue_name": None,
-                        "address": None,
-                        "price_text": None,
-                        "category_tags": [],
-                    }
-                )
 
         return candidates[:60]
 

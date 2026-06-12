@@ -2,16 +2,54 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from collections.abc import Generator
+from datetime import datetime, timedelta, timezone
 
+import jwt
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.api.internal_secrets import get_secrets_store_dependency
+from app.core.config import Settings, get_settings
 from app.core.database import get_session
 from app.main import app
 from app.models.api_key import ApiKeyUsageSnapshot
 from app.services.secrets_store import KeyHealth, KeyLease
+
+_TEST_SECRET = "test-secret-with-32-plus-bytes-minimum"
+
+
+def _aaim_settings(**overrides: object) -> Settings:
+    payload = {
+        "aaim_enabled": True,
+        "aaim_jwt_shared_secret": _TEST_SECRET,
+        "aaim_oidc_issuer": "https://issuer.local",
+        "aaim_oidc_audience": "internal-bots",
+        "aaim_jwt_algorithms": ["HS256"],
+    }
+    payload.update(overrides)
+    return Settings.model_validate(payload)
+
+
+def _bot_token(scope: str = "internal:secrets:read internal:secrets:write") -> str:
+    now = datetime.now(timezone.utc)
+    return jwt.encode(
+        {
+            "sub": "bot-1",
+            "client_id": "scraper-worker",
+            "iss": "https://issuer.local",
+            "aud": "internal-bots",
+            "scope": scope,
+            "iat": int(now.timestamp()),
+            "exp": int((now + timedelta(minutes=15)).timestamp()),
+        },
+        _TEST_SECRET,
+        algorithm="HS256",
+    )
+
+
+def _auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {_bot_token()}"}
 
 
 class _FakeStore:
@@ -57,7 +95,7 @@ class _FakeStore:
 
 
 @contextmanager
-def _build_client() -> Generator[TestClient, None, None]:
+def _build_client(settings: Settings | None = None) -> Generator[TestClient, None, None]:
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -72,14 +110,18 @@ def _build_client() -> Generator[TestClient, None, None]:
     fake_store = _FakeStore()
     app.dependency_overrides[get_session] = _override_session
     app.dependency_overrides[get_secrets_store_dependency] = lambda: fake_store
+    if settings is not None:
+        app.dependency_overrides[get_settings] = lambda: settings
     with TestClient(app) as client:
         yield client
     app.dependency_overrides.clear()
 
 
 def test_get_active_key_endpoint() -> None:
-    with _build_client() as client:
-        response = client.get("/internal/secrets/ticketmaster/active-key")
+    with _build_client(settings=_aaim_settings()) as client:
+        response = client.get(
+            "/internal/secrets/ticketmaster/active-key", headers=_auth_headers()
+        )
 
         assert response.status_code == 200
         payload = response.json()
@@ -88,10 +130,11 @@ def test_get_active_key_endpoint() -> None:
 
 
 def test_report_usage_endpoint() -> None:
-    with _build_client() as client:
+    with _build_client(settings=_aaim_settings()) as client:
         response = client.post(
             "/internal/secrets/ticketmaster/usage",
             json={"key_id": "tm-1", "calls": 2, "last_status": 200},
+            headers=_auth_headers(),
         )
 
         assert response.status_code == 200
@@ -99,10 +142,25 @@ def test_report_usage_endpoint() -> None:
 
 
 def test_health_endpoint() -> None:
-    with _build_client() as client:
-        response = client.get("/internal/secrets/ticketmaster/health")
+    with _build_client(settings=_aaim_settings()) as client:
+        response = client.get(
+            "/internal/secrets/ticketmaster/health", headers=_auth_headers()
+        )
 
         assert response.status_code == 200
         payload = response.json()
         assert payload["provider"] == "ticketmaster"
         assert payload["total_keys"] == 1
+
+
+def test_endpoints_are_unreachable_when_aaim_disabled() -> None:
+    """Default config (AAIM off) must never expose API keys over HTTP."""
+    with _build_client() as client:
+        response = client.get("/internal/secrets/ticketmaster/active-key")
+        assert response.status_code == 404
+
+
+def test_endpoints_require_token_when_aaim_enabled() -> None:
+    with _build_client(settings=_aaim_settings()) as client:
+        response = client.get("/internal/secrets/ticketmaster/active-key")
+        assert response.status_code == 401

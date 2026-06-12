@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 from collections import defaultdict, deque
@@ -16,6 +17,7 @@ from app.core.config import get_settings
 from app.core.database import create_db_and_tables, engine
 from app.ingestion import registry
 from app.models.event import Event
+from app.models.source_health import SourceHealthRecord
 from app.services.alerting import send_alert
 from app.services.data_pipeline import DataPipelineService
 from app.services.secrets_store import get_secrets_store
@@ -115,6 +117,7 @@ class IngestionWorker:
             )
 
         self._mark_past_events()
+        self._persist_source_health()
 
         # Flush pending alerts (never blocks the pipeline)
         for title, message, severity in self._pending_alerts:
@@ -146,7 +149,10 @@ class IngestionWorker:
             with self._session_factory() as session:
                 result = session.execute(
                     update(Event)
-                    .where(Event.start_at < cutoff, Event.status == "scheduled")
+                    .where(
+                        func.coalesce(Event.end_at, Event.start_at) < cutoff,
+                        Event.status == "scheduled",
+                    )
                     .values(status="past")
                 )
                 count = result.rowcount
@@ -155,6 +161,28 @@ class IngestionWorker:
                 logger.info("Lifecycle cleanup: marked %s event(s) as past.", count)
         except Exception:
             logger.debug("Lifecycle cleanup skipped (no database session).")
+
+    def _persist_source_health(self) -> None:
+        """Write per-source health to the database so the API process can serve it."""
+        try:
+            with self._session_factory() as session:
+                for source_name, state in _source_health_state.items():
+                    last_run_at = state.get("last_run_at")
+                    record = SourceHealthRecord(
+                        source_name=source_name,
+                        status=state.get("status", "unknown"),
+                        last_event_count=state.get("last_event_count", 0),
+                        consecutive_zeros=state.get("consecutive_zeros", 0),
+                        last_run_at=(
+                            datetime.fromisoformat(last_run_at)
+                            if isinstance(last_run_at, str)
+                            else None
+                        ),
+                    )
+                    session.merge(record)
+                session.commit()
+        except Exception:
+            logger.debug("Source health persistence skipped (no database session).")
 
     def _log_canary_metrics(self, *, source_name: str, current_count: int) -> None:
         history = self._source_count_history[source_name]
@@ -229,7 +257,7 @@ class IngestionWorker:
             ))
 
 
-async def _main() -> None:
+async def _main(*, run_once: bool) -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
@@ -237,11 +265,21 @@ async def _main() -> None:
     create_db_and_tables()
     settings = get_settings()
     worker = IngestionWorker(run_interval_seconds=settings.worker_interval_seconds)
-    await worker.run_forever()
+    if run_once:
+        await worker.run_once()
+    else:
+        await worker.run_forever()
 
 
 def main() -> None:
-    asyncio.run(_main())
+    parser = argparse.ArgumentParser(description="Truth of Fun ingestion worker")
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run a single ingestion cycle and exit (default: loop forever).",
+    )
+    args = parser.parse_args()
+    asyncio.run(_main(run_once=args.once))
 
 
 if __name__ == "__main__":

@@ -26,6 +26,17 @@ class _FakeRedis:
     def hgetall(self, key: str) -> dict[str, str | int]:
         return dict(self._hashes.get(key, {}))
 
+    def hget(self, key: str, field: str) -> str | int | None:
+        return self._hashes.get(key, {}).get(field)
+
+    def hincrby(self, key: str, field: str, amount: int) -> int:
+        current = int(self._hashes[key].get(field, 0) or 0)
+        self._hashes[key][field] = current + int(amount)
+        return current + int(amount)
+
+    def exists(self, key: str) -> int:
+        return 1 if self._hashes.get(key) else 0
+
 
 def _settings(**overrides: object) -> Settings:
     payload = {
@@ -69,3 +80,49 @@ def test_env_fallback_used_when_redis_empty() -> None:
 
     assert lease.source == "env"
     assert lease.api_key == "fallback-key"
+
+
+class _SpyRedis(_FakeRedis):
+    """Records calls so tests can assert usage counting is atomic (HINCRBY)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hincrby_calls: list[tuple[str, str, int]] = []
+        self.hset_usage_writes: int = 0
+
+    def hincrby(self, key: str, field: str, amount: int) -> int:
+        self.hincrby_calls.append((key, field, amount))
+        return super().hincrby(key, field, amount)
+
+    def hset(self, key: str, mapping: dict[str, str | int]) -> None:
+        if "usage_count" in mapping:
+            self.hset_usage_writes += 1
+        super().hset(key, mapping)
+
+
+def test_report_usage_increments_atomically() -> None:
+    """usage_count must go through HINCRBY, not read-modify-write via HSET."""
+    redis = _SpyRedis()
+    store = SecretsStore(settings=_settings(), redis_client=redis)
+    store.seed_key(provider="ticketmaster", key_id="key-a", api_key="api-a", quota_limit=10)
+    seed_writes = redis.hset_usage_writes
+
+    store.report_usage(provider="ticketmaster", key_id="key-a", calls=2)
+    store.report_usage(provider="ticketmaster", key_id="key-a", calls=3)
+
+    health = {item.key_id: item for item in store.health("ticketmaster")}
+    assert health["key-a"].usage_count == 5
+    assert len(redis.hincrby_calls) == 2
+    # No read-modify-write of usage_count after seeding.
+    assert redis.hset_usage_writes == seed_writes
+
+
+def test_report_usage_marks_exhausted_when_crossing_quota() -> None:
+    redis = _SpyRedis()
+    store = SecretsStore(settings=_settings(), redis_client=redis)
+    store.seed_key(provider="ticketmaster", key_id="key-a", api_key="api-a", quota_limit=3)
+
+    store.report_usage(provider="ticketmaster", key_id="key-a", calls=3)
+
+    health = {item.key_id: item for item in store.health("ticketmaster")}
+    assert health["key-a"].status == "exhausted"

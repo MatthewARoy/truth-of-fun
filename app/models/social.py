@@ -72,6 +72,30 @@ class FolderVote(SQLModel, table=True):
     )
 
 
+class FolderMember(SQLModel, table=True):
+    """A user who joined a folder by accepting an invite; can view and vote."""
+
+    __tablename__ = "folder_members"
+    __table_args__ = (
+        UniqueConstraint("folder_id", "user_id", name="uq_folder_member"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    folder_id: int = Field(
+        sa_column=Column(Integer, ForeignKey("vibe_folders.id"), nullable=False, index=True)
+    )
+    user_id: int = Field(
+        sa_column=Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    )
+    invite_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(Integer, ForeignKey("folder_invites.id"), nullable=True),
+    )
+    created_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    )
+
+
 class FolderInvite(SQLModel, table=True):
     __tablename__ = "folder_invites"
 

@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import type { EventResponse, FolderDetailResponse, InviteResponse, RecommendationResponse } from "@truth-of-fun/api-client";
 import { apiClient } from "@/lib/api/client";
+import { useAuth } from "@/lib/auth-context";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { InlineNotice } from "@/components/ui/inline-notice";
@@ -13,8 +14,10 @@ import { Input } from "@/components/ui/input";
 export default function FolderDetailPage() {
   const params = useParams<{ folderId: string }>();
   const folderId = Number(params.folderId);
+  const { ready, token } = useAuth();
   const [folder, setFolder] = useState<FolderDetailResponse | null>(null);
   const [invite, setInvite] = useState<InviteResponse | null>(null);
+  const [copied, setCopied] = useState(false);
   const [exploreEvents, setExploreEvents] = useState<EventResponse[]>([]);
   const [recommendations, setRecommendations] = useState<RecommendationResponse[]>([]);
   const [vibeFilter, setVibeFilter] = useState("");
@@ -41,10 +44,17 @@ export default function FolderDetailPage() {
   }, [folderId, vibeFilter]);
 
   useEffect(() => {
+    // Wait for auth hydration before firing authenticated requests, so deep
+    // links and hard reloads don't error with a missing-token response.
+    if (!ready) return;
+    if (!token) {
+      setLoading(false);
+      return;
+    }
     if (!Number.isNaN(folderId)) {
       void refresh();
     }
-  }, [folderId, refresh]);
+  }, [ready, token, folderId, refresh]);
 
   async function addItem(eventId: number) {
     setError(null);
@@ -68,6 +78,7 @@ export default function FolderDetailPage() {
 
   async function generateInvite() {
     setError(null);
+    setCopied(false);
     try {
       const response = await apiClient.createFolderInvite(folderId);
       setInvite(response);
@@ -76,10 +87,36 @@ export default function FolderDetailPage() {
     }
   }
 
+  async function copyInviteLink() {
+    if (!invite) return;
+    try {
+      await navigator.clipboard.writeText(
+        `${window.location.origin}/invites/${invite.invite_token}`
+      );
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setError("Could not copy the link — copy it manually instead.");
+    }
+  }
+
+  // Share links leave the app, so they need the full origin, not a relative path.
+  const absoluteShareUrl =
+    invite && typeof window !== "undefined"
+      ? `${window.location.origin}${invite.share_url}`
+      : invite?.share_url ?? null;
+  const absoluteInviteUrl =
+    invite && typeof window !== "undefined"
+      ? `${window.location.origin}/invites/${invite.invite_token}`
+      : null;
+
   return (
     <section className="space-y-4">
       <h2 className="text-xl font-semibold">Folder Detail</h2>
-      {loading ? <InlineNotice>Loading folder...</InlineNotice> : null}
+      {ready && !token ? (
+        <InlineNotice tone="info">Sign in to view this folder.</InlineNotice>
+      ) : null}
+      {loading && token ? <InlineNotice>Loading folder...</InlineNotice> : null}
       {error ? <InlineNotice tone="error">Error: {error}</InlineNotice> : null}
       {folder ? (
         <Card className="space-y-3">
@@ -93,9 +130,20 @@ export default function FolderDetailPage() {
             </Button>
           </div>
           {invite ? (
-            <p className="text-sm text-emerald-200 break-all">
-              Share URL: <Link href={invite.share_url}>{invite.share_url}</Link>
-            </p>
+            <div className="space-y-1 text-sm text-emerald-200">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="break-all">
+                  Invite link (can vote):{" "}
+                  <Link href={`/invites/${invite.invite_token}`}>{absoluteInviteUrl}</Link>
+                </span>
+                <Button type="button" variant="ghost" size="sm" onClick={() => void copyInviteLink()}>
+                  {copied ? "Copied" : "Copy link"}
+                </Button>
+              </div>
+              <p className="break-all text-slate-400">
+                View-only link: <Link href={invite.share_url}>{absoluteShareUrl}</Link>
+              </p>
+            </div>
           ) : null}
           {folder.items.length === 0 ? <InlineNotice>No items yet.</InlineNotice> : null}
           <ul className="space-y-2">

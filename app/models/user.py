@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import JSON, Column, DateTime, String, func
+from sqlalchemy.ext.mutable import MutableList
 from sqlmodel import Field, SQLModel
 
 
@@ -19,13 +20,15 @@ class User(SQLModel, table=True):
     is_active: bool = Field(default=True, nullable=False)
     full_name: Optional[str] = Field(default=None, max_length=255)
     role: str = Field(default="user", max_length=64, nullable=False)
+    # MutableList tracks in-place appends; a plain JSON column would silently
+    # drop them at commit (the attribute is never marked dirty).
     saved_event_ids: list[int] = Field(
         default_factory=list,
-        sa_column=Column(JSON, nullable=False, server_default="[]"),
+        sa_column=Column(MutableList.as_mutable(JSON), nullable=False, server_default="[]"),
     )
     preferred_vibes: list[str] = Field(
         default_factory=list,
-        sa_column=Column(JSON, nullable=False, server_default="[]"),
+        sa_column=Column(MutableList.as_mutable(JSON), nullable=False, server_default="[]"),
     )
     created_at: datetime = Field(
         sa_column=Column(DateTime(timezone=True), nullable=False, server_default=func.now())

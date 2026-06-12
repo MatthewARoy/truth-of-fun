@@ -2,11 +2,11 @@
  * Capture UI screenshots for README using Playwright.
  *
  * Assumes:
- *   - Web is running on http://127.0.0.1:3030
- *   - API is running on http://127.0.0.1:8000
- *   - Database is seeded (npm run seed at backend)
+ *   - Web is running on http://127.0.0.1:3000 (make web)
+ *   - API is running on http://127.0.0.1:8000 (make api)
+ *   - Database is seeded (make seed)
  *
- * Output: docs/screenshots/{name}.png
+ * Output: docs/screenshots/{name}.jpg
  */
 import { chromium } from "playwright";
 import { mkdir } from "node:fs/promises";
@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = resolve(__dirname, "../docs/screenshots");
-const WEB_BASE = process.env.WEB_BASE || "http://127.0.0.1:3030";
+const WEB_BASE = process.env.WEB_BASE || "http://127.0.0.1:3000";
 const API_BASE = process.env.API_BASE || "http://127.0.0.1:8000";
 
 const SHOTS = [
@@ -189,8 +189,8 @@ async function capture() {
 
     await page.waitForTimeout(shot.extraDelayMs ?? 600);
 
-    const file = resolve(OUT_DIR, `${shot.name}.png`);
-    await page.screenshot({ path: file, fullPage: false });
+    const file = resolve(OUT_DIR, `${shot.name}.jpg`);
+    await page.screenshot({ path: file, type: "jpeg", quality: 80, fullPage: false });
     console.log(`   wrote ${file}`);
     await page.close();
   }

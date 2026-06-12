@@ -11,13 +11,16 @@ const links = [
   { href: "/recommendations", label: "For You" },
 ];
 
+const authedLinks = [{ href: "/folders", label: "Folders" }];
+
 export function SiteNav() {
   const pathname = usePathname();
   const { token, email, logout } = useAuth();
+  const navLinks = token ? [...links, ...authedLinks] : links;
 
   return (
     <nav className="flex flex-wrap items-center gap-2 border-b border-slate-800 pb-4">
-      {links.map((link) => {
+      {navLinks.map((link) => {
         const isActive = pathname.startsWith(link.href);
         return (
           <Link

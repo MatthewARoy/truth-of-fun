@@ -196,6 +196,13 @@ export class TruthOfFunApiClient {
     });
   }
 
+  async acceptFolderInvite(inviteToken: string): Promise<FolderDetailResponse> {
+    return this.request<FolderDetailResponse>(
+      `/folders/invites/${inviteToken}/accept`,
+      { method: "POST" }
+    );
+  }
+
   async getSharedFolder(token: string): Promise<FolderDetailResponse> {
     return this.request<FolderDetailResponse>(`/shared/folders/${token}`);
   }

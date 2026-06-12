@@ -127,7 +127,7 @@ class DoTheBaySource(InputAgentSource):
             context = html[start : start + 800]
             venue_name = self._extract_venue_from_context(context)
             time_text = self._extract_time_from_context(context)
-            date_text = self._extract_date_from_context(context)
+            date_text = self._extract_date_from_url(url) or self._extract_date_from_context(context)
             price_text = self._extract_price_from_context(context)
             vote_count = self._extract_vote_from_context(context)
 
@@ -169,8 +169,21 @@ class DoTheBaySource(InputAgentSource):
             return time_match.group(0).strip()
         return None
 
+    def _extract_date_from_url(self, url: str) -> str | None:
+        """Extract date from dated event URLs like /events/2026/3/2/...."""
+        m = re.search(r"/events/(\d{4})/(\d{1,2})/(\d{1,2})/", url)
+        if m:
+            try:
+                return date(int(m.group(1)), int(m.group(2)), int(m.group(3))).isoformat()
+            except ValueError:
+                return None
+        return None
+
     def _extract_date_from_context(self, context: str) -> str | None:
-        """Extract date from 'Through Mar 28' or similar."""
+        """Extract date from schema.org datetime attributes or 'Through Mar 28' text."""
+        attr = re.search(r'(?:datetime|content)=["\'](\d{4}-\d{1,2}-\d{1,2})', context, re.IGNORECASE)
+        if attr:
+            return attr.group(1)
         through = re.search(r"Through\s+([A-Za-z]{3}\s+\d{1,2}(?:,\s*\d{4})?)", context, re.IGNORECASE)
         if through:
             return through.group(1).strip()
@@ -186,35 +199,49 @@ class DoTheBaySource(InputAgentSource):
         return None
 
     def _extract_vote_from_context(self, context: str) -> int | None:
-        """Extract vote/popularity number - standalone digits before ENTER/other text."""
-        # Numbers like "2" "265" often appear near events
-        nums = re.findall(r"\b(\d{1,4})\b", context[:200])
-        if nums:
-            return self._coerce_int(nums[0])
+        """Extract vote count only when clearly vote-labeled - never guess from stray digits."""
+        labeled = re.search(
+            r'class=["\'][^"\']*vote[^"\']*["\'][^>]*>\s*(\d{1,6})\b',
+            context,
+            re.IGNORECASE,
+        )
+        if labeled:
+            return self._coerce_int(labeled.group(1))
+        labeled = re.search(r"\b(\d{1,6})\s+votes?\b", context, re.IGNORECASE)
+        if labeled:
+            return self._coerce_int(labeled.group(1))
         return None
 
     def _parse_datetime(self, date_text: str | None, time_text: str | None) -> datetime | None:
-        """Parse date and time into UTC datetime."""
-        now = datetime.now(SF_TZ)
-        base_date = now.date()
+        """Parse date and time into UTC datetime. No parseable date => None, never fabricate."""
+        base_date = None
 
         if date_text:
+            iso = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", str(date_text))
             md = re.search(
                 r"([A-Za-z]{3})\s+(\d{1,2})(?:,\s*(\d{4}))?",
                 str(date_text),
                 re.IGNORECASE,
             )
-            if md:
+            if iso:
+                try:
+                    base_date = date(int(iso.group(1)), int(iso.group(2)), int(iso.group(3)))
+                except ValueError:
+                    base_date = None
+            elif md:
                 from app.ingestion.scraper_utils import MONTH_ABBREV
 
                 m = MONTH_ABBREV.get(md.group(1).lower()[:3])
                 if m is not None:
                     d = int(md.group(2))
-                    y = int(md.group(3)) if md.group(3) else now.year
+                    y = int(md.group(3)) if md.group(3) else datetime.now(SF_TZ).year
                     try:
                         base_date = date(y, m, d)
                     except ValueError:
-                        pass
+                        base_date = None
+
+        if base_date is None:
+            return None
 
         hour, minute = 19, 0
         if time_text:

@@ -77,8 +77,20 @@ def test_require_internal_scope_raises_for_missing_scope() -> None:
     assert exc.value.status_code == 403
 
 
-def test_auth_disabled_returns_dev_principal() -> None:
+def test_aaim_disabled_rejects_all_requests() -> None:
+    """With AAIM off (the default), internal secrets must be unreachable, never open."""
     settings = _make_settings(aaim_enabled=False, aaim_jwt_shared_secret=None)
-    principal = get_internal_principal(credentials=None, settings=settings)
 
-    assert principal.client_id == "local-dev-client"
+    with pytest.raises(HTTPException) as exc:
+        get_internal_principal(credentials=None, settings=settings)
+
+    assert exc.value.status_code == 404
+
+
+def test_aaim_enabled_rejects_missing_token() -> None:
+    settings = _make_settings()
+
+    with pytest.raises(HTTPException) as exc:
+        get_internal_principal(credentials=None, settings=settings)
+
+    assert exc.value.status_code == 401

@@ -156,13 +156,16 @@ class SecretsStore:
             return
 
         key_hash = self._key_hash(normalized_provider, normalized_key_id)
-        payload = self._redis.hgetall(key_hash)
-        if not payload:
+        if not self._redis.exists(key_hash):
             raise KeyError(f"Unknown key_id '{normalized_key_id}' for provider '{normalized_provider}'.")
 
-        next_usage = self._coerce_int(payload.get("usage_count"), 0) + max(0, int(calls))
-        quota_limit = self._coerce_int(payload.get("quota_limit"), self._default_quota(normalized_provider))
-        next_status = payload.get("status", "active")
+        # HINCRBY is atomic, so concurrent reporters (worker + API bots) never
+        # lose increments the way a read-modify-write would.
+        next_usage = int(self._redis.hincrby(key_hash, "usage_count", max(0, int(calls))))
+        quota_limit = self._coerce_int(
+            self._redis.hget(key_hash, "quota_limit"), self._default_quota(normalized_provider)
+        )
+        next_status = self._redis.hget(key_hash, "status") or "active"
 
         if disable:
             next_status = "disabled"
@@ -172,7 +175,6 @@ class SecretsStore:
         self._redis.hset(
             key_hash,
             mapping={
-                "usage_count": next_usage,
                 "status": next_status,
                 "last_status": "" if last_status is None else str(last_status),
                 "last_error": last_error or "",

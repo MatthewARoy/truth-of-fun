@@ -33,5 +33,8 @@ jobs:
         run: npm run web:typecheck
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
-      - name: Run web tests
+      # The Playwright suite is route-level smoke tests: it auto-starts the
+      # Next.js dev server and asserts static page content only. No backend
+      # or database is required (and none is provided here).
+      - name: Run web smoke tests (no backend)
         run: npm run web:test

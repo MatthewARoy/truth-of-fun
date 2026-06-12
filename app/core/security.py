@@ -40,15 +40,6 @@ def _coerce_scopes(claims: dict[str, Any]) -> set[str]:
     return scopes
 
 
-def _build_dev_principal() -> InternalPrincipal:
-    return InternalPrincipal(
-        client_id="local-dev-client",
-        subject="local-dev-subject",
-        scopes={"internal:secrets:read", "internal:secrets:write"},
-        raw_claims={"mode": "aaim_disabled"},
-    )
-
-
 def _verify_hs256_token(token: str, settings: Settings) -> dict[str, Any]:
     if not settings.aaim_jwt_shared_secret:
         raise HTTPException(
@@ -101,7 +92,13 @@ def get_internal_principal(
     settings: Settings = Depends(get_settings),
 ) -> InternalPrincipal:
     if not settings.aaim_enabled:
-        return _build_dev_principal()
+        # With AAIM disabled (the default), the internal secrets API is
+        # unreachable rather than open: a dev principal here would hand raw
+        # provider keys to any unauthenticated caller.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Internal secrets API is disabled (AAIM_ENABLED=false).",
+        )
 
     if credentials is None or not credentials.credentials:
         raise HTTPException(

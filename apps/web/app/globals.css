@@ -25,3 +25,45 @@ h3 {
 .page-shell {
   @apply mx-auto min-h-screen max-w-6xl space-y-6 px-4 py-6 sm:px-6;
 }
+
+/* Leaflet map markers (built as divIcons in components/event-map.tsx) */
+.tof-marker {
+  background: transparent;
+  border: none;
+}
+
+.tof-marker-pin {
+  @apply flex h-7 w-7 items-center justify-center rounded-full border-2 border-brand-100 bg-brand-500 text-sm text-white;
+  line-height: 1;
+  box-shadow: 0 2px 6px rgb(0 0 0 / 0.5);
+  transition: transform 150ms ease, background-color 150ms ease;
+}
+
+.tof-marker-pin--selected {
+  @apply bg-brand-400;
+  transform: scale(1.25);
+  box-shadow:
+    0 0 0 4px rgb(48 194 242 / 0.35),
+    0 2px 8px rgb(0 0 0 / 0.6);
+}
+
+/* Dark-theme Leaflet popups to match the app shell */
+.leaflet-popup-content-wrapper {
+  @apply rounded-ui border border-slate-700 bg-slate-900 text-slate-100;
+}
+
+.leaflet-popup-tip {
+  @apply border border-slate-700 bg-slate-900;
+}
+
+.leaflet-container a.leaflet-popup-close-button {
+  @apply text-slate-400 hover:text-slate-200;
+}
+
+.tof-popup {
+  @apply text-sm leading-relaxed;
+}
+
+.tof-popup span {
+  @apply text-slate-400;
+}

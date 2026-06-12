@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { EventResponse } from "@truth-of-fun/api-client";
 
 type Props = {
@@ -15,6 +15,7 @@ export function EventMap({ events, selectedId, onSelect }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<unknown>(null);
   const markersRef = useRef<Map<number, unknown>>(new Map());
+  const [mapReady, setMapReady] = useState(false);
 
   const points = useMemo(
     () => events.filter((e) => typeof e.lat === "number" && typeof e.lng === "number"),
@@ -62,49 +63,8 @@ export function EventMap({ events, selectedId, onSelect }: Props) {
       });
       resizeObserver.observe(containerRef.current);
 
-      renderMarkers(L, map);
-    }
-
-    function renderMarkers(L: typeof import("leaflet"), map: unknown) {
-      // Clear existing
-      markersRef.current.forEach((marker) => {
-        (marker as { remove: () => void }).remove();
-      });
-      markersRef.current.clear();
-
-      const bounds: Array<[number, number]> = [];
-      for (const event of points) {
-        if (event.lat == null || event.lng == null) continue;
-        const isSelected = event.id === selectedId;
-        const icon = L.divIcon({
-          className: "tof-marker",
-          html: `<div class="tof-marker-pin ${
-            isSelected ? "tof-marker-pin--selected" : ""
-          }">${isSelected ? "★" : "•"}</div>`,
-          iconSize: [28, 28],
-          iconAnchor: [14, 14],
-        });
-        const marker = L.marker([event.lat, event.lng], { icon })
-          .addTo(map as L.Map)
-          .bindPopup(
-            `<div class="tof-popup">
-              <strong>${escapeHtml(event.title)}</strong><br/>
-              <span>${escapeHtml(event.venue_name ?? "Venue TBD")}</span>
-            </div>`
-          )
-          .on("click", () => {
-            onSelect?.(event.id);
-          });
-        markersRef.current.set(event.id, marker);
-        bounds.push([event.lat, event.lng]);
-      }
-
-      if (bounds.length > 0) {
-        (map as L.Map).fitBounds(bounds as [number, number][], {
-          padding: [40, 40],
-          maxZoom: 14,
-        });
-      }
+      // Marker rendering happens in the effect below once the map is ready.
+      setMapReady(true);
     }
 
     void init();
@@ -118,13 +78,13 @@ export function EventMap({ events, selectedId, onSelect }: Props) {
         mapRef.current = null;
         markers.current.clear();
       }
+      setMapReady(false);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Re-render markers when events or selection change
+  // Render markers once the map is ready, and re-render when events or selection change
   useEffect(() => {
-    if (!mapRef.current) return;
+    if (!mapReady || !mapRef.current) return;
     let cancelled = false;
     (async () => {
       const L = (await import("leaflet")).default;
@@ -182,23 +142,24 @@ export function EventMap({ events, selectedId, onSelect }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [points, selectedId, onSelect]);
+  }, [mapReady, points, selectedId, onSelect]);
 
-  if (points.length === 0) {
-    return (
-      <div className="flex h-[480px] items-center justify-center rounded-ui border border-slate-800 bg-slate-900 text-sm text-slate-400">
-        No mappable events. Try adjusting filters.
-      </div>
-    );
-  }
-
+  // The map container always renders so the Leaflet instance survives filter
+  // changes; an overlay communicates the empty state instead of unmounting it.
   return (
-    <div
-      ref={containerRef}
-      className="h-[480px] w-full overflow-hidden rounded-ui border border-slate-800"
-      role="application"
-      aria-label="Event venue map"
-    />
+    <div className="relative h-[480px] w-full overflow-hidden rounded-ui border border-slate-800">
+      <div
+        ref={containerRef}
+        className="h-full w-full"
+        role="application"
+        aria-label="Event venue map"
+      />
+      {points.length === 0 ? (
+        <div className="absolute inset-0 z-[1000] flex items-center justify-center bg-slate-950/80 text-sm text-slate-400">
+          No mappable events. Try adjusting filters.
+        </div>
+      ) : null}
+    </div>
   );
 }
 

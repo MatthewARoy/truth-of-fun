@@ -10,9 +10,9 @@ Event data in any large city is fragmented across roughly three kinds of sources
 
 | Tier | Examples | Characteristics | Ingestion approach |
 | --- | --- | --- | --- |
-| **Tier 1 — Infrastructure** | Ticketmaster, Eventbrite, Meetup | Structured schemas, official APIs, rate-limited, high data fidelity. Authoritative for time and venue. | REST/GraphQL clients with token-bucket rate limiting and exponential backoff on 429s. |
+| **Tier 1 — Infrastructure** | Ticketmaster, Eventbrite (public listing scrape), Meetup | Structured schemas, rate-limited, high data fidelity. Authoritative for time and venue. | REST/GraphQL clients with sliding-window rate limiting and exponential backoff on 429/5xx. |
 | **Tier 2 — Curators** | FuncheapSF, 19hz, DoTheBay, SF Station, Minnesota Street Project, Luma | Aggregator websites, often no public API. Layout-stable but heterogeneous. Often best signal for "interesting/local". | `httpx` for static pages; Playwright for client-rendered SPAs. Per-source HTML extraction with deterministic selectors. |
-| **Tier 3 — Unstructured** | Reddit (r/AskSF, r/sanfrancisco, r/bayarea), curated newsletters (Eddie's List) | Conversational text. No schema. Highest signal-to-noise variance, but highest novelty. | Public JSON endpoints + IMAP for newsletters. LLM extraction to produce structured event records from prose. |
+| **Tier 3 — Unstructured** | Reddit (r/AskSF, r/sanfrancisco, r/bayarea), curated newsletters (Eddie's List) | Conversational text. No schema. Highest signal-to-noise variance, but highest novelty. | Public JSON endpoints + IMAP for newsletters. LLM extraction to produce structured event records from prose (deterministic heuristic fallback when no `ANTHROPIC_API_KEY` is configured). |
 
 The tier classification matters at merge time (see "Trust hierarchy" below).
 
@@ -60,8 +60,7 @@ When merging, we prefer:
 | Field | Rule |
 | --- | --- |
 | `source_tier` | Lower (more authoritative) wins |
-| `start_at` | Earliest observed |
-| `end_at` | Latest observed |
+| `start_at` / `end_at` | Taken from the more authoritative (lower-tier) source; between equal tiers, earliest start and latest end |
 | `description`, `venue_name`, `image_url`, `external_url` | Longer non-empty value wins ("richer value") |
 | `price` | Lowest (most consumer-friendly) |
 | `categories`, `tags` | Set union |
@@ -126,7 +125,7 @@ Scrapers break silently when sites change. The worker mitigates this with:
   - `degraded` (1 consecutive zero)
   - `failing` (≥ 2 consecutive zeros)
 
-State is exposed at `GET /health/sources` and rendered in the web UI at `/admin/sources` for at-a-glance ops.
+After each run the worker persists per-source health to the `source_health` table, so the API process (a separate process in the normal deployment) serves real state at `GET /health/sources`, rendered in the web UI at `/admin/sources` for at-a-glance ops.
 
 ## Storage
 
@@ -140,9 +139,41 @@ Routers under `app/api/`:
 - `discovery` — `GET /events`, `GET /recommendations`, `POST /concierge/itinerary`, onboarding/interest signal capture
 - `social` — folders, items, votes, public share tokens
 - `health` — `GET /health`, `GET /health/sources`
-- `internal_secrets` — AAIM key rotation endpoints (gated by JWT scope)
+- `internal_secrets` — AAIM (API-key Acquisition & Inventory Management, the internal key-rotation subsystem — see below) endpoints (404 unless `AAIM_ENABLED=true`; then gated by JWT scope)
 
-19 endpoints total. Full request/response shapes in [`api-contract-v1.md`](./api-contract-v1.md).
+20 endpoints total. Full request/response shapes in [`api-contract-v1.md`](./api-contract-v1.md).
+
+## Enabling AAIM key rotation
+
+AAIM (API-key Acquisition & Inventory Management) is the internal subsystem that rotates provider API keys (currently Ticketmaster) through a Redis-backed store (`app/services/secrets_store.py`) with least-used selection and quota tracking. It is **disabled by default** (`AAIM_ENABLED=false`); with `AAIM_FALLBACK_TO_ENV=true` the stack simply uses plain env vars like `TICKETMASTER_API_KEY`, which is the right setup for local and OSS use.
+
+To actually turn rotation on:
+
+1. **Start Redis.** `docker-compose.yml` ships an optional service behind a profile:
+
+   ```bash
+   docker compose --profile aaim up -d redis
+   ```
+
+2. **Configure the app.** Set `AAIM_ENABLED=true` and point `REDIS_URL` at the instance (`redis://127.0.0.1:6379/0` from the host, `redis://redis:6379/0` from inside compose), then restart the api/worker — the store handle is cached per process, so processes started while Redis was down keep the env-fallback store until restarted.
+
+3. **Seed keys.** The store reads two Redis structures per provider (key prefix defaults to `aaim`, configurable via `AAIM_REDIS_PREFIX`):
+
+   - `aaim:keys:<provider>:ids` — a SET of key ids for the provider
+   - `aaim:keys:<provider>:<key_id>` — a HASH with fields `api_key`, `usage_count`, `quota_limit`, `status` (`active` / `disabled` / `exhausted`), `last_status`, `last_error`, `updated_at_epoch`
+
+   Seed a Ticketmaster key with `redis-cli`:
+
+   ```bash
+   redis-cli SADD aaim:keys:ticketmaster:ids primary
+   redis-cli HSET aaim:keys:ticketmaster:primary \
+     api_key YOUR_TICKETMASTER_KEY usage_count 0 quota_limit 10000 \
+     status active last_status "" last_error "" updated_at_epoch "$(date +%s)"
+   ```
+
+   On each fetch the Ticketmaster connector leases the active, under-quota key with the lowest `usage_count` and reports usage back; a key flips to `exhausted` at its quota and rotation moves to the next id in the set.
+
+The worker and connectors need only `AAIM_ENABLED` + `REDIS_URL`. The `internal_secrets` HTTP endpoints additionally require the `AAIM_OIDC_*` / `AAIM_JWT_*` settings to authenticate callers.
 
 ## What's deliberately not done yet
 

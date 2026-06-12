@@ -23,9 +23,10 @@ test("planner route renders form", async ({ page }) => {
   await expect(page.getByRole("button", { name: /Build itinerary/i })).toBeVisible();
 });
 
-test("concierge route renders", async ({ page }) => {
+test("concierge route redirects to planner", async ({ page }) => {
   await page.goto("/concierge");
-  await expect(page.getByRole("heading", { name: "Concierge Planner" })).toBeVisible();
+  await expect(page).toHaveURL(/\/planner/);
+  await expect(page.getByRole("heading", { name: /Plan Something/i })).toBeVisible();
 });
 
 test("onboarding route renders", async ({ page }) => {

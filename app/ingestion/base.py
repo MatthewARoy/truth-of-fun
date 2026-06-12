@@ -1,3 +1,4 @@
+import asyncio
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -11,6 +12,10 @@ class BaseSource(ABC):
 
     source_name: str
     source_tier: int
+
+    # Exponential backoff for transient upstream failures (429 / 5xx).
+    MAX_RETRIES = 2
+    BACKOFF_BASE_SECONDS = 1.0
 
     def __init__(
         self,
@@ -49,13 +54,23 @@ class BaseSource(ABC):
         *,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        await self._limiter.acquire()
-        response = await self._get_client().get(url, params=params)
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise ValueError(f"Expected object JSON from {self.source_name}, got {type(payload)}")
-        return payload
+        attempt = 0
+        while True:
+            await self._limiter.acquire()
+            response = await self._get_client().get(url, params=params)
+            if (
+                response.status_code == 429 or response.status_code >= 500
+            ) and attempt < self.MAX_RETRIES:
+                await asyncio.sleep(self.BACKOFF_BASE_SECONDS * (2**attempt))
+                attempt += 1
+                continue
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise ValueError(
+                    f"Expected object JSON from {self.source_name}, got {type(payload)}"
+                )
+            return payload
 
     @abstractmethod
     async def fetch_events(self, **kwargs: Any) -> list[dict[str, Any]]:
