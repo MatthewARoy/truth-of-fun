@@ -10,6 +10,7 @@ from playwright_stealth import Stealth
 
 from app.core.config import get_settings
 from app.ingestion.base import BaseSource
+from app.ingestion.venue_cache import lookup_venue_coordinates
 
 SF_TZ = ZoneInfo("America/Los_Angeles")
 DEFAULT_SF_LAT = 37.7749
@@ -59,8 +60,6 @@ class FuncheapSFSource(BaseSource):
     ) -> list[dict[str, Any]]:
         """Navigate homepage/events, extract event details, return canonical Event payloads."""
         self._playwright = await async_playwright().start()
-        stealth = Stealth()
-        stealth.use_async(self._playwright)
 
         proxy_config = None
         proxy_url = self._resolve_proxy()
@@ -78,6 +77,7 @@ class FuncheapSFSource(BaseSource):
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             ),
         )
+        await Stealth().apply_stealth_async(context)
         page = await context.new_page()
 
         try:
@@ -168,6 +168,9 @@ class FuncheapSFSource(BaseSource):
 
         source_event_id = url.rstrip("/").split("/")[-1] or url
 
+        coords = lookup_venue_coordinates(venue_name)
+        lat, lon = coords if coords else (DEFAULT_SF_LAT, DEFAULT_SF_LON)
+
         return {
             "title": title,
             "description": None,
@@ -179,7 +182,8 @@ class FuncheapSFSource(BaseSource):
             "external_url": url,
             "venue_name": venue_name,
             "raw_address": raw_address,
-            "location": f"POINT({DEFAULT_SF_LON} {DEFAULT_SF_LAT})",
+            "location": f"POINT({lon} {lat})",
+            "location_confidence": 0.9 if coords else (0.5 if venue_name else 0.3),
             "categories": [],
             "tags": [],
             "price": price,
@@ -193,9 +197,8 @@ class FuncheapSFSource(BaseSource):
     ) -> tuple[datetime | None, datetime | None]:
         """Parse date/time, handling relative dates (Today, Tomorrow), return UTC datetimes."""
         now = datetime.now(SF_TZ).date()
-        base_date = now
+        base_date = None
 
-        full_lower = full_text.lower()
         date_lower = date_text.lower()
 
         if "today" in date_lower or "tonight" in date_lower:
@@ -205,9 +208,11 @@ class FuncheapSFSource(BaseSource):
         elif "yesterday" in date_lower:
             base_date = now - timedelta(days=1)
         else:
-            parsed = self._parse_absolute_date(date_text)
-            if parsed:
-                base_date = parsed
+            base_date = self._parse_absolute_date(date_text)
+
+        if base_date is None:
+            # No real date evidence on the page - never fabricate one, drop the event.
+            return None, None
 
         time_match = re.search(
             r"(\d{1,2}):(\d{2})\s*(am|pm)?|(\d{1,2})\s*(am|pm)",
@@ -236,31 +241,39 @@ class FuncheapSFSource(BaseSource):
         )
         start_utc = start_dt.astimezone(timezone.utc)
 
-        end_match = re.search(
-            r"to\s+(\d{1,2}):(\d{2})\s*(am|pm)?|until\s+(\d{1,2}):(\d{2})\s*(am|pm)?|-?\s*(\d{1,2}):(\d{2})\s*(am|pm)?",
-            full_text,
-            re.IGNORECASE,
-        )
+        # Look for an end time only AFTER the start time, behind an explicit separator,
+        # so the start time itself can never be re-matched as the end time.
         end_at = None
+        end_match = None
+        if time_match:
+            end_match = re.search(
+                r"(?:to|until|[-–])\s*(?:(\d{1,2}):(\d{2})\s*(am|pm)?|(\d{1,2})\s*(am|pm))",
+                full_text[time_match.end():],
+                re.IGNORECASE,
+            )
         if end_match:
             g = end_match.groups()
-            eh, em = 23, 59
             if g[0] is not None and g[1] is not None:
                 eh, em = int(g[0]), int(g[1])
                 if g[2] and g[2].lower() == "pm" and eh < 12:
                     eh += 12
-            elif g[3] is not None and g[4] is not None:
-                eh, em = int(g[3]), int(g[4])
-                if g[5] and g[5].lower() == "pm" and eh < 12:
+                elif g[2] and g[2].lower() == "am" and eh == 12:
+                    eh = 0
+            else:
+                eh, em = int(g[3]), 0
+                if g[4].lower() == "pm" and eh < 12:
                     eh += 12
-            elif g[6] is not None and g[7] is not None:
-                eh, em = int(g[6]), int(g[7])
-                if g[8] and g[8].lower() == "pm" and eh < 12:
-                    eh += 12
-            end_dt = datetime(
-                base_date.year, base_date.month, base_date.day, eh, em, 0, tzinfo=SF_TZ
-            )
-            end_at = end_dt.astimezone(timezone.utc)
+                elif g[4].lower() == "am" and eh == 12:
+                    eh = 0
+            try:
+                end_dt = datetime(
+                    base_date.year, base_date.month, base_date.day, eh, em, 0, tzinfo=SF_TZ
+                )
+                if end_dt <= start_dt:
+                    end_dt += timedelta(days=1)
+                end_at = end_dt.astimezone(timezone.utc)
+            except ValueError:
+                end_at = None
 
         return start_utc, end_at
 

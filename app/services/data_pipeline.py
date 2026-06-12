@@ -169,17 +169,28 @@ class DataPipelineService:
             return 0.0
         return levenshtein_ratio(left, right) * 100
 
+    STATUS_SEVERITY = {"scheduled": 0, "postponed": 1, "cancelled": 2, "past": 3}
+
     def _merge_event_payloads(
         self, *, primary: dict[str, Any], secondary: dict[str, Any]
     ) -> dict[str, Any]:
         merged = dict(primary)
 
-        # Preserve the earliest observed start and the latest observed end.
-        merged["start_at"] = min(primary["start_at"], secondary["start_at"])
-
-        primary_end = primary.get("end_at")
-        secondary_end = secondary.get("end_at")
-        merged["end_at"] = self._pick_latest_datetime(primary_end, secondary_end)
+        # Trust hierarchy: a more authoritative (lower-tier) source owns the
+        # times. Between equal tiers, keep the earliest start and latest end.
+        primary_tier = int(primary.get("source_tier", 99))
+        secondary_tier = int(secondary.get("source_tier", 99))
+        if primary_tier < secondary_tier:
+            merged["start_at"] = primary["start_at"]
+            merged["end_at"] = primary.get("end_at") or secondary.get("end_at")
+        elif secondary_tier < primary_tier:
+            merged["start_at"] = secondary["start_at"]
+            merged["end_at"] = secondary.get("end_at") or primary.get("end_at")
+        else:
+            merged["start_at"] = min(primary["start_at"], secondary["start_at"])
+            merged["end_at"] = self._pick_latest_datetime(
+                primary.get("end_at"), secondary.get("end_at")
+            )
 
         for field in (
             "title",
@@ -191,9 +202,15 @@ class DataPipelineService:
             "location",
             "source_event_id",
             "currency",
-            "status",
         ):
             merged[field] = self._prefer_richer_value(primary.get(field), secondary.get(field))
+
+        # Status only escalates: scheduled < postponed < cancelled < past.
+        merged["status"] = max(
+            primary.get("status", "scheduled"),
+            secondary.get("status", "scheduled"),
+            key=lambda value: self.STATUS_SEVERITY.get(value, 0),
+        )
 
         merged["source_name"] = self._prefer_richer_value(
             primary.get("source_name"), secondary.get("source_name")
@@ -205,6 +222,18 @@ class DataPipelineService:
         merged["categories"] = self._merge_lists(primary.get("categories", []), secondary.get("categories", []))
         merged["tags"] = self._merge_lists(primary.get("tags", []), secondary.get("tags", []))
         merged["price"] = self._prefer_price(primary.get("price"), secondary.get("price"))
+        merged["organizer_name"] = self._prefer_richer_value(
+            primary.get("organizer_name"), secondary.get("organizer_name")
+        )
+        merged["attendee_count"] = max(
+            int(primary.get("attendee_count") or 0),
+            int(secondary.get("attendee_count") or 0),
+        )
+        merged["location_confidence"] = max(
+            float(primary.get("location_confidence") or 1.0),
+            float(secondary.get("location_confidence") or 1.0),
+        )
+        merged["is_free"] = bool(primary.get("is_free")) or bool(secondary.get("is_free"))
 
         return merged
 
@@ -248,6 +277,10 @@ class DataPipelineService:
             "currency": self._normalize_currency(event.get("currency")),
             "image_url": self._normalize_str(event.get("image_url")),
             "status": status.strip().lower(),
+            "organizer_name": self._normalize_str(event.get("organizer_name")),
+            "attendee_count": self._coerce_int(event.get("attendee_count")),
+            "location_confidence": self._coerce_confidence(event.get("location_confidence")),
+            "is_free": bool(event.get("is_free", False)),
         }
 
     def _event_to_payload(self, event: Event) -> dict[str, Any]:
@@ -269,6 +302,10 @@ class DataPipelineService:
             "currency": event.currency,
             "image_url": event.image_url,
             "status": event.status,
+            "organizer_name": event.organizer_name,
+            "attendee_count": event.attendee_count,
+            "location_confidence": event.location_confidence,
+            "is_free": event.is_free,
         }
 
     def _apply_payload(self, *, existing: Event, payload: dict[str, Any]) -> None:
@@ -288,11 +325,14 @@ class DataPipelineService:
         existing.price = payload.get("price")
         existing.currency = payload.get("currency")
         existing.image_url = payload.get("image_url")
+        existing.organizer_name = payload.get("organizer_name")
+        existing.attendee_count = payload.get("attendee_count") or 0
+        existing.location_confidence = payload.get("location_confidence") or 1.0
+        existing.is_free = bool(payload.get("is_free", False))
         # Status severity: scheduled < postponed < cancelled < past
-        STATUS_SEVERITY = {"scheduled": 0, "postponed": 1, "cancelled": 2, "past": 3}
         incoming_status = payload.get("status", "scheduled")
-        current_severity = STATUS_SEVERITY.get(existing.status, 0)
-        incoming_severity = STATUS_SEVERITY.get(incoming_status, 0)
+        current_severity = self.STATUS_SEVERITY.get(existing.status, 0)
+        incoming_severity = self.STATUS_SEVERITY.get(incoming_status, 0)
         if incoming_severity > current_severity:
             existing.status = incoming_status
 
@@ -312,6 +352,18 @@ class DataPipelineService:
             except ValueError:
                 return None
         return None
+
+    def _coerce_int(self, value: Any) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
+    def _coerce_confidence(self, value: Any) -> float:
+        try:
+            return min(1.0, max(0.0, float(value)))
+        except (TypeError, ValueError):
+            return 1.0
 
     def _coerce_decimal(self, value: Any) -> Decimal | None:
         if value is None:

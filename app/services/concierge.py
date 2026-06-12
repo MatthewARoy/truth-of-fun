@@ -10,6 +10,7 @@ from typing import Any, Protocol
 import anthropic
 
 from app.core.config import get_settings
+from app.core.localtime import LOCAL_TZ
 
 logger = logging.getLogger(__name__)
 
@@ -143,22 +144,18 @@ def _extract_timeframe(
     *,
     now: datetime,
 ) -> tuple[str, datetime, datetime]:
-    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     if "tonight" in text:
-        return "tonight", day_start.replace(hour=18), day_start + timedelta(days=1, hours=3)
-    if "tomorrow" in text:
-        tomorrow = day_start + timedelta(days=1)
-        return "tomorrow", tomorrow.replace(hour=10), tomorrow + timedelta(hours=16)
-    if "this saturday" in text:
-        days_until_sat = (5 - day_start.weekday()) % 7
-        saturday = day_start + timedelta(days=days_until_sat)
-        return "this_saturday", saturday.replace(hour=10), saturday + timedelta(hours=16)
-    if "this weekend" in text:
-        days_until_sat = (5 - day_start.weekday()) % 7
-        saturday = day_start + timedelta(days=days_until_sat)
-        sunday_end = saturday + timedelta(days=1, hours=23, minutes=59)
-        return "this_weekend", saturday.replace(hour=10), sunday_end
-    return "upcoming_week", now, now + timedelta(days=7)
+        label = "tonight"
+    elif "tomorrow" in text:
+        label = "tomorrow"
+    elif "this saturday" in text:
+        label = "this_saturday"
+    elif "this weekend" in text:
+        label = "this_weekend"
+    else:
+        label = "upcoming_week"
+    start, end = _resolve_timeframe_window(label, now=now)
+    return label, start, end
 
 
 # ---------------------------------------------------------------------------
@@ -257,20 +254,30 @@ class ClaudeIntentParser:
 
 
 def _resolve_timeframe_window(label: str, *, now: datetime) -> tuple[datetime, datetime]:
-    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    """Resolve a timeframe label to a UTC window computed in SF local time.
+
+    Day windows run into the small hours of the next local morning so that
+    evening events (the product's bread and butter) stay inside their own day.
+    """
+    local_now = now.astimezone(LOCAL_TZ)
+    day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    def _to_utc(start_local: datetime, end_local: datetime) -> tuple[datetime, datetime]:
+        return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+
     if label == "tonight":
-        return day_start.replace(hour=18), day_start + timedelta(days=1, hours=3)
+        return _to_utc(day_start.replace(hour=18), day_start + timedelta(days=1, hours=3))
     if label == "tomorrow":
         tomorrow = day_start + timedelta(days=1)
-        return tomorrow.replace(hour=10), tomorrow + timedelta(hours=16)
+        return _to_utc(tomorrow.replace(hour=10), tomorrow + timedelta(days=1, hours=2))
     if label == "this_saturday":
         days_until_sat = (5 - day_start.weekday()) % 7
         saturday = day_start + timedelta(days=days_until_sat)
-        return saturday.replace(hour=10), saturday + timedelta(hours=16)
+        return _to_utc(saturday.replace(hour=10), saturday + timedelta(days=1, hours=2))
     if label == "this_weekend":
         days_until_sat = (5 - day_start.weekday()) % 7
         saturday = day_start + timedelta(days=days_until_sat)
-        return saturday.replace(hour=10), saturday + timedelta(days=1, hours=23, minutes=59)
+        return _to_utc(saturday.replace(hour=10), saturday + timedelta(days=1, hours=23, minutes=59))
     return now, now + timedelta(days=7)
 
 

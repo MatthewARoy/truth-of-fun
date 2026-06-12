@@ -127,6 +127,10 @@ class CanonicalEvent(BaseModel):
             "currency": self.offers.currency,
             "image_url": str(self.image_url) if self.image_url else None,
             "status": self.status if self.status != "unknown" else "scheduled",
+            "organizer_name": self.organizer.name,
+            "attendee_count": self.social_signals.attendee_count,
+            "location_confidence": self.location.location_confidence,
+            "is_free": self.offers.is_free,
         }
 
 

@@ -23,8 +23,6 @@ class Settings(BaseSettings):
     )
     ticketmaster_api_key: str | None = None
     anthropic_api_key: str | None = None
-    gemini_api_key: str | None = None
-    gemini_model: str = "gemini-1.5-flash"
     worker_interval_seconds: int = Field(
         default=6 * 60 * 60,
         description="Ingestion worker polling interval in seconds",
@@ -83,6 +81,32 @@ class Settings(BaseSettings):
     alert_webhook_url: str | None = Field(
         default=None,
         description="Webhook URL (Slack/Discord) for operational alerts. POST with JSON body.",
+    )
+
+    # IMAP mailbox for newsletter ingestion (Eddie's List). Leave unset to disable.
+    imap_host: str | None = Field(
+        default=None,
+        description="IMAP server hostname for newsletter ingestion.",
+    )
+    imap_port: int = Field(
+        default=993,
+        description="IMAP server port (SSL).",
+    )
+    imap_user: str | None = Field(
+        default=None,
+        description="IMAP mailbox username.",
+    )
+    imap_password: str | None = Field(
+        default=None,
+        description="IMAP mailbox password or app password.",
+    )
+    imap_mailbox: str = Field(
+        default="INBOX",
+        description="IMAP folder to read newsletters from.",
+    )
+    eddies_list_allowed_senders: list[str] = Field(
+        default=["eddieslist.com"],
+        description="Sender address/domain allowlist for Eddie's List ingestion trust.",
     )
 
     redis_url: str = Field(

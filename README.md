@@ -28,12 +28,12 @@ The hard parts aren't the scrapers. They're:
 
 | Layer | Highlights |
 | --- | --- |
-| **Ingestion** | 10 source connectors (REST, GraphQL, Playwright-stealth, IMAP). Per-source rate limiting. 6-hour scheduled cycle. Canary alerting (zero-result detection vs historic average) with healthy/degraded/failing state machine. AAIM-backed key rotation with Redis quota tracking. |
+| **Ingestion** | 11 source connectors (REST, GraphQL, Playwright-stealth, IMAP). Per-source rate limiting. 6-hour scheduled cycle. Canary alerting (zero-result detection vs historic average) with healthy/degraded/failing state machine. Key rotation with Redis quota tracking via AAIM (API-key Acquisition & Inventory Management — the internal key-rotation subsystem; see [Enabling AAIM key rotation](./docs/architecture.md#enabling-aaim-key-rotation)). |
 | **Pipeline** | Schema.org/Event canonical model with PostGIS geometry. Levenshtein title fuzzy match (≥ 85%) inside a 2-hour window. Tier-based source preference. Richer-value merge (longest description, earliest start, latest end, lowest price). Status-severity escalation (`scheduled` → `postponed` → `cancelled` → `past`). |
 | **Intelligence** | Anthropic Claude generates vibe tags from unstructured event descriptions. LLM-driven concierge intent parser (with deterministic keyword fallback) extracts intent + geography + timeframe from natural-language requests like *"date night in the Mission Saturday"*. |
 | **Ranking** | Multi-signal scoring: vibe match (50%) + popularity (25%) + freshness (15%) + diversity (10%). 30-day half-life decay on user behavioral signals. Consecutive-category penalty for spread. |
 | **Concierge** | Anchor + pre/post sequencing within a 0.5-mile radius of the main event. Inserts 30-minute travel buffers between stops. |
-| **Social** | Shared shortlist folders, soft-RSVP votes, public share tokens, friends-interested counts on event cards. |
+| **Social** | Shared shortlist folders with invite-based membership, soft-RSVP votes, public share tokens, interest counts on event cards. |
 | **Frontend** | Next.js 15 / React 19 / Tailwind. Typed API client (`packages/api-client`) consumable by any client (web today, mobile later). |
 | **Infra** | FastAPI (async) + SQLModel + Alembic + Redis. Docker Compose for local. Production guard refuses to boot if `JWT_SECRET_KEY` is unset outside development. |
 
@@ -41,11 +41,12 @@ The hard parts aren't the scrapers. They're:
 
 ```mermaid
 flowchart LR
-    subgraph Sources["10 sources"]
+    subgraph Sources["11 sources"]
         TM[Ticketmaster<br/>REST]
         EB[Eventbrite<br/>scraper]
         MU[Meetup<br/>GraphQL]
         FC[FuncheapSF<br/>Playwright]
+        LU[Luma<br/>Playwright]
         H19[19hz<br/>httpx]
         DTB[DoTheBay<br/>httpx]
         SFS[SF Station<br/>httpx]
@@ -85,7 +86,7 @@ flowchart LR
 
 ## Quick start
 
-Requires Python 3.11, Node 20+, and Docker.
+Requires Python 3.11, [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`), Node 20+, and Docker.
 
 ```bash
 # One-time install
@@ -103,23 +104,23 @@ Open http://localhost:3000.
 
 The demo seed populates a varied event set (concerts, comedy, sports, free outdoor, nightlife, art) so the explore/recommend/concierge flows have data immediately. Run `make seed-reset` to wipe and re-seed.
 
-To pull real data, set `TICKETMASTER_API_KEY` (and optionally `ANTHROPIC_API_KEY` for vibe tagging) in `.env`, then `make worker` to run the ingestion pipeline once.
+To pull real data, set `TICKETMASTER_API_KEY` (and optionally `ANTHROPIC_API_KEY` for vibe tagging) in `.env`, then `make worker` to run the ingestion pipeline once (`make worker-loop` runs it on the recurring 6-hour cycle). The FuncheapSF and Luma connectors drive a real browser: `make install` installs Playwright's Chromium for them, or run `.venv/bin/playwright install chromium` manually.
 
 ## Repository layout
 
 ```
-app/                  FastAPI backend (~7,800 LoC Python)
+app/                  FastAPI backend (~7,400 LoC Python)
   api/                Routers: auth, discovery, social, health, internal_secrets
   services/           recommender, concierge (LLM), data_pipeline (dedupe), vibe_tagger
   ingestion/          Source connectors, base classes, canary metrics
   models/             SQLModel ORM
   core/               config (with prod guard), database, security
 alembic/              Database migrations
-apps/web/             Next.js frontend (~2,200 LoC TS)
+apps/web/             Next.js frontend (~2,300 LoC TS)
 packages/api-client/  Shared TypeScript HTTP client + types
 scripts/              seed_demo.py, capture_screenshots.mjs
 docs/                 Public architecture and contract docs
-tests/                pytest suite (24 files)
+tests/                pytest suite (30 files)
 ```
 
 ## Configuration
@@ -132,13 +133,13 @@ All runtime config is read from environment variables — see [`.env.example`](.
 | `JWT_SECRET_KEY` | yes for non-dev | Generate with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Startup refuses to boot in non-`development` `APP_ENV` if unset. |
 | `TICKETMASTER_API_KEY` | optional | Disables Ticketmaster ingestion if blank |
 | `ANTHROPIC_API_KEY` | optional | Disables LLM vibe tagging and falls the concierge back to keyword intent parsing if blank |
-| `REDIS_URL` | optional | Required only if `AAIM_ENABLED=true` |
+| `REDIS_URL` | optional | Required only if `AAIM_ENABLED=true` — see [Enabling AAIM key rotation](./docs/architecture.md#enabling-aaim-key-rotation) |
 | `PROXY_URL` / `PROXY_ROTATION` | optional | For scrapers behind aggressive bot protection |
 
 ## Documentation
 
 - [Architecture](./docs/architecture.md) — pipeline, dedupe heuristic, scoring weights, intelligence plane
-- [API contract (v1)](./docs/api-contract-v1.md) — request/response shapes for all 19 endpoints
+- [API contract (v1)](./docs/api-contract-v1.md) — request/response shapes for all 20 endpoints
 - [Frontend architecture](./docs/frontend-architecture.md) — shared-client strategy
 - [Input agents](./docs/input-agents/README.md) — per-source ingestion specs
 - [Integration testability matrix](./docs/INTEGRATIONS.md) — which sources need credentials
@@ -146,11 +147,13 @@ All runtime config is read from environment variables — see [`.env.example`](.
 ## Testing
 
 ```bash
-.venv/bin/pytest                   # backend (24 test files)
+.venv/bin/pytest                   # backend (30 test files)
 npm run web:typecheck              # web type check
 npm run web:lint                   # web lint
-npm run web:test                   # web E2E (Playwright, requires backend running)
+npm run web:test                   # web route smoke tests (Playwright; auto-starts the Next dev server, no backend needed)
 ```
+
+The backend suite is hermetic except for one database integration test (`tests/test_health_db.py`), which skips automatically when Postgres isn't running (`make db-up` to include it). CI runs the full suite against a PostGIS service container.
 
 ## Responsible-use notes
 

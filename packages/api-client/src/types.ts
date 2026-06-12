@@ -12,7 +12,7 @@ export type EventResponse = {
   price: number | null;
   currency: string | null;
   status: string;
-  friends_interested: number;
+  people_interested: number;
   distance_miles?: number | null;
   lat?: number | null;
   lng?: number | null;

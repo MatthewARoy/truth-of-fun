@@ -1,4 +1,4 @@
-.PHONY: help db-up db-down migrate seed seed-reset api web worker demo install screenshots
+.PHONY: help db-up db-down migrate seed seed-reset api web worker worker-loop demo install screenshots
 
 PY := .venv/bin/python
 ALEMBIC := .venv/bin/alembic
@@ -16,12 +16,15 @@ help:
 	@echo "  make demo          db-up + migrate + seed (then start api/web in two terminals)"
 	@echo "  make api           Start FastAPI on :8000"
 	@echo "  make web           Start Next.js on :3000"
-	@echo "  make worker        Run the ingestion worker once"
+	@echo "  make worker        Run the ingestion pipeline once"
+	@echo "  make worker-loop   Run the ingestion worker loop (every 6h)"
 	@echo "  make screenshots   Capture UI screenshots into docs/screenshots/"
 
 install:
 	uv sync
+	@.venv/bin/playwright install chromium || echo "WARNING: Playwright Chromium install failed — the FuncheapSF and Luma connectors won't run. Retry with: .venv/bin/playwright install chromium"
 	npm install
+	npm run api-client:build
 
 db-up:
 	docker compose up -d db
@@ -48,6 +51,9 @@ web:
 	npm run web:dev
 
 worker:
+	$(PY) -m app.worker --once
+
+worker-loop:
 	$(PY) -m app.worker
 
 demo: db-up migrate seed

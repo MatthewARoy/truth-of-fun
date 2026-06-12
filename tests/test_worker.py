@@ -123,3 +123,38 @@ async def test_worker_logs_quota_warning_when_only_one_key_active(caplog: Any, m
         await worker.run_once()
 
     assert "AAIM quota health warning" in caplog.text
+
+
+async def test_worker_persists_source_health_to_database() -> None:
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import Session, SQLModel, create_engine, select
+
+    from app.models.source_health import SourceHealthRecord
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(
+        engine, tables=[SourceHealthRecord.__table__]
+    )
+
+    source_ok = _FakeSource(source_name="alpha", events=[_event("a1")])
+    source_empty = _FakeSource(source_name="beta", events=[])
+    registry = _FakeRegistry({"alpha": source_ok, "beta": source_empty})
+    worker = IngestionWorker(
+        source_registry=registry,
+        pipeline_service=_FakePipeline(),
+        session_factory=lambda: Session(engine),
+        run_interval_seconds=1,
+    )
+
+    await worker.run_once()
+
+    with Session(engine) as session:
+        records = {r.source_name: r for r in session.exec(select(SourceHealthRecord)).all()}
+    assert records["alpha"].status == "healthy"
+    assert records["alpha"].last_event_count == 1
+    assert records["beta"].status == "degraded"
+    assert records["beta"].consecutive_zeros == 1

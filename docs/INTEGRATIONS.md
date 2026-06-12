@@ -1,5 +1,7 @@
 # Integration Testability Matrix
 
+Playwright-based scrapers (FuncheapSF, Luma) need browser binaries: `make install` runs `.venv/bin/playwright install chromium` for you (best-effort), or run it manually.
+
 | Source | Testable | Notes |
 |--------|----------|-------|
 | **Ticketmaster** | No | Requires `TICKETMASTER_API_KEY` or AAIM secrets |
@@ -18,7 +20,7 @@
 
 These require credentials or external setup to run:
 
-- **Ticketmaster**: `TICKETMASTER_API_KEY` env or AAIM secrets store
+- **Ticketmaster**: `TICKETMASTER_API_KEY` env or the AAIM secrets store (see [architecture.md → Enabling AAIM key rotation](./architecture.md#enabling-aaim-key-rotation))
 - **Meetup**: `MEETUP_API_TOKEN` env
 - **Eddie's List**: IMAP mailbox credentials (`IMAP_HOST`, `IMAP_USER`, `IMAP_PASSWORD`)
 

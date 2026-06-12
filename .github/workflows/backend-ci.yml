@@ -1,0 +1,56 @@
+name: backend-ci
+
+on:
+  push:
+    paths:
+      - "app/**"
+      - "tests/**"
+      - "alembic/**"
+      - "alembic.ini"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/backend-ci.yml"
+  pull_request:
+    paths:
+      - "app/**"
+      - "tests/**"
+      - "alembic/**"
+      - "alembic.ini"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/backend-ci.yml"
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    services:
+      # Mirrors the db service in docker-compose.yml (host port 5433).
+      db:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_DB: truth_of_fun
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - "5433:5432"
+        options: >-
+          --health-cmd "pg_isready -U postgres -d truth_of_fun"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@127.0.0.1:5433/truth_of_fun
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install Python dependencies
+        run: uv sync
+      - name: Apply database migrations
+        run: .venv/bin/alembic upgrade head
+      - name: Run backend tests
+        run: .venv/bin/pytest

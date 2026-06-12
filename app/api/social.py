@@ -10,7 +10,7 @@ from sqlmodel import Session, select
 from app.core.database import get_session
 from app.core.security import get_current_user
 from app.models.event import Event
-from app.models.social import FolderInvite, FolderItem, FolderVote, VibeFolder
+from app.models.social import FolderInvite, FolderItem, FolderMember, FolderVote, VibeFolder
 from app.models.user import User
 from app.services.social import (
     generate_share_token,
@@ -67,6 +67,24 @@ def _require_folder_owner(*, session: Session, folder_id: int, user_id: int) -> 
     if folder is None:
         raise HTTPException(status_code=404, detail="Folder not found.")
     if folder.user_id != user_id:
+        raise HTTPException(status_code=403, detail="You do not have access to this folder.")
+    return folder
+
+
+def _require_folder_access(*, session: Session, folder_id: int, user_id: int) -> VibeFolder:
+    """Owner or accepted member: may view the folder and vote on its items."""
+    folder = session.get(VibeFolder, folder_id)
+    if folder is None:
+        raise HTTPException(status_code=404, detail="Folder not found.")
+    if folder.user_id == user_id:
+        return folder
+    membership = session.exec(
+        select(FolderMember).where(
+            FolderMember.folder_id == folder_id,
+            FolderMember.user_id == user_id,
+        )
+    ).first()
+    if membership is None:
         raise HTTPException(status_code=403, detail="You do not have access to this folder.")
     return folder
 
@@ -135,9 +153,11 @@ def list_my_folders(
     session: Session = Depends(get_session),
     user: User = Depends(get_current_user),
 ) -> list[FolderResponse]:
+    user_id = int(user.id or 0)
+    member_folder_ids = select(FolderMember.folder_id).where(FolderMember.user_id == user_id)
     folders = session.exec(
         select(VibeFolder)
-        .where(VibeFolder.user_id == int(user.id or 0))
+        .where((VibeFolder.user_id == user_id) | (VibeFolder.id.in_(member_folder_ids)))
         .order_by(VibeFolder.updated_at.desc())
     ).all()
     return [
@@ -210,6 +230,53 @@ def create_folder_invite(
     )
 
 
+@router.post("/folders/invites/{invite_token}/accept", response_model=FolderDetailResponse)
+def accept_folder_invite(
+    *,
+    invite_token: str,
+    session: Session = Depends(get_session),
+    user: User = Depends(get_current_user),
+) -> FolderDetailResponse:
+    invite = session.exec(
+        select(FolderInvite).where(
+            FolderInvite.invite_token == invite_token,
+            FolderInvite.is_active == True,  # noqa: E712
+        )
+    ).first()
+    if invite is None:
+        raise HTTPException(status_code=404, detail="Invite not found or no longer active.")
+
+    folder = session.get(VibeFolder, invite.folder_id)
+    if folder is None:
+        raise HTTPException(status_code=404, detail="Folder not found.")
+
+    user_id = int(user.id or 0)
+    if folder.user_id != user_id:
+        existing = session.exec(
+            select(FolderMember).where(
+                FolderMember.folder_id == invite.folder_id,
+                FolderMember.user_id == user_id,
+            )
+        ).first()
+        if existing is None:
+            session.add(
+                FolderMember(
+                    folder_id=invite.folder_id,
+                    user_id=user_id,
+                    invite_id=invite.id,
+                )
+            )
+            session.commit()
+
+    items = _folder_items_with_votes(session=session, folder_id=int(folder.id or 0))
+    return FolderDetailResponse(
+        id=int(folder.id or 0),
+        name=folder.name,
+        share_token=folder.share_token,
+        items=items,
+    )
+
+
 @router.post("/folders/{folder_id}/votes", response_model=FolderDetailResponse)
 def vote_on_folder_item(
     *,
@@ -218,7 +285,7 @@ def vote_on_folder_item(
     session: Session = Depends(get_session),
     user: User = Depends(get_current_user),
 ) -> FolderDetailResponse:
-    folder = _require_folder_owner(session=session, folder_id=folder_id, user_id=int(user.id or 0))
+    folder = _require_folder_access(session=session, folder_id=folder_id, user_id=int(user.id or 0))
     item = session.get(FolderItem, payload.folder_item_id)
     if item is None or item.folder_id != folder_id:
         raise HTTPException(status_code=404, detail="Folder item not found.")
@@ -265,7 +332,7 @@ def get_folder_detail(
     session: Session = Depends(get_session),
     user: User = Depends(get_current_user),
 ) -> FolderDetailResponse:
-    folder = _require_folder_owner(session=session, folder_id=folder_id, user_id=int(user.id or 0))
+    folder = _require_folder_access(session=session, folder_id=folder_id, user_id=int(user.id or 0))
     items = _folder_items_with_votes(session=session, folder_id=folder_id)
     return FolderDetailResponse(
         id=int(folder.id or 0),

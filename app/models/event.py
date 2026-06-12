@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Any, Optional
 
 from geoalchemy2 import Geometry
-from sqlalchemy import JSON, Column, DateTime, Integer, Numeric, String, func
+from sqlalchemy import JSON, Boolean, Column, DateTime, Float, Integer, Numeric, String, func
 from sqlmodel import Field, SQLModel
 
 
@@ -61,6 +61,22 @@ class Event(SQLModel, table=True):
     status: str = Field(
         default="scheduled",
         sa_column=Column(String(length=50), nullable=False, server_default="scheduled"),
+    )
+    organizer_name: Optional[str] = Field(
+        default=None,
+        sa_column=Column(String(length=255), nullable=True),
+    )
+    attendee_count: int = Field(
+        default=0,
+        sa_column=Column(Integer, nullable=False, server_default="0"),
+    )
+    location_confidence: float = Field(
+        default=1.0,
+        sa_column=Column(Float, nullable=False, server_default="1.0"),
+    )
+    is_free: bool = Field(
+        default=False,
+        sa_column=Column(Boolean, nullable=False, server_default="false"),
     )
     created_at: datetime = Field(
         sa_column=Column(DateTime(timezone=True), nullable=False, server_default=func.now())

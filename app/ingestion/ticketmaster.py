@@ -99,13 +99,15 @@ class TicketmasterSource(BaseSource):
             raise
         finally:
             try:
+                # 429s are transient (and retried with backoff in _get_json);
+                # quota exhaustion is tracked via usage counts, so never
+                # permanently disable a key here — there is no re-enable path.
                 get_secrets_store().report_usage(
                     provider="ticketmaster",
                     key_id=self._key_id,
                     calls=1,
                     last_status=status_code,
                     last_error=last_error,
-                    disable=(status_code == 429),
                 )
             except Exception:
                 pass

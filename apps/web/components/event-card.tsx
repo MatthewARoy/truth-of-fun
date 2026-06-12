@@ -1,9 +1,10 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState } from "react";
-import type { EventResponse } from "@truth-of-fun/api-client";
+import { ApiClientError, type EventResponse } from "@truth-of-fun/api-client";
 import { apiClient } from "@/lib/api/client";
-import { markFirstSave } from "@/lib/ux-metrics";
+import { useAuth } from "@/lib/auth-context";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -21,21 +22,35 @@ type Props = {
 };
 
 export function EventCard({ event, showRecommendationFields, folderOptions = [], onAddToFolder }: Props) {
+  const { token } = useAuth();
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [needsSignIn, setNeedsSignIn] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [selectedFolderId, setSelectedFolderId] = useState<string>("");
 
   const startLabel = useMemo(() => new Date(event.start_at).toLocaleString(), [event.start_at]);
 
+  function isAuthError(err: unknown): boolean {
+    return err instanceof ApiClientError && err.status === 401;
+  }
+
   async function handleAction(action: "save" | "click" | "external_ticket_click") {
+    if (!token) {
+      // Anonymous visitors get a sign-in prompt instead of a backend error.
+      // Ticket clicks skip tracking quietly so the external link still opens.
+      if (action !== "external_ticket_click") {
+        setStatus(null);
+        setError(null);
+        setNeedsSignIn(true);
+      }
+      return;
+    }
     setBusyAction(action);
     setError(null);
+    setNeedsSignIn(false);
     try {
       await apiClient.updateInterests({ action, event_id: event.id });
-      if (action === "save") {
-        markFirstSave();
-      }
       setStatus(
         action === "save"
           ? "Saved to your profile."
@@ -44,20 +59,35 @@ export function EventCard({ event, showRecommendationFields, folderOptions = [],
             : "Tracked ticket click."
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not update event action.");
+      if (isAuthError(err)) {
+        setNeedsSignIn(true);
+      } else {
+        setError(err instanceof Error ? err.message : "Could not update event action.");
+      }
     } finally {
       setBusyAction(null);
     }
   }
 
   async function handleLike(tag: string) {
+    if (!token) {
+      setStatus(null);
+      setError(null);
+      setNeedsSignIn(true);
+      return;
+    }
     setBusyAction(`like-${tag}`);
     setError(null);
+    setNeedsSignIn(false);
     try {
       await apiClient.updateInterests({ action: "like", vibe_tag: tag });
       setStatus(`Added ${tag} to your preferences.`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not update preferences.");
+      if (isAuthError(err)) {
+        setNeedsSignIn(true);
+      } else {
+        setError(err instanceof Error ? err.message : "Could not update preferences.");
+      }
     } finally {
       setBusyAction(null);
     }
@@ -111,8 +141,8 @@ export function EventCard({ event, showRecommendationFields, folderOptions = [],
 
       <p className="text-sm text-slate-300 line-clamp-3">{event.description || "No description available."}</p>
 
-      {event.friends_interested > 0 ? (
-        <p className="text-sm text-slate-400">Friends interested: {event.friends_interested}</p>
+      {event.people_interested > 0 ? (
+        <p className="text-sm text-slate-400">People interested: {event.people_interested}</p>
       ) : null}
 
       {showRecommendationFields && !event.image_url ? (
@@ -200,6 +230,11 @@ export function EventCard({ event, showRecommendationFields, folderOptions = [],
         </div>
       ) : null}
 
+      {needsSignIn ? (
+        <InlineNotice tone="info">
+          <Link href="/login">Sign in</Link> to save events and personalize your feed.
+        </InlineNotice>
+      ) : null}
       {status ? <InlineNotice tone="success">{status}</InlineNotice> : null}
       {error ? <InlineNotice tone="error">{error}</InlineNotice> : null}
       </div>
