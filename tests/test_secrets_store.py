@@ -126,3 +126,47 @@ def test_report_usage_marks_exhausted_when_crossing_quota() -> None:
 
     health = {item.key_id: item for item in store.health("ticketmaster")}
     assert health["key-a"].status == "exhausted"
+
+
+def test_reset_exhausted_keys_reactivates_after_quota_window() -> None:
+    store = SecretsStore(settings=_settings(), redis_client=_FakeRedis())
+    store.seed_key(provider="ticketmaster", key_id="key-a", api_key="api-a", quota_limit=3)
+    store.report_usage(provider="ticketmaster", key_id="key-a", calls=3)
+
+    exhausted_at = {h.key_id: h for h in store.health("ticketmaster")}["key-a"].updated_at_epoch
+    window = 3600
+
+    # Still inside the quota window: nothing is reset.
+    assert (
+        store.reset_exhausted_keys(
+            "ticketmaster", window_seconds=window, now=exhausted_at + window - 1
+        )
+        == []
+    )
+    assert {h.key_id: h.status for h in store.health("ticketmaster")}["key-a"] == "exhausted"
+
+    # Window has elapsed: the key reactivates with its usage cleared.
+    reset = store.reset_exhausted_keys(
+        "ticketmaster", window_seconds=window, now=exhausted_at + window
+    )
+    assert reset == ["key-a"]
+    refreshed = {h.key_id: h for h in store.health("ticketmaster")}
+    assert refreshed["key-a"].status == "active"
+    assert refreshed["key-a"].usage_count == 0
+    # And it can be leased again.
+    assert store.get_active_key("ticketmaster").key_id == "key-a"
+
+
+def test_reset_exhausted_keys_leaves_disabled_keys_untouched() -> None:
+    store = SecretsStore(settings=_settings(), redis_client=_FakeRedis())
+    store.seed_key(provider="ticketmaster", key_id="key-a", api_key="api-a", quota_limit=10)
+    # Deliberately disabled keys must not be auto-reactivated by quota windows.
+    store.report_usage(provider="ticketmaster", key_id="key-a", disable=True)
+    disabled_at = {h.key_id: h for h in store.health("ticketmaster")}["key-a"].updated_at_epoch
+
+    reset = store.reset_exhausted_keys(
+        "ticketmaster", window_seconds=1, now=disabled_at + 10_000
+    )
+
+    assert reset == []
+    assert {h.key_id: h.status for h in store.health("ticketmaster")}["key-a"] == "disabled"

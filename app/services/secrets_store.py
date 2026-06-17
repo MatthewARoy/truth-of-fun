@@ -182,6 +182,43 @@ class SecretsStore:
             },
         )
 
+    def reset_exhausted_keys(
+        self, provider: str, *, window_seconds: int, now: int | None = None
+    ) -> list[str]:
+        """Reactivate keys whose quota window has elapsed since they exhausted.
+
+        Quota limits are rate windows (e.g. a daily cap), so an exhausted key
+        becomes usable again once the window rolls over. We treat
+        ``updated_at_epoch`` as the moment of exhaustion (an exhausted key is no
+        longer leased, so its timestamp stops advancing). Only ``exhausted`` keys
+        are eligible — ``disabled`` keys were turned off deliberately and are left
+        alone. Returns the key_ids that were reactivated.
+        """
+        if window_seconds <= 0:
+            return []
+        normalized_provider = provider.strip().lower()
+        current = now if now is not None else int(time.time())
+        reset_ids: list[str] = []
+        for key_id in sorted(self._redis.smembers(self._ids_key(normalized_provider))):
+            key_hash = self._key_hash(normalized_provider, key_id)
+            payload = self._redis.hgetall(key_hash)
+            if not payload or payload.get("status") != "exhausted":
+                continue
+            exhausted_at = self._coerce_int(payload.get("updated_at_epoch"), 0)
+            if current - exhausted_at < window_seconds:
+                continue
+            self._redis.hset(
+                key_hash,
+                mapping={
+                    "usage_count": 0,
+                    "status": "active",
+                    "last_error": "",
+                    "updated_at_epoch": current,
+                },
+            )
+            reset_ids.append(key_id)
+        return reset_ids
+
     def health(self, provider: str) -> list[KeyHealth]:
         normalized_provider = provider.strip().lower()
         key_ids = sorted(self._redis.smembers(self._ids_key(normalized_provider)))
@@ -237,6 +274,11 @@ class NoopSecretsStore(SecretsStore):
         disable: bool = False,
     ) -> None:
         return
+
+    def reset_exhausted_keys(
+        self, provider: str, *, window_seconds: int, now: int | None = None
+    ) -> list[str]:
+        return []
 
     def health(self, provider: str) -> list[KeyHealth]:
         return []

@@ -121,6 +121,13 @@ class Settings(BaseSettings):
         default=10000,
         description="Default quota threshold for Ticketmaster keys in AAIM store.",
     )
+    aaim_quota_window_hours: int = Field(
+        default=24,
+        description=(
+            "Hours after which an exhausted AAIM key auto-reactivates (its quota "
+            "window rolls over). 0 disables automatic reset."
+        ),
+    )
 
     def get_proxy_for_scraper(self) -> str | None:
         """Return proxy URL for scraper. Supports rotation via proxy_rotation list."""

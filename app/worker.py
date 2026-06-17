@@ -68,6 +68,7 @@ class IngestionWorker:
         session_factory: Callable[[], Session] | None = None,
         source_registry: Any = None,
         canary_history_size: int = 5,
+        quota_window_hours: int | None = None,
     ) -> None:
         self._run_interval_seconds = run_interval_seconds
         self._pipeline_service = pipeline_service or DataPipelineService()
@@ -77,6 +78,11 @@ class IngestionWorker:
             lambda: deque(maxlen=canary_history_size)
         )
         self._pending_alerts: list[tuple[str, str, str]] = []
+        self._quota_window_hours = (
+            quota_window_hours
+            if quota_window_hours is not None
+            else get_settings().aaim_quota_window_hours
+        )
 
     async def run_forever(self) -> None:
         logger.info(
@@ -91,6 +97,10 @@ class IngestionWorker:
         started_at = datetime.now(timezone.utc)
         all_events: list[dict[str, Any]] = []
         per_source_counts: dict[str, int] = {}
+
+        # Roll over quota windows before fetching so a key whose daily cap has
+        # reset is available again for this run.
+        self._reset_quota_exhausted_keys()
 
         for source_name in self._registry.list_sources():
             source: SourceLike | None = None
@@ -230,6 +240,29 @@ class IngestionWorker:
             "status": status,
             "consecutive_zeros": consecutive_zeros,
         }
+
+    def _reset_quota_exhausted_keys(self) -> None:
+        """Auto-reactivate AAIM keys whose quota window has rolled over.
+
+        Replaces the manual redis-cli recovery: exhausted keys come back on
+        their own once ``aaim_quota_window_hours`` have passed.
+        """
+        if self._quota_window_hours <= 0:
+            return
+        window_seconds = self._quota_window_hours * 3600
+        try:
+            reset_ids = get_secrets_store().reset_exhausted_keys(
+                "ticketmaster", window_seconds=window_seconds
+            )
+        except Exception:
+            logger.debug("AAIM quota-window reset skipped.")
+            return
+        if reset_ids:
+            logger.info(
+                "AAIM quota-window reset: reactivated %s ticketmaster key(s): %s",
+                len(reset_ids),
+                ", ".join(reset_ids),
+            )
 
     def _log_quota_health(self, *, source_name: str) -> None:
         if source_name != "ticketmaster":
