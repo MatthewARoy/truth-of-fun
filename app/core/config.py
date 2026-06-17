@@ -23,6 +23,14 @@ class Settings(BaseSettings):
     )
     ticketmaster_api_key: str | None = None
     anthropic_api_key: str | None = None
+    # Reddit OAuth ("script" app). Anonymous JSON access is now blocked (403),
+    # so live Reddit ingestion requires a registered app's client id + secret.
+    reddit_client_id: str | None = None
+    reddit_client_secret: str | None = None
+    reddit_user_agent: str = Field(
+        default="truth-of-fun/0.1 (event discovery; +https://github.com/MatthewARoy/truth-of-fun)",
+        description="Reddit requires a unique, descriptive User-Agent on every request.",
+    )
     worker_interval_seconds: int = Field(
         default=6 * 60 * 60,
         description="Ingestion worker polling interval in seconds",

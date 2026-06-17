@@ -27,6 +27,13 @@ DEFAULT_SF_LON = -122.4194
 _LLM_MODEL = "claude-haiku-4-5-20251001"
 _LLM_CONFIDENCE_THRESHOLD = 0.5
 
+# Sentinel so callers can explicitly pass client_id=None to disable OAuth,
+# distinct from "not provided" (fall back to settings).
+_UNSET: Any = object()
+
+_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
+_OAUTH_BASE = "https://oauth.reddit.com"
+
 _EXTRACTION_PROMPT = """\
 You extract real-world event announcements from Reddit posts.
 
@@ -54,13 +61,29 @@ class RedditSource(InputAgentSource):
     keywords = ("weekend events", "what to do", "happenings")
     subreddits = ("AskSF", "bayarea", "sanfrancisco")
 
-    def __init__(self, *, llm_client: Any | None = None, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *,
+        llm_client: Any | None = None,
+        client_id: str | None = _UNSET,
+        client_secret: str | None = _UNSET,
+        user_agent: str | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
+        settings = get_settings()
         if llm_client is not None:
             self._llm_client = llm_client
         else:
-            api_key = get_settings().anthropic_api_key
+            api_key = settings.anthropic_api_key
             self._llm_client = anthropic.AsyncAnthropic(api_key=api_key) if api_key else None
+        self._client_id = settings.reddit_client_id if client_id is _UNSET else client_id
+        self._client_secret = (
+            settings.reddit_client_secret if client_secret is _UNSET else client_secret
+        )
+        self._user_agent = user_agent or settings.reddit_user_agent
+        self._access_token: str | None = None
+        self._warned_no_creds = False
 
     async def discover_candidates(self, **kwargs: Any) -> list[Any]:
         comments = kwargs.get("comments")
@@ -201,10 +224,40 @@ class RedditSource(InputAgentSource):
             "start_time": start_time,
         }
 
+    async def _get_access_token(self) -> str | None:
+        """Application-only OAuth (client_credentials grant). Cached on the instance."""
+        if self._access_token is not None:
+            return self._access_token
+        if not (self._client_id and self._client_secret):
+            return None
+        await self._limiter.acquire()
+        response = await self._get_client().post(
+            _TOKEN_URL,
+            data={"grant_type": "client_credentials"},
+            auth=(self._client_id, self._client_secret),
+            headers={"User-Agent": self._user_agent},
+        )
+        response.raise_for_status()
+        token = response.json().get("access_token")
+        self._access_token = token if isinstance(token, str) and token else None
+        return self._access_token
+
     async def _search_subreddit(self, *, subreddit: str, keyword: str) -> list[dict[str, Any]]:
+        token = await self._get_access_token()
+        if token is None:
+            # Anonymous Reddit access is blocked (403); without OAuth creds we
+            # skip the live search rather than crashing the ingestion cycle.
+            if not self._warned_no_creds:
+                logger.warning(
+                    "Reddit source disabled: set REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET "
+                    "to enable live ingestion."
+                )
+                self._warned_no_creds = True
+            return []
+
         await self._limiter.acquire()
         response = await self._get_client().get(
-            f"https://www.reddit.com/r/{subreddit}/search.json",
+            f"{_OAUTH_BASE}/r/{subreddit}/search",
             params={
                 "q": keyword,
                 "restrict_sr": "on",
@@ -212,7 +265,7 @@ class RedditSource(InputAgentSource):
                 "t": "week",
                 "limit": 25,
             },
-            headers={"User-Agent": "truth-of-fun/0.1"},
+            headers={"Authorization": f"Bearer {token}", "User-Agent": self._user_agent},
         )
         response.raise_for_status()
         payload = response.json()
