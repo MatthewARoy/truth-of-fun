@@ -1,16 +1,20 @@
 """FuncheapSF Tier 2 scraper using Playwright with stealth."""
 
+import logging
 import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
 
 from app.core.config import get_settings
 from app.ingestion.base import BaseSource
 from app.ingestion.venue_cache import lookup_venue_coordinates
+
+logger = logging.getLogger(__name__)
 
 SF_TZ = ZoneInfo("America/Los_Angeles")
 DEFAULT_SF_LAT = 37.7749
@@ -52,6 +56,21 @@ class FuncheapSFSource(BaseSource):
             self._playwright = None
         await super().close()
 
+    @staticmethod
+    async def _wait_for_content(page: Any, selector: str, *, timeout: int) -> None:
+        """Wait for real content to appear without depending on a quiet network.
+
+        funcheapsf.com keeps ads/trackers/long-polling requests in flight, so
+        ``wait_for_load_state("networkidle")`` never resolves and used to abort the
+        scrape. We wait for the content selector instead and swallow timeouts: the
+        page is already at ``domcontentloaded`` from ``goto``, so proceeding on a
+        timeout is safe and lets the downstream selectors do the validation.
+        """
+        try:
+            await page.wait_for_selector(selector, timeout=timeout)
+        except PlaywrightTimeoutError:
+            pass
+
     async def fetch_events(
         self,
         *,
@@ -82,19 +101,46 @@ class FuncheapSFSource(BaseSource):
 
         try:
             event_links: list[str] = []
-            await page.goto(self.events_url, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_load_state("networkidle", timeout=10000)
+            try:
+                await page.goto(
+                    self.events_url, wait_until="domcontentloaded", timeout=30000
+                )
+                # FuncheapSF runs ads/trackers/long-polling that never let the network go
+                # idle, so we wait for the actual content to appear instead of
+                # "networkidle" and treat any settle timeout as best-effort (proceed,
+                # never abort). The events URL redirects to sf.funcheap.com.
+                await self._wait_for_content(
+                    page, "a[href*='funcheap.com']", timeout=15000
+                )
 
-            links = await page.locator(
-                "a[href*='sf.funcheap.com'][href*='/']"
-            ).evaluate_all(
-                """els => els
-                    .map(a => a.href)
-                    .filter(h => /sf\\.funcheap\\.com\\/[^/]+\\/?$/.test(h) && !h.includes('/category/') && !h.includes('/venue/') && !h.includes('/region/') && !h.includes('/city-guide/') && !h.includes('/wp-') && !h.includes('/2026/') && !h.includes('/feed'))
-                    .filter((v, i, a) => a.indexOf(v) === i)
-                    .slice(0, 50)
-                """
-            )
+                # Single-segment slugs that are site navigation, not event pages; skip
+                # them so the detail-page budget is spent on real events (they would all
+                # be dropped anyway for having no single-event date).
+                nav_slug_re = (
+                    "/(events|free-events|today|weekend|win|subscribe|submit-form|about|"
+                    "privacy-policy|terms-service|dmca-requests|contact|advertise|"
+                    "newsletter|free-museum-days|add-event)/?$"
+                )
+                links = await page.locator(
+                    "a[href*='sf.funcheap.com'][href*='/']"
+                ).evaluate_all(
+                    """(els, navSlug) => els
+                        .map(a => a.href)
+                        .filter(h => /sf\\.funcheap\\.com\\/[^/]+\\/?$/.test(h) && !h.includes('/category/') && !h.includes('/venue/') && !h.includes('/region/') && !h.includes('/city-guide/') && !h.includes('/wp-') && !h.includes('/2026/') && !h.includes('/feed') && !new RegExp(navSlug).test(h))
+                        .filter((v, i, a) => a.indexOf(v) === i)
+                        .slice(0, 50)
+                    """,
+                    nav_slug_re,
+                )
+            except PlaywrightTimeoutError as exc:
+                # Hard navigation failure (e.g. an anti-bot challenge stealth can't pass).
+                # Fail gracefully rather than raising: no fabricated events.
+                logger.warning(
+                    "funcheap_sf: could not load %s (%s); returning no events.",
+                    self.events_url,
+                    exc,
+                )
+                return []
             event_links = links[:max_detail_pages]
 
             canonical: list[dict[str, Any]] = []
@@ -118,21 +164,23 @@ class FuncheapSFSource(BaseSource):
 
     async def _scrape_event_detail(self, page: Any, url: str) -> dict[str, Any] | None:
         await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-        await page.wait_for_load_state("networkidle", timeout=8000)
+        # The event title (an <h1>) is the cheapest reliable "page is ready" signal;
+        # wait for it instead of an unsettleable networkidle (see _wait_for_content).
+        await self._wait_for_content(page, "h1", timeout=10000)
 
-        title_el = page.locator("h1.entry-title, h1.post-title, article h1").first
+        title_el = page.locator("h1.entry-title, h1.post-title, article h1, h1").first
         title = await title_el.text_content() if await title_el.count() else None
         if not title or not title.strip():
             return None
 
         title = title.strip()
 
-        date_text = ""
-        date_el = page.locator(
-            ".event-date, .entry-meta .date, .event-details, .event-info, .event-meta"
-        ).first
-        if await date_el.count():
-            date_text = (await date_el.text_content()) or ""
+        # The single-event detail block (date, time, cost, venue, address) lives in the
+        # container that wraps the ".cost" element, e.g. <span class="left">. Reading the
+        # whole block in one shot is resilient to the per-field class churn the site has
+        # gone through, and listing/nav pages (no real single-event date) yield no block
+        # and get dropped by _parse_date_and_time below.
+        detail_text = await self._read_detail_block(page)
 
         venue_name = None
         venue_el = page.locator(
@@ -142,13 +190,7 @@ class FuncheapSFSource(BaseSource):
             venue_name = (await venue_el.text_content()) or ""
             venue_name = venue_name.strip() or None
 
-        raw_address = None
-        addr_el = page.locator(
-            ".address, .event-address, .venue-address, [class*='address']"
-        ).first
-        if await addr_el.count():
-            raw_address = (await addr_el.text_content()) or ""
-            raw_address = raw_address.strip() or None
+        raw_address = self._extract_address(detail_text)
         if not raw_address and venue_name:
             raw_address = f"{venue_name}, San Francisco, CA"
 
@@ -159,12 +201,15 @@ class FuncheapSFSource(BaseSource):
         if await cost_el.count():
             cost_text = (await cost_el.text_content()) or ""
 
-        full_text = f"{date_text} {cost_text}"
+        # date_text drives relative-date and absolute-date detection; full_text additionally
+        # carries the time/cost. The detail block holds the canonical date string.
+        date_text = detail_text or cost_text
+        full_text = f"{detail_text} {cost_text}"
         start_at, end_at = self._parse_date_and_time(full_text, date_text)
         if start_at is None:
             return None
 
-        price, currency = self._parse_cost(cost_text)
+        price, currency = self._parse_cost(cost_text or detail_text)
 
         source_event_id = url.rstrip("/").split("/")[-1] or url
 
@@ -191,6 +236,44 @@ class FuncheapSFSource(BaseSource):
             "image_url": None,
             "status": "scheduled",
         }
+
+    @staticmethod
+    async def _read_detail_block(page: Any) -> str:
+        """Return the event-detail text block (date/time/cost/venue/address) as one string.
+
+        The block is the container wrapping the ".cost" element. Returns "" when the page
+        has no such block (e.g. listing/nav pages), which the caller treats as "no date".
+        """
+        try:
+            text = await page.evaluate(
+                """() => {
+                    const cost = document.querySelector('.cost');
+                    if (!cost) return '';
+                    const block = cost.closest('span.left, .single_event_details, p, div');
+                    return (block ? block.innerText : cost.innerText) || '';
+                }"""
+            )
+        except Exception:
+            return ""
+        return re.sub(r"\s+", " ", text or "").strip()
+
+    @staticmethod
+    def _extract_address(detail_text: str) -> str | None:
+        """Pull a street address out of the detail block, e.g. '1 Market Street, ...'.
+
+        The block formats the address as '... | <Venue> | <street>, <City>, CA ...'.
+        Returns None when no street-like segment is present (never fabricated).
+        """
+        if not detail_text:
+            return None
+        # Find a segment that starts with a street number and runs to a state abbrev.
+        m = re.search(
+            r"(\d{1,6}\s+[^|]*?,\s*[A-Za-z .]+,\s*[A-Z]{2}(?:\s+\d{5})?)",
+            detail_text,
+        )
+        if m:
+            return m.group(1).strip()
+        return None
 
     def _parse_date_and_time(
         self, full_text: str, date_text: str

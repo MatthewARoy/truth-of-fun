@@ -92,3 +92,50 @@ def test_parse_cost_decimal() -> None:
     price, currency = source._parse_cost("$25.50")
     assert price == 25.5
     assert currency == "USD"
+
+
+def test_parse_live_detail_block_single_time() -> None:
+    """The live single-line detail block ('<date> - <time> | Cost: ...') parses."""
+    source = FuncheapSFSource(proxy=None)
+    # Shape of the real ".cost"-container block scraped from sf.funcheap.com.
+    block = (
+        "Monday, June 15, 2026 - 6:00 pm | Cost: FREE Book Passage (Corte Madera) "
+        "| 51 Tamal Vista Blvd. Corte Madera, CA Corte MaderaNorth Bay"
+    )
+    start, end = source._parse_date_and_time(block, block)
+    # June 15, 2026 is PDT (UTC-7): 6:00pm = 1:00am UTC next day. No end time given.
+    assert start == datetime(2026, 6, 16, 1, 0, tzinfo=timezone.utc)
+    assert end is None
+
+
+def test_parse_live_detail_block_with_time_range() -> None:
+    """The live detail block with a 'to' time range parses a distinct end time."""
+    source = FuncheapSFSource(proxy=None)
+    block = (
+        "Saturday, June 20, 2026 - 11:00 am to 3:30 pm | Cost: FREE One Market Plaza "
+        "| 1 Market Street, San Francisco, CA Financial DistrictSan Francisco"
+    )
+    start, end = source._parse_date_and_time(block, block)
+    # June 20, 2026 is PDT (UTC-7): 11:00am = 6:00pm UTC; 3:30pm = 10:30pm UTC.
+    assert start == datetime(2026, 6, 20, 18, 0, tzinfo=timezone.utc)
+    assert end == datetime(2026, 6, 20, 22, 30, tzinfo=timezone.utc)
+
+
+def test_extract_address_from_detail_block() -> None:
+    """A street address embedded in the detail block is extracted verbatim."""
+    source = FuncheapSFSource(proxy=None)
+    block = (
+        "Monday, June 15, 2026 - 7:00 pm to 2:00 am | Cost: FREE* Madrone Art Bar "
+        "| 500 Divisadero Street, San Francisco, CA 94117 NoPaSan Francisco"
+    )
+    assert (
+        source._extract_address(block)
+        == "500 Divisadero Street, San Francisco, CA 94117"
+    )
+
+
+def test_extract_address_none_when_no_street() -> None:
+    """No street address in the block => None, never fabricated."""
+    source = FuncheapSFSource(proxy=None)
+    assert source._extract_address("Monday, June 15, 2026 - 7:00 pm | Cost: FREE") is None
+    assert source._extract_address("") is None
