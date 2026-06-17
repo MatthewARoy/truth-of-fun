@@ -30,3 +30,6 @@ coverage/
 
 # Internal-only docs (not for public repo)
 docs/internal/
+
+# Scratch / working notes (handoffs, etc.)
+tmp/

@@ -150,7 +150,7 @@ All runtime config is read from environment variables — see [`.env.example`](.
 .venv/bin/pytest                   # backend (30 test files)
 npm run web:typecheck              # web type check
 npm run web:lint                   # web lint
-npm run web:test                   # web route smoke tests (Playwright; auto-starts the Next dev server, no backend needed)
+npm run web:test                   # web route + interaction tests (Playwright; auto-starts the Next dev server, no backend needed)
 ```
 
 The backend suite is hermetic except for one database integration test (`tests/test_health_db.py`), which skips automatically when Postgres isn't running (`make db-up` to include it). CI runs the full suite against a PostGIS service container.
