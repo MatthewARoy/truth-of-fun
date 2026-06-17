@@ -196,6 +196,12 @@ export class TruthOfFunApiClient {
     });
   }
 
+  async revokeFolderInvite(folderId: number, inviteToken: string): Promise<void> {
+    await this.request<void>(`/folders/${folderId}/invites/${inviteToken}`, {
+      method: "DELETE",
+    });
+  }
+
   async acceptFolderInvite(inviteToken: string): Promise<FolderDetailResponse> {
     return this.request<FolderDetailResponse>(
       `/folders/invites/${inviteToken}/accept`,

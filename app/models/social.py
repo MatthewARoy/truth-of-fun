@@ -110,6 +110,10 @@ class FolderInvite(SQLModel, table=True):
         sa_column=Column(String(length=64), nullable=False, unique=True, index=True)
     )
     is_active: bool = Field(sa_column=Column(Boolean, nullable=False, server_default="true"))
+    expires_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
     created_at: datetime = Field(
         sa_column=Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     )

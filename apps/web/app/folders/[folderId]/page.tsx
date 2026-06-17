@@ -100,6 +100,18 @@ export default function FolderDetailPage() {
     }
   }
 
+  async function revokeInvite() {
+    if (!invite) return;
+    setError(null);
+    setCopied(false);
+    try {
+      await apiClient.revokeFolderInvite(folderId, invite.invite_token);
+      setInvite(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unknown error");
+    }
+  }
+
   // Share links leave the app, so they need the full origin, not a relative path.
   const absoluteShareUrl =
     invite && typeof window !== "undefined"
@@ -139,10 +151,18 @@ export default function FolderDetailPage() {
                 <Button type="button" variant="ghost" size="sm" onClick={() => void copyInviteLink()}>
                   {copied ? "Copied" : "Copy link"}
                 </Button>
+                <Button type="button" variant="ghost" size="sm" onClick={() => void revokeInvite()}>
+                  Revoke
+                </Button>
               </div>
               <p className="break-all text-slate-400">
                 View-only link: <Link href={invite.share_url}>{absoluteShareUrl}</Link>
               </p>
+              {invite.expires_at ? (
+                <p className="text-slate-400">
+                  Expires {new Date(invite.expires_at).toLocaleDateString()}
+                </p>
+              ) : null}
             </div>
           ) : null}
           {folder.items.length === 0 ? <InlineNotice>No items yet.</InlineNotice> : null}
