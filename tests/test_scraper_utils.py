@@ -54,6 +54,27 @@ def test_parse_date_range() -> None:
     assert end.day == 28
 
 
+def test_parse_date_range_explicit_year_per_endpoint() -> None:
+    # A long-running installation carries an explicit year on each endpoint.
+    # Single-trailing-year parsing can't represent a multi-year span, so these
+    # were previously dropped entirely.
+    start, end = parse_date_range("Nov 14, 2025–Jan 10, 2027")
+    assert start is not None
+    assert end is not None
+    assert (start.year, start.month, start.day) == (2025, 11, 14)
+    assert (end.year, end.month, end.day) == (2027, 1, 10)
+
+
+def test_parse_date_range_single_trailing_year_wraps_into_next_year() -> None:
+    # A single trailing year applies to both endpoints; a Dec->Jan span wraps
+    # the end into the following year. (Regression guard for the inferred-year path.)
+    start, end = parse_date_range("Dec 20–Jan 15, 2026")
+    assert start is not None
+    assert end is not None
+    assert (start.year, start.month, start.day) == (2026, 12, 20)
+    assert (end.year, end.month, end.day) == (2027, 1, 15)
+
+
 def test_pick_first_str() -> None:
     assert pick_first_str({"a": "x", "b": "y"}, "c", "a") == "x"
     assert pick_first_str({"a": "", "b": "y"}, "a", "b") == "y"

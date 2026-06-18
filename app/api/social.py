@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Response
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlmodel import Session, select
@@ -13,7 +13,10 @@ from app.models.event import Event
 from app.models.social import FolderInvite, FolderItem, FolderMember, FolderVote, VibeFolder
 from app.models.user import User
 from app.services.social import (
+    DEFAULT_INVITE_TTL_DAYS,
+    compute_invite_expiry,
     generate_share_token,
+    is_invite_expired,
     is_valid_share_token,
     normalize_vote_value,
     upsert_vote_value,
@@ -33,6 +36,11 @@ class AddFolderItemRequest(BaseModel):
 class VoteRequest(BaseModel):
     folder_item_id: int
     vote_value: int
+
+
+class CreateInviteRequest(BaseModel):
+    # Days until the invite expires. 0 or null creates a non-expiring invite.
+    expires_in_days: int | None = DEFAULT_INVITE_TTL_DAYS
 
 
 class FolderResponse(BaseModel):
@@ -60,6 +68,7 @@ class InviteResponse(BaseModel):
     folder_id: int
     invite_token: str
     share_url: str
+    expires_at: datetime | None
 
 
 def _require_folder_owner(*, session: Session, folder_id: int, user_id: int) -> VibeFolder:
@@ -208,16 +217,20 @@ def add_folder_item(
 def create_folder_invite(
     *,
     folder_id: int,
+    payload: CreateInviteRequest | None = Body(default=None),
     session: Session = Depends(get_session),
     user: User = Depends(get_current_user),
 ) -> InviteResponse:
     folder = _require_folder_owner(session=session, folder_id=folder_id, user_id=int(user.id or 0))
 
+    ttl_days = payload.expires_in_days if payload is not None else DEFAULT_INVITE_TTL_DAYS
+    created_at = datetime.now(timezone.utc)
     invite = FolderInvite(
         folder_id=folder_id,
         created_by_user_id=int(user.id or 0),
         invite_token=generate_share_token(),
         is_active=True,
+        expires_at=compute_invite_expiry(created_at=created_at, ttl_days=ttl_days),
     )
     session.add(invite)
     session.commit()
@@ -227,7 +240,35 @@ def create_folder_invite(
         folder_id=folder_id,
         invite_token=invite.invite_token,
         share_url=f"/shared/folders/{folder.share_token}",
+        expires_at=invite.expires_at,
     )
+
+
+@router.delete("/folders/{folder_id}/invites/{invite_token}", status_code=204)
+def revoke_folder_invite(
+    *,
+    folder_id: int,
+    invite_token: str,
+    session: Session = Depends(get_session),
+    user: User = Depends(get_current_user),
+) -> Response:
+    """Owner-only: deactivate an invite so the link can no longer be accepted."""
+    _require_folder_owner(session=session, folder_id=folder_id, user_id=int(user.id or 0))
+
+    invite = session.exec(
+        select(FolderInvite).where(
+            FolderInvite.invite_token == invite_token,
+            FolderInvite.folder_id == folder_id,
+        )
+    ).first()
+    if invite is None:
+        raise HTTPException(status_code=404, detail="Invite not found.")
+
+    if invite.is_active:
+        invite.is_active = False
+        session.add(invite)
+        session.commit()
+    return Response(status_code=204)
 
 
 @router.post("/folders/invites/{invite_token}/accept", response_model=FolderDetailResponse)
@@ -245,6 +286,8 @@ def accept_folder_invite(
     ).first()
     if invite is None:
         raise HTTPException(status_code=404, detail="Invite not found or no longer active.")
+    if is_invite_expired(invite.expires_at, now=datetime.now(timezone.utc)):
+        raise HTTPException(status_code=410, detail="Invite has expired.")
 
     folder = session.get(VibeFolder, invite.folder_id)
     if folder is None:

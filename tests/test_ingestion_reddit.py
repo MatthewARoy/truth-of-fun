@@ -118,3 +118,65 @@ def test_llm_rejection_drops_the_post() -> None:
 
     raw = asyncio.run(source.extract_candidate(_post()))
     assert raw is None or source.normalize_raw(raw) is None
+
+
+# --- OAuth live-search path (Reddit now blocks anonymous JSON) ---
+
+import httpx
+import pytest
+
+
+def _oauth_transport(captured):
+    """MockTransport: serves the token endpoint and the OAuth search endpoint."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if request.url.path == "/api/v1/access_token":
+            assert request.url.host == "www.reddit.com"
+            assert request.headers.get("Authorization", "").startswith("Basic ")
+            return httpx.Response(200, json={"access_token": "tok-123", "expires_in": 3600})
+        if "/search" in request.url.path:
+            assert request.url.host == "oauth.reddit.com"
+            assert request.headers.get("Authorization") == "Bearer tok-123"
+            return httpx.Response(200, json={
+                "data": {"children": [
+                    {"kind": "t3", "data": {"id": "p1", "subreddit": "AskSF",
+                                             "title": "Show at The Knockout this Friday 8pm",
+                                             "selftext": "Come to The Knockout this Friday 8pm.",
+                                             "permalink": "/r/AskSF/comments/p1/x/", "score": 5}},
+                ]}
+            })
+        return httpx.Response(404)
+    return httpx.MockTransport(handler)
+
+
+def test_search_returns_empty_without_oauth_credentials() -> None:
+    """No client id/secret => skip live search gracefully (never 403-crash)."""
+    source = RedditSource(client_id=None, client_secret=None)
+    results = asyncio.run(source._search_subreddit(subreddit="AskSF", keyword="events"))
+    assert results == []
+
+
+def test_search_uses_oauth_token_against_oauth_host() -> None:
+    captured: list[httpx.Request] = []
+    client = httpx.AsyncClient(transport=_oauth_transport(captured))
+    source = RedditSource(client_id="cid", client_secret="csecret", client=client)
+
+    results = asyncio.run(source._search_subreddit(subreddit="AskSF", keyword="events"))
+
+    assert len(results) == 1
+    assert results[0]["id"] == "p1"
+    paths = [r.url.path for r in captured]
+    assert "/api/v1/access_token" in paths
+    assert any("/search" in p for p in paths)
+
+
+def test_access_token_is_cached_across_searches() -> None:
+    captured: list[httpx.Request] = []
+    client = httpx.AsyncClient(transport=_oauth_transport(captured))
+    source = RedditSource(client_id="cid", client_secret="csecret", client=client)
+
+    asyncio.run(source._search_subreddit(subreddit="AskSF", keyword="a"))
+    asyncio.run(source._search_subreddit(subreddit="bayarea", keyword="b"))
+
+    token_calls = [r for r in captured if r.url.path == "/api/v1/access_token"]
+    assert len(token_calls) == 1  # fetched once, reused

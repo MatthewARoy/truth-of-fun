@@ -128,24 +128,41 @@ def parse_date_range(
         return None, None
     ref = reference_date or datetime.now(tz).date()
 
-    # Feb 14–Mar 28, 2026
+    # Feb 14–Mar 28, 2026 (single trailing year) or
+    # Nov 14, 2025–Jan 10, 2027 (explicit year per endpoint, spanning years)
     range_match = re.search(
-        r"([A-Za-z]{3})\s+(\d{1,2})\s*[–\-]\s*([A-Za-z]{3})\s+(\d{1,2})(?:,\s*(\d{4}))?",
+        r"([A-Za-z]{3})\s+(\d{1,2})(?:,\s*(\d{4}))?"
+        r"\s*[–\-]\s*"
+        r"([A-Za-z]{3})\s+(\d{1,2})(?:,\s*(\d{4}))?",
         text,
         re.IGNORECASE,
     )
     if range_match:
         m1 = MONTH_ABBREV.get(range_match.group(1).lower()[:3])
         d1 = int(range_match.group(2))
-        m2 = MONTH_ABBREV.get(range_match.group(3).lower()[:3])
-        d2 = int(range_match.group(4))
-        year = int(range_match.group(5)) if range_match.group(5) else ref.year
+        y1_raw = range_match.group(3)
+        m2 = MONTH_ABBREV.get(range_match.group(4).lower()[:3])
+        d2 = int(range_match.group(5))
+        y2_raw = range_match.group(6)
         if m1 and m2:
+            # An explicit year on either side is authoritative. A lone trailing
+            # (or leading) year applies to both endpoints.
+            if y1_raw and y2_raw:
+                year1, year2 = int(y1_raw), int(y2_raw)
+            elif y2_raw:
+                year1 = year2 = int(y2_raw)
+            elif y1_raw:
+                year1 = year2 = int(y1_raw)
+            else:
+                year1 = year2 = ref.year
+            both_years_explicit = bool(y1_raw and y2_raw)
             try:
-                start_d = date(year, m1, d1)
-                end_d = date(year, m2, d2)
-                if end_d < start_d:
-                    end_d = date(year + 1, m2, d2)
+                start_d = date(year1, m1, d1)
+                end_d = date(year2, m2, d2)
+                # Only wrap an *inferred* end year (e.g. Dec 20–Jan 15, 2026);
+                # never override two explicitly-stated years.
+                if end_d < start_d and not both_years_explicit:
+                    end_d = date(year2 + 1, m2, d2)
                 start_dt = datetime(start_d.year, start_d.month, start_d.day, 0, 0, 0, tzinfo=tz)
                 end_dt = datetime(end_d.year, end_d.month, end_d.day, 23, 59, 0, tzinfo=tz)
                 return start_dt, end_dt

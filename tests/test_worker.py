@@ -125,6 +125,70 @@ async def test_worker_logs_quota_warning_when_only_one_key_active(caplog: Any, m
     assert "AAIM quota health warning" in caplog.text
 
 
+async def test_worker_run_once_resets_quota_exhausted_keys(caplog: Any, monkeypatch: Any) -> None:
+    source = _FakeSource(source_name="ticketmaster", events=[_event("x")])
+    registry = _FakeRegistry({"ticketmaster": source})
+    worker = IngestionWorker(
+        source_registry=registry,
+        pipeline_service=_FakePipeline(),
+        session_factory=lambda: nullcontext(object()),
+        run_interval_seconds=1,
+        quota_window_hours=24,
+    )
+
+    class _FakeSecretsStore:
+        def __init__(self) -> None:
+            self.reset_calls: list[int] = []
+
+        def health(self, provider: str) -> list[Any]:
+            return []
+
+        def reset_exhausted_keys(self, provider: str, *, window_seconds: int, now: Any = None) -> list[str]:
+            self.reset_calls.append(window_seconds)
+            return ["key-a"]
+
+    store = _FakeSecretsStore()
+    monkeypatch.setattr("app.worker.get_secrets_store", lambda: store)
+
+    with caplog.at_level("INFO"):
+        await worker.run_once()
+
+    # The worker asked the store to roll over quota windows (24h -> 86400s) ...
+    assert store.reset_calls == [24 * 3600]
+    # ... and logged the recovery so operators can see it happened.
+    assert "quota-window reset" in caplog.text.lower()
+
+
+async def test_worker_skips_quota_reset_when_window_disabled(monkeypatch: Any) -> None:
+    source = _FakeSource(source_name="ticketmaster", events=[_event("x")])
+    registry = _FakeRegistry({"ticketmaster": source})
+    worker = IngestionWorker(
+        source_registry=registry,
+        pipeline_service=_FakePipeline(),
+        session_factory=lambda: nullcontext(object()),
+        run_interval_seconds=1,
+        quota_window_hours=0,
+    )
+
+    class _FakeSecretsStore:
+        def __init__(self) -> None:
+            self.reset_calls = 0
+
+        def health(self, provider: str) -> list[Any]:
+            return []
+
+        def reset_exhausted_keys(self, provider: str, *, window_seconds: int, now: Any = None) -> list[str]:
+            self.reset_calls += 1
+            return []
+
+    store = _FakeSecretsStore()
+    monkeypatch.setattr("app.worker.get_secrets_store", lambda: store)
+
+    await worker.run_once()
+
+    assert store.reset_calls == 0
+
+
 async def test_worker_persists_source_health_to_database() -> None:
     from sqlalchemy.pool import StaticPool
     from sqlmodel import Session, SQLModel, create_engine, select

@@ -173,6 +173,8 @@ To actually turn rotation on:
 
    On each fetch the Ticketmaster connector leases the active, under-quota key with the lowest `usage_count` and reports usage back; a key flips to `exhausted` at its quota and rotation moves to the next id in the set.
 
+   Quotas are rate windows, so exhausted keys recover automatically: at the start of every worker run, keys that have been `exhausted` for at least `AAIM_QUOTA_WINDOW_HOURS` (default `24`) have their `usage_count` cleared and `status` reset to `active`. Set `AAIM_QUOTA_WINDOW_HOURS=0` to disable auto-reset and recover keys manually instead. Deliberately `disabled` keys are never auto-reactivated.
+
 The worker and connectors need only `AAIM_ENABLED` + `REDIS_URL`. The `internal_secrets` HTTP endpoints additionally require the `AAIM_OIDC_*` / `AAIM_JWT_*` settings to authenticate callers.
 
 ## What's deliberately not done yet

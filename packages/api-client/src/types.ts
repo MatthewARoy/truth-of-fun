@@ -96,6 +96,7 @@ export type InviteResponse = {
   folder_id: number;
   invite_token: string;
   share_url: string;
+  expires_at: string | null;
 };
 
 export type EventsQuery = {
