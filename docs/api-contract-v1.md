@@ -126,6 +126,7 @@ Query parameters:
 | `lng` | float | Longitude for geo search |
 | `radius_miles` | float (> 0) | `lat`, `lng`, `radius_miles` must be provided together (`400` otherwise) |
 | `vibe_tag` | string | Filter by vibe tag |
+| `category` | string | Filter by activity category (e.g. `Fitness`, `Music`). Synonyms like `gym`/`workout`/`yoga` resolve to `Fitness` |
 | `time_preset` | `"tonight"` \| `"this_weekend"` | Friendly time window (computed in SF local time) |
 | `location_preset` | `"sf"` \| `"oakland"` \| `"san_jose"` | Friendly location filter |
 | `start_at` | datetime | Start-time lower bound (overrides preset start) |
@@ -205,6 +206,8 @@ Response:
 
 Auth: none. Parses a natural-language query into an intent/time window, picks an anchor event (source tier ≤ 2), and sequences nearby support events (tier ≥ 3, within 0.5 mi) into an itinerary. `itinerary` is empty (and `anchor_event_id` null) when no anchor matches.
 
+`intent` is one of `date_night`, `out_of_town_guests`, `bar_crawl`, `active_day`, `general_night_out`. An `active_day` request (gyms, workout classes, climbing, yoga, run clubs, etc.) sets `category_focus: "Fitness"` and restricts anchor selection to that category.
+
 Request:
 
 ```json
@@ -221,6 +224,7 @@ Response:
   "intent": "string",
   "timeframe": "string",
   "geography": "string | null",
+  "category_focus": "string | null",
   "anchor_event_id": "int | null",
   "itinerary": [
     {

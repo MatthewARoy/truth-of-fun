@@ -67,6 +67,7 @@ export type ConciergeResponse = {
   intent: string;
   timeframe: string;
   geography: string | null;
+  category_focus?: string | null;
   anchor_event_id: number | null;
   itinerary: ItineraryStopResponse[];
 };
@@ -105,6 +106,7 @@ export type EventsQuery = {
   lng?: number;
   radius_miles?: number;
   vibe_tag?: string;
+  category?: string;
   time_preset?: "tonight" | "this_weekend";
   location_preset?: "sf" | "oakland" | "san_jose";
   sort_by?: "date" | "distance";

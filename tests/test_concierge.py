@@ -23,6 +23,28 @@ def test_parse_intent_extracts_fields() -> None:
     assert parsed.geography == "oakland"
     assert parsed.timeframe_label == "this_saturday"
     assert parsed.window_start < parsed.window_end
+    assert parsed.category_focus is None
+
+
+def test_parse_intent_detects_fitness_and_focuses_category() -> None:
+    now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+    parsed = parse_intent_prompt(
+        "I want to know about gym/workout promos near noe downtown in sf", now=now
+    )
+
+    assert parsed.intent == "active_day"
+    assert parsed.category_focus == "Fitness"
+    # "noe" is the earliest, most specific neighborhood in the phrase.
+    assert parsed.geography == "noe"
+
+
+def test_parse_intent_resolves_multiword_neighborhood() -> None:
+    now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+    parsed = parse_intent_prompt("yoga class in noe valley this weekend", now=now)
+
+    assert parsed.intent == "active_day"
+    assert parsed.geography == "noe valley"
+    assert parsed.timeframe_label == "this_weekend"
 
 
 def test_itinerary_sequencing_with_travel_buffers() -> None:
