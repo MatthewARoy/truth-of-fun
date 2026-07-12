@@ -11,6 +11,7 @@ import anthropic
 
 from app.core.config import get_settings
 from app.core.localtime import LOCAL_TZ
+from app.services.categories import FITNESS, query_targets_fitness
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,9 @@ class ParsedIntent:
     timeframe_label: str
     window_start: datetime
     window_end: datetime
+    # Canonical category to bias results toward (e.g. "Fitness" for a
+    # gym/workout request). None means no category preference.
+    category_focus: str | None = None
 
 
 @dataclass
@@ -59,7 +63,11 @@ def parse_intent_prompt(prompt: str, *, now: datetime | None = None) -> ParsedIn
         )
 
     intent = "general_night_out"
-    if "date night" in text:
+    category_focus: str | None = None
+    if query_targets_fitness(text):
+        intent = "active_day"
+        category_focus = FITNESS
+    elif "date night" in text:
         intent = "date_night"
     elif "out-of-town" in text or "visiting" in text or "guests" in text:
         intent = "out_of_town_guests"
@@ -74,6 +82,7 @@ def parse_intent_prompt(prompt: str, *, now: datetime | None = None) -> ParsedIn
         timeframe_label=timeframe_label,
         window_start=window_start,
         window_end=window_end,
+        category_focus=category_focus,
     )
 
 
@@ -122,21 +131,49 @@ def _build_stop(*, kind: str, event: EventLike, travel_buffer_minutes_before: in
     )
 
 
+_GEOGRAPHIES = [
+    "noe valley",
+    "hayes valley",
+    "financial district",
+    "north beach",
+    "russian hill",
+    "nob hill",
+    "potrero hill",
+    "south bay",
+    "san francisco",
+    "san jose",
+    "oakland",
+    "berkeley",
+    "mission",
+    "castro",
+    "marina",
+    "richmond",
+    "sunset",
+    "dogpatch",
+    "tenderloin",
+    "downtown",
+    "fidi",
+    "soma",
+    "noe",
+    "sf",
+]
+
+
 def _extract_geography(text: str) -> str | None:
-    geographies = [
-        "oakland",
-        "san francisco",
-        "sf",
-        "berkeley",
-        "mission",
-        "soma",
-        "south bay",
-        "san jose",
-    ]
-    for geography in geographies:
-        if geography in text:
-            return geography
-    return None
+    # Pick the neighborhood that appears earliest in the request (so "noe
+    # downtown" resolves to the more specific "noe"), tie-broken toward the
+    # longer phrase ("noe valley" over "noe" at the same position).
+    best_key: tuple[int, int] | None = None
+    best_geo: str | None = None
+    for geography in _GEOGRAPHIES:
+        idx = text.find(geography)
+        if idx == -1:
+            continue
+        key = (idx, -len(geography))
+        if best_key is None or key < best_key:
+            best_key = key
+            best_geo = geography
+    return best_geo
 
 
 def _extract_timeframe(
@@ -167,6 +204,7 @@ _KNOWN_INTENTS = {
     "date_night",
     "out_of_town_guests",
     "bar_crawl",
+    "active_day",
     "general_night_out",
 }
 
@@ -189,8 +227,10 @@ class ClaudeIntentParser:
 
     _SYSTEM = (
         "Extract structured intent from a user's event-planning request. "
-        "Return ONLY valid JSON matching this schema:\n"
-        '{"intent": one of ["date_night","out_of_town_guests","bar_crawl","general_night_out"],\n'
+        "Use intent 'active_day' when the user is asking about gyms, workout "
+        "classes, fitness, climbing, yoga, run clubs, or similar active/"
+        "participatory offers. Return ONLY valid JSON matching this schema:\n"
+        '{"intent": one of ["date_night","out_of_town_guests","bar_crawl","active_day","general_night_out"],\n'
         ' "geography": neighborhood/city string in lowercase or null,\n'
         ' "timeframe": one of ["tonight","tomorrow","this_saturday","this_weekend","upcoming_week"]}'
     )
@@ -223,6 +263,10 @@ class ClaudeIntentParser:
         intent = payload.get("intent")
         if intent not in _KNOWN_INTENTS:
             intent = "general_night_out"
+        # Deterministic safety net: an unmistakably fitness-oriented request
+        # maps to active_day even if the model classified it otherwise.
+        if query_targets_fitness(prompt):
+            intent = "active_day"
 
         timeframe = payload.get("timeframe")
         if timeframe not in _KNOWN_TIMEFRAMES:
@@ -238,6 +282,7 @@ class ClaudeIntentParser:
             timeframe_label=timeframe,
             window_start=window_start,
             window_end=window_end,
+            category_focus=FITNESS if intent == "active_day" else None,
         )
 
     @staticmethod

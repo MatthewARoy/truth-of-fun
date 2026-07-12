@@ -38,7 +38,7 @@ A long-running async process (`app/worker.py`) that:
 
 For each batch of raw events:
 
-1. **Normalize** — coerce types, parse dates into UTC-aware datetimes, validate required fields (title, start_at, location, source).
+1. **Normalize** — coerce types, parse dates into UTC-aware datetimes, validate required fields (title, start_at, location, source), and infer canonical activity categories (`app/services/categories.py`). Inference is additive: source category strings are preserved, and buckets implied by keywords in the title/description are appended — e.g. an untagged "gym promo — first month free" gains `Fitness`. This lets participatory/active offers (gyms, workout classes, climbing, yoga, run clubs) surface alongside shows and festivals without every source tagging them.
 2. **In-batch dedupe** — collapse duplicates *within* the batch before touching the database.
 3. **Cross-batch dedupe** — for each candidate, look up any existing event in a ±2-hour window and apply the same-event heuristic.
 4. **LLM enrichment** — pass the description through the vibe tagger to get 3–5 hashtag-style vibe tags.
