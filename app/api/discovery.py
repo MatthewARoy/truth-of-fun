@@ -18,6 +18,7 @@ from app.models.event import Event
 from app.models.itinerary import SavedItinerary
 from app.models.user import User
 from app.models.user_signal import UserSignal
+from app.services.categories import canonical_category
 from app.services.concierge import (
     anchor_hour_range,
     intent_vibe_profile,
@@ -105,6 +106,7 @@ class ConciergeResponse(BaseModel):
     intent: str
     timeframe: str
     geography: str | None
+    category_focus: str | None = None
     anchor_event_id: int | None
     itinerary: list[ItineraryStopResponse]
     title: str = ""
@@ -304,6 +306,12 @@ def _apply_concierge_geography_filter(stmt: object, geography: str | None) -> ob
     )
 
 
+def _apply_concierge_category_filter(stmt: object, category: str | None) -> object:
+    if not category:
+        return stmt
+    return stmt.where(Event.categories.contains([category]))
+
+
 def _people_interested_counts(*, session: Session, event_ids: list[int]) -> dict[int, int]:
     if not event_ids:
         return {}
@@ -372,6 +380,12 @@ def search_events(
         ),
     ),
     vibe_tag: str | None = Query(default=None, max_length=100, description="Filter by vibe tag"),
+    category: str | None = Query(
+        default=None,
+        max_length=100,
+        description="Filter by activity category (e.g. 'Fitness', 'Music', or a "
+        "synonym like 'gym'/'workout')",
+    ),
     time_preset: Literal["tonight", "this_weekend"] | None = Query(
         default=None,
         description="Friendly time filter for quick UI controls",
@@ -431,6 +445,11 @@ def search_events(
         stmt = stmt.where(Event.start_at <= end_bound)
     if vibe_tag:
         stmt = stmt.where(_canonical_tag_filter(vibe_tag))
+    if category:
+        # Resolve synonyms ("gym"/"workout" -> "Fitness"); fall back to the raw
+        # term so callers can still filter by finer-grained labels (e.g. a genre).
+        resolved_category = canonical_category(category) or category.strip()
+        stmt = stmt.where(Event.categories.contains([resolved_category]))
 
     location_keyword = _location_keyword_for_preset(location_preset)
     if location_keyword:
@@ -685,7 +704,8 @@ async def build_concierge_itinerary(
             )
             stmt = stmt.where(local_hour >= hours[0], local_hour <= hours[1])
         stmt = stmt.order_by(Event.start_at.asc()).limit(limit)
-        return _apply_concierge_geography_filter(stmt, parsed.geography)
+        stmt = _apply_concierge_geography_filter(stmt, parsed.geography)
+        return _apply_concierge_category_filter(stmt, parsed.category_focus)
 
     # Prefer an anchor that fits the intent's time of day; fall back to the
     # whole window rather than returning nothing when the day is thin.
@@ -723,6 +743,7 @@ async def build_concierge_itinerary(
             intent=parsed.intent,
             timeframe=parsed.timeframe_label,
             geography=parsed.geography,
+            category_focus=parsed.category_focus,
             anchor_event_id=None,
             itinerary=[],
         )
@@ -792,6 +813,7 @@ async def build_concierge_itinerary(
         intent=parsed.intent,
         timeframe=parsed.timeframe_label,
         geography=parsed.geography,
+        category_focus=parsed.category_focus,
         anchor_event_id=int(anchor.id or 0),
         itinerary=itinerary,
         title=title,

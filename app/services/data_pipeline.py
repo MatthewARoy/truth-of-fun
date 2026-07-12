@@ -9,6 +9,7 @@ from rapidfuzz import fuzz
 from sqlmodel import Session, select
 
 from app.models.event import Event
+from app.services.categories import infer_categories
 from app.services.tags import canonical_vibe_tags
 from app.services.vibe_tagger import ClaudeVibeTagger, VibeTagger
 
@@ -394,7 +395,11 @@ class DataPipelineService:
             "venue_name": self._normalize_str(event.get("venue_name")),
             "raw_address": self._normalize_str(event.get("raw_address")),
             "location": location.strip(),
-            "categories": self._normalize_list(event.get("categories")),
+            "categories": infer_categories(
+                title=title.strip(),
+                description=self._normalize_str(event.get("description")),
+                existing=self._normalize_list(event.get("categories")),
+            ),
             "tags": canonical_vibe_tags(self._normalize_list(event.get("tags"))),
             "price": self._coerce_decimal(event.get("price")),
             "currency": self._normalize_currency(event.get("currency")),
