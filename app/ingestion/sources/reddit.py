@@ -24,7 +24,6 @@ SF_TZ = ZoneInfo("America/Los_Angeles")
 DEFAULT_SF_LAT = 37.7749
 DEFAULT_SF_LON = -122.4194
 
-_LLM_MODEL = "claude-haiku-4-5-20251001"
 _LLM_CONFIDENCE_THRESHOLD = 0.5
 
 # Sentinel so callers can explicitly pass client_id=None to disable OAuth,
@@ -82,6 +81,7 @@ class RedditSource(InputAgentSource):
             settings.reddit_client_secret if client_secret is _UNSET else client_secret
         )
         self._user_agent = user_agent or settings.reddit_user_agent
+        self._llm_model = settings.anthropic_model
         self._access_token: str | None = None
         self._warned_no_creds = False
 
@@ -120,7 +120,7 @@ class RedditSource(InputAgentSource):
     async def _extract_with_llm(self, text: str) -> dict[str, Any] | None:
         try:
             response = await self._llm_client.messages.create(
-                model=_LLM_MODEL,
+                model=self._llm_model,
                 max_tokens=300,
                 messages=[
                     {"role": "user", "content": _EXTRACTION_PROMPT.format(text=text[:4000])}
