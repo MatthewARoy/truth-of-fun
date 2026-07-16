@@ -93,14 +93,29 @@ class LumaSource(InputAgentSource):
         page = await context.new_page()
 
         try:
-            await page.goto(self.sf_events_url, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_load_state("networkidle", timeout=15000)
-            html = await page.content()
+            html = await self._fetch_page_html(page)
             return self._extract_candidates_from_html(html)
         finally:
             await context.close()
             await browser.close()
             await playwright.stop()
+
+    async def _fetch_page_html(self, page: Any) -> str:
+        """Navigate to the SF events page and return its HTML.
+
+        luma.com keeps websockets/polling in flight, so "networkidle" never
+        settles and used to abort the scrape. The __NEXT_DATA__ payload we parse
+        is embedded server-side and already present at domcontentloaded, so a
+        settle timeout is best-effort: proceed with whatever loaded, never raise.
+        """
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        await page.goto(self.sf_events_url, wait_until="domcontentloaded", timeout=30000)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15000)
+        except PlaywrightTimeoutError:
+            pass
+        return await page.content()
 
     def _extract_candidates_from_html(self, html: str) -> list[dict[str, Any]]:
         """Extract event candidates from Luma page HTML.
@@ -206,27 +221,30 @@ class LumaSource(InputAgentSource):
                     and title.strip()
                     and isinstance(start, str)
                     and isinstance(url, str)
-                    and url not in seen
                 ):
-                    seen.add(url)
-                    geo = node.get("geo_address_info")
-                    location_text = (
-                        geo.get("full_address") if isinstance(geo, dict) else None
-                    )
-                    guest_count = node.get("guest_count")
-                    found.append(
-                        {
-                            "title": title.strip(),
-                            "source_url": url,
-                            "source_record_id": node.get("api_id")
-                            or url.rstrip("/").split("/")[-1]
-                            or url,
-                            "start_iso": start,
-                            "attendee_count": guest_count if isinstance(guest_count, int) else 0,
-                            "location_text": location_text,
-                            "organizer_name": None,
-                        }
-                    )
+                    # Live payloads carry bare slugs ("ai_workshop_sf"), not URLs.
+                    if not url.startswith(("http://", "https://")):
+                        url = f"{self.base_url}/{url.lstrip('/')}"
+                    if url not in seen:
+                        seen.add(url)
+                        geo = node.get("geo_address_info")
+                        location_text = (
+                            geo.get("full_address") if isinstance(geo, dict) else None
+                        )
+                        guest_count = node.get("guest_count")
+                        found.append(
+                            {
+                                "title": title.strip(),
+                                "source_url": url,
+                                "source_record_id": node.get("api_id")
+                                or url.rstrip("/").split("/")[-1]
+                                or url,
+                                "start_iso": start,
+                                "attendee_count": guest_count if isinstance(guest_count, int) else 0,
+                                "location_text": location_text,
+                                "organizer_name": None,
+                            }
+                        )
                 for value in node.values():
                     walk(value)
             elif isinstance(node, list):
