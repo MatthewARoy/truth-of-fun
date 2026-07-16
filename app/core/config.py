@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     )
     ticketmaster_api_key: str | None = None
     anthropic_api_key: str | None = None
+    anthropic_model: str = Field(
+        default="claude-haiku-4-5",
+        description=(
+            "Claude model for all LLM calls (vibe tagging, intent parsing, Reddit "
+            "extraction). Use the dateless alias so snapshot rotations can't 404 us."
+        ),
+    )
     # Reddit OAuth ("script" app). Anonymous JSON access is now blocked (403),
     # so live Reddit ingestion requires a registered app's client id + secret.
     reddit_client_id: str | None = None

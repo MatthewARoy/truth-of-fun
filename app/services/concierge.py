@@ -195,10 +195,10 @@ class ClaudeIntentParser:
         ' "timeframe": one of ["tonight","tomorrow","this_saturday","this_weekend","upcoming_week"]}'
     )
 
-    def __init__(self, *, api_key: str | None = None, model: str = "claude-haiku-4-5-20250901") -> None:
+    def __init__(self, *, api_key: str | None = None, model: str | None = None) -> None:
         settings = get_settings()
         self._api_key = api_key or settings.anthropic_api_key
-        self._model = model
+        self._model = model or settings.anthropic_model
         self._client = anthropic.AsyncAnthropic(api_key=self._api_key) if self._api_key else None
 
     async def parse(self, prompt: str, *, now: datetime) -> ParsedIntent | None:
