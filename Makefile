@@ -1,4 +1,4 @@
-.PHONY: help db-up db-down migrate seed seed-reset api web worker worker-loop demo install screenshots
+.PHONY: help db-up db-down migrate seed seed-reset api web worker worker-loop demo install screenshots digest
 
 PY := .venv/bin/python
 ALEMBIC := .venv/bin/alembic
@@ -19,6 +19,8 @@ help:
 	@echo "  make worker        Run the ingestion pipeline once"
 	@echo "  make worker-loop   Run the ingestion worker loop (every 6h)"
 	@echo "  make screenshots   Capture UI screenshots into docs/screenshots/"
+	@echo "  make digest        Export the events digest markdown for the Life OS weekly weave"
+	@echo "                     (requires db-up + migrate + seed/worker to have populated events)"
 
 install:
 	uv sync
@@ -65,3 +67,9 @@ demo: db-up migrate seed
 
 screenshots:
 	node scripts/capture_screenshots.mjs
+
+# Exports reference/events-digest.md for the Life OS weekly weave. Assumes
+# db-up + migrate + seed (or the worker) have already populated events —
+# this target does not start Postgres itself.
+digest:
+	$(PY) scripts/export_digest.py
