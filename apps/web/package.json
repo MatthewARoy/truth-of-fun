@@ -10,7 +10,11 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "test": "npm run test:e2e -- --reporter=line",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "predev": "npm run build --workspace @truth-of-fun/api-client",
+    "prebuild": "npm run build --workspace @truth-of-fun/api-client",
+    "pretypecheck": "npm run build --workspace @truth-of-fun/api-client",
+    "pretest:e2e": "npm run build --workspace @truth-of-fun/api-client"
   },
   "dependencies": {
     "@truth-of-fun/api-client": "0.1.0",
