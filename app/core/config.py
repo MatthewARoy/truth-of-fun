@@ -43,6 +43,25 @@ class Settings(BaseSettings):
         description="Ingestion worker polling interval in seconds",
     )
 
+    log_level: str = Field(
+        default="INFO",
+        description="Root log level for the API and worker (DEBUG/INFO/WARNING/ERROR).",
+    )
+    log_format: str = Field(
+        default="text",
+        description=(
+            "Log output format: 'text' for local terminals, 'json' for one "
+            "JSON object per line (docker/aggregators). See docs/operations.md."
+        ),
+    )
+    log_slow_request_ms: int = Field(
+        default=1000,
+        description=(
+            "Requests slower than this are logged at WARNING so latency "
+            "regressions surface without reading every access line."
+        ),
+    )
+
     # Proxy configuration for scrapers (IP rotation when needed)
     proxy_url: str | None = Field(
         default=None,

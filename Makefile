@@ -1,4 +1,10 @@
-.PHONY: help db-up db-down migrate seed seed-reset api web worker worker-loop demo install screenshots digest
+.PHONY: help db-up db-down migrate seed seed-reset api web worker worker-loop demo install screenshots digest \
+        status logs logs-api logs-worker logs-errors
+
+# Where `make status` / `make logs-errors` look for a running API.
+API_URL ?= http://127.0.0.1:8000
+# How many lines of history the log targets show before following.
+LOG_TAIL ?= 200
 
 PY := .venv/bin/python
 ALEMBIC := .venv/bin/alembic
@@ -21,6 +27,13 @@ help:
 	@echo "  make screenshots   Capture UI screenshots into docs/screenshots/"
 	@echo "  make digest        Export the events digest markdown for the Life OS weekly weave"
 	@echo "                     (requires db-up + migrate + seed/worker to have populated events)"
+	@echo ""
+	@echo "Operations (see docs/operations.md)"
+	@echo "  make status        Ask the running API whether anything is broken"
+	@echo "  make logs          Follow logs from all containers"
+	@echo "  make logs-api      Follow API logs only"
+	@echo "  make logs-worker   Follow ingestion worker logs only"
+	@echo "  make logs-errors   Show only warnings and errors across all containers"
 
 install:
 	uv sync
@@ -73,3 +86,28 @@ screenshots:
 # this target does not start Postgres itself.
 digest:
 	$(PY) scripts/export_digest.py
+
+# --- Operations -------------------------------------------------------------
+# See docs/operations.md for what these outputs mean and how to act on them.
+
+# One question: is anything broken? Exits non-zero when the platform is not
+# "ok", so it doubles as a deploy smoke test and a cron health check.
+status:
+	@$(PY) scripts/status.py --api-url $(API_URL)
+
+logs:
+	docker compose logs --tail=$(LOG_TAIL) --follow
+
+logs-api:
+	docker compose logs --tail=$(LOG_TAIL) --follow api
+
+logs-worker:
+	docker compose logs --tail=$(LOG_TAIL) --follow worker
+
+# Containers log JSON (LOG_FORMAT=json in docker-compose.yml), so filter on the
+# level field rather than regexing prose. Falls back to a plain grep when the
+# line isn't JSON (e.g. Postgres' own output, which isn't ours to format).
+logs-errors:
+	@docker compose logs --tail=1000 --no-color \
+		| grep -Ei '"level": *"(warning|error|critical)"|\b(WARNING|ERROR|CRITICAL)\b' \
+		|| echo "No warnings or errors in the last 1000 log lines."
