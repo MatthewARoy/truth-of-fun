@@ -16,6 +16,24 @@ export type EventResponse = {
   distance_miles?: number | null;
   lat?: number | null;
   lng?: number | null;
+  organizer_name?: string | null;
+  attendee_count?: number;
+  location_confidence?: number;
+  is_free?: boolean;
+};
+
+/**
+ * GET /events/{id}. Adds the provenance an agent needs to cite an event.
+ *
+ * `first_seen_at` is when this platform ingested the event, NOT when it was
+ * announced. Never present it as an announcement date.
+ */
+export type EventDetailResponse = EventResponse & {
+  first_seen_at: string;
+  updated_at: string;
+  source_name: string;
+  source_tier: number;
+  raw_address?: string | null;
 };
 
 export type RecommendationResponse = EventResponse & {
@@ -110,8 +128,17 @@ export type EventsQuery = {
   sort_by?: "date" | "distance";
   start_at?: string;
   end_at?: string;
+  include_past?: boolean;
+  status?: string;
   limit?: number;
   offset?: number;
+};
+
+/** A page of events plus the total number of matches before pagination. */
+export type EventsPage = {
+  events: EventResponse[];
+  /** From the X-Total-Count header; null if the server omitted it. */
+  total: number | null;
 };
 
 export type AuthRequest = {
@@ -132,4 +159,30 @@ export type SourceHealthEntry = {
   last_run_at: string | null;
   last_event_count: number | null;
   consecutive_zeros: number;
+  /** Exception text from the last failed fetch; null once the source recovers. */
+  last_error?: string | null;
+  last_error_at?: string | null;
+  last_success_at?: string | null;
+  /** No completed run recently — the worker may be stopped. */
+  is_stale?: boolean;
+};
+
+/** GET /health/summary — every health signal rolled into one verdict. */
+export type HealthSummary = {
+  status: "ok" | "degraded" | "failing";
+  checked_at: string;
+  /** Human-readable, each naming its subsystem. Empty when status is "ok". */
+  problems: string[];
+  database: { connected: boolean };
+  sources: {
+    total: number;
+    by_status: Record<string, number>;
+    stale: number;
+    worker_stalled: boolean;
+  };
+  events: {
+    total_events?: number;
+    upcoming_events?: number;
+    newest_event_first_seen_at?: string | null;
+  };
 };

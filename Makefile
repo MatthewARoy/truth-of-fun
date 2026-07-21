@@ -40,6 +40,7 @@ install:
 	@.venv/bin/playwright install chromium || echo "WARNING: Playwright Chromium install failed — the FuncheapSF and Luma connectors won't run. Retry with: .venv/bin/playwright install chromium"
 	npm install
 	npm run api-client:build
+	npm run mcp-server:build
 
 db-up:
 	docker compose up -d db
