@@ -133,7 +133,12 @@ def _folder_items_with_votes(*, session: Session, folder_id: int) -> list[Folder
     return results
 
 
-@router.post("/folders", response_model=FolderResponse)
+@router.post(
+    "/folders",
+    response_model=FolderResponse,
+    operation_id="createFolder",
+    summary="Create a shortlist folder",
+)
 def create_folder(
     *,
     payload: CreateFolderRequest,
@@ -156,7 +161,12 @@ def create_folder(
     )
 
 
-@router.get("/folders", response_model=list[FolderResponse])
+@router.get(
+    "/folders",
+    response_model=list[FolderResponse],
+    operation_id="listFolders",
+    summary="List the current user's folders",
+)
 def list_my_folders(
     *,
     session: Session = Depends(get_session),
@@ -180,7 +190,12 @@ def list_my_folders(
     ]
 
 
-@router.post("/folders/{folder_id}/items", response_model=FolderDetailResponse)
+@router.post(
+    "/folders/{folder_id}/items",
+    response_model=FolderDetailResponse,
+    operation_id="addFolderItem",
+    summary="Add an event to a folder",
+)
 def add_folder_item(
     *,
     folder_id: int,
@@ -213,7 +228,12 @@ def add_folder_item(
     )
 
 
-@router.post("/folders/{folder_id}/invite", response_model=InviteResponse)
+@router.post(
+    "/folders/{folder_id}/invite",
+    response_model=InviteResponse,
+    operation_id="createFolderInvite",
+    summary="Mint an invite token for a folder",
+)
 def create_folder_invite(
     *,
     folder_id: int,
@@ -244,7 +264,12 @@ def create_folder_invite(
     )
 
 
-@router.delete("/folders/{folder_id}/invites/{invite_token}", status_code=204)
+@router.delete(
+    "/folders/{folder_id}/invites/{invite_token}",
+    status_code=204,
+    operation_id="revokeFolderInvite",
+    summary="Revoke a folder invite",
+)
 def revoke_folder_invite(
     *,
     folder_id: int,
@@ -271,7 +296,12 @@ def revoke_folder_invite(
     return Response(status_code=204)
 
 
-@router.post("/folders/invites/{invite_token}/accept", response_model=FolderDetailResponse)
+@router.post(
+    "/folders/invites/{invite_token}/accept",
+    response_model=FolderDetailResponse,
+    operation_id="acceptFolderInvite",
+    summary="Accept a folder invite",
+)
 def accept_folder_invite(
     *,
     invite_token: str,
@@ -320,7 +350,12 @@ def accept_folder_invite(
     )
 
 
-@router.post("/folders/{folder_id}/votes", response_model=FolderDetailResponse)
+@router.post(
+    "/folders/{folder_id}/votes",
+    response_model=FolderDetailResponse,
+    operation_id="voteFolderItem",
+    summary="Cast a soft-RSVP vote on a folder item",
+)
 def vote_on_folder_item(
     *,
     folder_id: int,
@@ -368,7 +403,12 @@ def vote_on_folder_item(
     )
 
 
-@router.get("/folders/{folder_id}", response_model=FolderDetailResponse)
+@router.get(
+    "/folders/{folder_id}",
+    response_model=FolderDetailResponse,
+    operation_id="getFolder",
+    summary="Get a folder with its items and votes",
+)
 def get_folder_detail(
     *,
     folder_id: int,
@@ -385,7 +425,12 @@ def get_folder_detail(
     )
 
 
-@router.get("/shared/folders/{token}", response_model=FolderDetailResponse)
+@router.get(
+    "/shared/folders/{token}",
+    response_model=FolderDetailResponse,
+    operation_id="getSharedFolder",
+    summary="Read a folder via its public share token",
+)
 def get_public_shared_folder(
     *,
     token: str,
