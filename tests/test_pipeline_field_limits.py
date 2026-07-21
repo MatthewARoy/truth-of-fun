@@ -91,6 +91,38 @@ def test_long_display_fields_are_truncated() -> None:
     assert len(str(normalized["image_url"])) == _MAX_URL
 
 
+def test_every_bounded_column_survives_an_over_long_source_value() -> None:
+    """Guard the whole class of bug, not just the fields that have bitten us.
+
+    Reads the length limits off the model, so adding a new bounded column
+    without defending it in _normalize_event_payload fails here rather than in
+    production — where it aborts the transaction and costs the entire cycle.
+    """
+    from app.models.event import Event
+
+    bounded = {
+        column.name: column.type.length
+        for column in Event.__table__.columns
+        if getattr(column.type, "length", None)
+    }
+    # Sanity: if this ever empties out, the test has stopped testing anything.
+    assert bounded
+
+    overlong = {name: "x" * (length + 500) for name, length in bounded.items()}
+    # These are not free-text source fields, so feed them plausible values.
+    overlong.pop("status", None)
+    overlong.pop("source_name", None)
+
+    normalized = _normalize(**overlong)
+
+    too_long = {
+        name: len(str(normalized[name]))
+        for name, length in bounded.items()
+        if normalized.get(name) is not None and len(str(normalized[name])) > length
+    }
+    assert too_long == {}, f"columns exceeding their width: {too_long} (limits: {bounded})"
+
+
 def test_values_within_the_limits_are_unchanged() -> None:
     normalized = _normalize(
         title="Borgore at The Midway",
