@@ -32,7 +32,8 @@ const LOCATION_PRESETS = [
 ] as const;
 
 const CATEGORY_FILTERS = [
-  "Music", "Sports", "Arts & Theatre", "Comedy", "Film", "Miscellaneous",
+  "Music", "Nightlife", "Fitness", "Wellness", "Outdoors", "Sports",
+  "Comedy", "Arts & Theatre", "Film", "Food", "Social",
 ];
 
 export default function ExplorePage() {
@@ -56,6 +57,7 @@ export default function ExplorePage() {
       if (searchText.trim()) query.q = searchText.trim();
       if (timePreset) query.time_preset = timePreset as EventsQuery["time_preset"];
       if (locationPreset) query.location_preset = locationPreset as EventsQuery["location_preset"];
+      if (activeCategory) query.category = activeCategory;
 
       const data = await apiClient.getEvents(query);
       if (reset) {
@@ -70,12 +72,12 @@ export default function ExplorePage() {
     } finally {
       setLoading(false);
     }
-  }, [searchText, timePreset, locationPreset, page]);
+  }, [searchText, timePreset, locationPreset, activeCategory, page]);
 
   useEffect(() => {
     fetchEvents(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timePreset, locationPreset]);
+  }, [timePreset, locationPreset, activeCategory]);
 
   function handleSearch(e: React.FormEvent) {
     e.preventDefault();
@@ -91,9 +93,9 @@ export default function ExplorePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page]);
 
-  const displayed = activeCategory
-    ? events.filter((e) => e.categories.some((c) => c.toLowerCase().includes(activeCategory.toLowerCase())))
-    : events;
+  // Category filtering is applied server-side (see fetchEvents), so pagination
+  // stays correct — render whatever the API returned.
+  const displayed = events;
 
   return (
     <div className="space-y-6">
@@ -242,7 +244,7 @@ export default function ExplorePage() {
               <p className="text-slate-400">No events found. Try adjusting your filters.</p>
             </Card>
           )}
-          {hasMore && !activeCategory && (
+          {hasMore && (
             <div className="flex justify-center pt-2">
               <Button variant="secondary" onClick={loadMore} disabled={loading}>
                 {loading ? "Loading..." : "Load more"}

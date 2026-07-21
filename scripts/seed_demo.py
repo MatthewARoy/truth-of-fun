@@ -244,6 +244,74 @@ EVENT_TEMPLATES = [
         "image_url": "https://images.unsplash.com/photo-1554118811-1e0d58224f24?auto=format&fit=crop&w=800&q=70",
         "price": "0",
     },
+    # --- Active / fitness offers (gyms, workout classes, climbing, yoga, run
+    # clubs). These pin their own venue so neighborhood queries land correctly.
+    {
+        "title": "Fitness SF Castro — New Member Promo (First Month Free)",
+        "description": "Grand-reopening gym promo: sign up this week and your first month is free. Tour the new strength floor and functional-training rig.",
+        "categories": ["Fitness"],
+        "tags": ["#Gym", "#Fitness", "#Promo", "#Deal"],
+        "source_name": "funcheap_sf",
+        "source_tier": 2,
+        "image_url": "https://images.unsplash.com/photo-1534438327276-14e5300c3a48?auto=format&fit=crop&w=800&q=70",
+        "price": "0",
+        "venue": ("Fitness SF Castro", "2301 Market St, San Francisco, CA", -122.4345, 37.7638),
+    },
+    {
+        "title": "Noe Valley Community Yoga — Free Vinyasa Flow",
+        "description": "All-levels outdoor vinyasa yoga class in Noe Valley. BYO mat. Free workout to kick off the weekend; donations welcome.",
+        "categories": ["Fitness", "Wellness"],
+        "tags": ["#Yoga", "#Fitness", "#Free", "#Wellness"],
+        "source_name": "meetup",
+        "source_tier": 1,
+        "image_url": "https://images.unsplash.com/photo-1544367567-0f2fcb009e0b?auto=format&fit=crop&w=800&q=70",
+        "price": "0",
+        "venue": ("Noe Valley Town Square", "3861 24th St, San Francisco, CA", -122.4310, 37.7514),
+    },
+    {
+        "title": "Dogpatch Boulders — Intro to Climbing Night",
+        "description": "Beginner bouldering and climbing session with gear and a day pass included. Coaches on hand for first-timers.",
+        "categories": ["Fitness"],
+        "tags": ["#Climbing", "#Fitness", "#Social"],
+        "source_name": "meetup",
+        "source_tier": 1,
+        "image_url": "https://images.unsplash.com/photo-1522163182402-834f871fd851?auto=format&fit=crop&w=800&q=70",
+        "price": "25.00",
+        "venue": ("Dogpatch Boulders", "2573 3rd St, San Francisco, CA", -122.3880, 37.7566),
+    },
+    {
+        "title": "Barry's SoMa — Free Bootcamp Class Pass",
+        "description": "Redeem a free first workout at the downtown studio. High-intensity treadmill-and-strength bootcamp; towels and shakes included.",
+        "categories": ["Fitness"],
+        "tags": ["#Bootcamp", "#Fitness", "#HighEnergy", "#Promo"],
+        "source_name": "eventbrite",
+        "source_tier": 1,
+        "image_url": "https://images.unsplash.com/photo-1518611012118-696072aa579a?auto=format&fit=crop&w=800&q=70",
+        "price": "0",
+        "venue": ("Barry's SoMa", "236 King St, San Francisco, CA", -122.3915, 37.7773),
+    },
+    {
+        "title": "Downtown SF Run Club — Free Saturday 5K",
+        "description": "Free community run club meeting at the Embarcadero. Easy-paced 5K along the waterfront, coffee after. All fitness levels welcome.",
+        "categories": ["Fitness", "Outdoors"],
+        "tags": ["#RunClub", "#Fitness", "#Free", "#Social"],
+        "source_name": "dothebay",
+        "source_tier": 2,
+        "image_url": "https://images.unsplash.com/photo-1502904550040-7534597429ae?auto=format&fit=crop&w=800&q=70",
+        "price": "0",
+        "venue": ("Ferry Building", "1 Ferry Building, San Francisco, CA", -122.3933, 37.7956),
+    },
+    {
+        "title": "Equinox Financial District — Day-Pass Open House",
+        "description": "Downtown gym open house with a complimentary day pass and discounted membership promo. Group fitness classes running all afternoon.",
+        "categories": ["Fitness"],
+        "tags": ["#Gym", "#Fitness", "#Promo", "#Deal"],
+        "source_name": "sfstation",
+        "source_tier": 2,
+        "image_url": "https://images.unsplash.com/photo-1571902943202-507ec2618e8f?auto=format&fit=crop&w=800&q=70",
+        "price": "0",
+        "venue": ("Equinox Sports Club SF", "301 Pine St, San Francisco, CA", -122.4020, 37.7913),
+    },
 ]
 
 
@@ -291,7 +359,10 @@ def seed(*, reset: bool = False) -> None:
                 day_offset = rng.randint(1, 14)
                 hour = rng.choice([11, 14, 17, 19, 20, 21, 22])
                 start_at = (now + timedelta(days=day_offset)).replace(hour=hour)
-                venue = rng.choice(VENUES)
+                # Fitness/active venues are geographically meaningful (a Noe
+                # Valley studio must actually be in Noe Valley), so templates may
+                # pin their own venue rather than take a random one.
+                venue = template.get("venue") or rng.choice(VENUES)
                 suffix = f"{index}-{offset_idx}-{template['source_name']}"
                 key = (template["source_name"], f"demo-{suffix}")
                 if key in existing_keys:

@@ -15,6 +15,7 @@ from app.core.security import get_current_user, get_optional_user
 from app.models.event import Event
 from app.models.user import User
 from app.models.user_signal import UserSignal
+from app.services.categories import canonical_category
 from app.services.concierge import parse_intent_async, sequence_itinerary
 from app.services.recommender import RecommenderService, ScoredEvent
 from app.services.user_profile import UserProfileService
@@ -73,6 +74,7 @@ class ConciergeResponse(BaseModel):
     intent: str
     timeframe: str
     geography: str | None
+    category_focus: str | None = None
     anchor_event_id: int | None
     itinerary: list[ItineraryStopResponse]
 
@@ -193,6 +195,12 @@ def _apply_concierge_geography_filter(stmt: object, geography: str | None) -> ob
     )
 
 
+def _apply_concierge_category_filter(stmt: object, category: str | None) -> object:
+    if not category:
+        return stmt
+    return stmt.where(Event.categories.contains([category]))
+
+
 def _people_interested_counts(*, session: Session, event_ids: list[int]) -> dict[int, int]:
     if not event_ids:
         return {}
@@ -252,6 +260,11 @@ def search_events(
     lng: float | None = Query(default=None, description="Longitude for geo search"),
     radius_miles: float | None = Query(default=None, gt=0, description="Search radius miles"),
     vibe_tag: str | None = Query(default=None, description="Filter by vibe tag"),
+    category: str | None = Query(
+        default=None,
+        description="Filter by activity category (e.g. 'Fitness', 'Music', or a "
+        "synonym like 'gym'/'workout')",
+    ),
     time_preset: Literal["tonight", "this_weekend"] | None = Query(
         default=None,
         description="Friendly time filter for quick UI controls",
@@ -311,6 +324,11 @@ def search_events(
         stmt = stmt.where(Event.start_at <= end_bound)
     if vibe_tag:
         stmt = stmt.where(Event.tags.contains([vibe_tag]))
+    if category:
+        # Resolve synonyms ("gym"/"workout" -> "Fitness"); fall back to the raw
+        # term so callers can still filter by finer-grained labels (e.g. a genre).
+        resolved_category = canonical_category(category) or category.strip()
+        stmt = stmt.where(Event.categories.contains([resolved_category]))
 
     location_keyword = _location_keyword_for_preset(location_preset)
     if location_keyword:
@@ -548,6 +566,7 @@ async def build_concierge_itinerary(
         .limit(limit)
     )
     anchor_stmt = _apply_concierge_geography_filter(anchor_stmt, parsed.geography)
+    anchor_stmt = _apply_concierge_category_filter(anchor_stmt, parsed.category_focus)
     anchor_events = session.exec(anchor_stmt).all()
     anchor = anchor_events[0] if anchor_events else None
     if anchor is None:
@@ -555,6 +574,7 @@ async def build_concierge_itinerary(
             intent=parsed.intent,
             timeframe=parsed.timeframe_label,
             geography=parsed.geography,
+            category_focus=parsed.category_focus,
             anchor_event_id=None,
             itinerary=[],
         )
@@ -603,6 +623,7 @@ async def build_concierge_itinerary(
         intent=parsed.intent,
         timeframe=parsed.timeframe_label,
         geography=parsed.geography,
+        category_focus=parsed.category_focus,
         anchor_event_id=int(anchor.id or 0),
         itinerary=itinerary,
     )
