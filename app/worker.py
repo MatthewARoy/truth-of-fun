@@ -16,6 +16,7 @@ from sqlmodel import Session
 from app.core.config import get_settings
 from app.core.database import create_db_and_tables, engine
 from app.core.logging import configure_logging
+from app.core.redaction import redact_secrets
 from app.ingestion import registry
 from app.models.event import Event
 from app.models.source_health import SourceHealthRecord
@@ -123,8 +124,12 @@ class IngestionWorker:
             except Exception as exc:
                 # Keep the type as well as the message: "TimeoutError" and
                 # "403 Forbidden" call for very different fixes, and the
-                # message alone often omits the class.
-                fetch_error = f"{type(exc).__name__}: {exc}"[:1000]
+                # message alone often omits the class. Redact before storing —
+                # this string is served by GET /health/sources, and scraper
+                # exceptions routinely carry the full request URL.
+                fetch_error = (
+                    f"{type(exc).__name__}: {redact_secrets(str(exc))}"
+                )[:1000]
                 logger.exception(
                     "Source '%s' failed during fetch.",
                     source_name,
@@ -132,6 +137,22 @@ class IngestionWorker:
                 )
             finally:
                 if source is not None:
+                    # A source that recovered from a partial failure returns
+                    # normally but records it here; without this a half-read
+                    # Ticketmaster window looks like a healthy small result.
+                    if fetch_error is None:
+                        partial = getattr(source, "last_fetch_error", None)
+                        if partial:
+                            fetch_error = str(partial)[:1000]
+                            logger.warning(
+                                "Source '%s' completed with a partial failure: %s",
+                                source_name,
+                                partial,
+                                extra={
+                                    "source_name": source_name,
+                                    "outcome": "partial_fetch",
+                                },
+                            )
                     with suppress(Exception):
                         await source.close()
 

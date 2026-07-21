@@ -7,11 +7,13 @@ degraded, what counts as failing, and that every problem names its subsystem.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
@@ -147,6 +149,57 @@ def test_summary_flags_an_empty_corpus_as_a_user_visible_outage() -> None:
         body = client.get("/health/summary").json()
 
     assert any("corpus" in p for p in body["problems"])
+
+
+def test_summary_flags_a_worker_that_has_never_run() -> None:
+    """Registered-but-never-run sources must not read as 'ok' at first deploy.
+
+    This is the moment a deployment check is most likely to be trusted, so a
+    false green here is the most expensive one.
+    """
+    with _build_client() as (client, _):
+        body = client.get("/health/summary").json()
+
+    assert body["status"] != "ok"
+    assert any(
+        p.startswith("worker:") and "has ever completed" in p for p in body["problems"]
+    )
+
+
+def test_summary_reports_a_failed_source_health_read_rather_than_ok() -> None:
+    """If the health query itself breaks, say so — never report 'no problems'."""
+    with _build_client() as (client, session):
+        # Simulate the schema being absent or out of date.
+        session.exec(text("DROP TABLE source_health"))
+
+        body = client.get("/health/summary").json()
+
+    assert body["status"] != "ok"
+    assert any(p.startswith("source health:") for p in body["problems"])
+
+
+def test_summary_does_not_leak_credentials_from_a_source_error() -> None:
+    """last_error is served publicly; a leaked DSN or API key would be exposed."""
+    with _build_client() as (client, session):
+        session.add(
+            _record(
+                source_name="ticketmaster",
+                status="failing",
+                last_error=(
+                    "HTTPError: GET https://app.ticketmaster.com/v2/events"
+                    "?apikey=SUPERSECRETKEY123456 -> 401"
+                ),
+            )
+        )
+        session.commit()
+
+        summary = client.get("/health/summary").json()
+        sources = client.get("/health/sources").json()
+
+    assert "SUPERSECRETKEY123456" not in json.dumps(summary)
+    assert "SUPERSECRETKEY123456" not in json.dumps(sources)
+    # The diagnostic shape survives redaction.
+    assert any("ticketmaster" in p for p in summary["problems"])
 
 
 def test_source_health_exposes_error_fields() -> None:

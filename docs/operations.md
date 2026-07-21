@@ -163,6 +163,28 @@ Run `make seed` for demo data, or `make worker` to ingest real data.
 `make status` exits 2 and `/health/ready` returns 503. Check
 `docker compose ps db` and `DATABASE_URL`.
 
+## What health endpoints do and don't reveal
+
+`/health/*` is **unauthenticated**. Treat it as public and firewall it if that
+is not acceptable — nothing in it is secret by design, but it does describe
+your ingestion state.
+
+Exception text is handled carefully because it is where credentials leak:
+psycopg2 puts the connection DSN (including the password) in its errors, and
+httpx puts the full request URL (including `?apikey=`) in its own.
+
+- Every stored and returned error is passed through a redactor
+  (`app/core/redaction.py`) that strips URL credentials, bearer tokens, JWTs,
+  labelled secrets, and long opaque values.
+- Outside `APP_ENV=development`, the responses carry the exception **type**
+  only (`OperationalError`), not the message. Set `EXPOSE_ERROR_DETAIL=true` to
+  override — only where the endpoint is not publicly reachable.
+- The **full** message is always written to the logs regardless, so nothing is
+  lost to the operator.
+
+If a health response is less specific than you need, read the logs for the same
+moment: `make logs-errors`.
+
 ## Alerting
 
 Set `ALERT_WEBHOOK_URL` to a Slack- or Discord-compatible webhook. The worker
@@ -182,6 +204,9 @@ simplest version.
 - [ ] `CORS_ALLOWED_ORIGINS` set to the real web origin, not localhost.
 - [ ] `ALERT_WEBHOOK_URL` set and tested.
 - [ ] `LOG_FORMAT=json` in the deployed environment (already the compose default).
+- [ ] `EXPOSE_ERROR_DETAIL` left unset (defaults to false outside development).
+- [ ] `/health/*` and `/admin/*` firewalled or fronted by auth — neither has any
+      today, and the admin page shows ingestion internals.
 - [ ] `make status` returns `ok` against the deployed API.
 - [ ] A scheduled `make status` check exists, so a stalled worker is noticed
       without anyone looking.

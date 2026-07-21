@@ -6,7 +6,9 @@ from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy import func, text
 from sqlmodel import Session, select
 
+from app.core.config import get_settings
 from app.core.database import get_session
+from app.core.redaction import describe_exception, redact_secrets
 from app.models.event import Event
 from app.models.source_health import SourceHealthRecord
 
@@ -48,9 +50,17 @@ def readiness(response: Response, session: Session = Depends(get_session)) -> di
     try:
         session.exec(text("SELECT 1"))
     except Exception as exc:
+        # The full message goes to the log; the response carries only what is
+        # safe to publish. A psycopg2 OperationalError embeds the DSN, which
+        # can include the database password.
         logger.exception("Readiness check failed: database unreachable.")
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-        return {"status": "unavailable", "database": f"{type(exc).__name__}: {exc}"[:200]}
+        return {
+            "status": "unavailable",
+            "database": describe_exception(
+                exc, include_message=get_settings().error_detail_is_public
+            )[:200],
+        }
     return {"status": "ready", "database": "connected"}
 
 
@@ -63,7 +73,8 @@ def source_health(session: Session = Depends(get_session)) -> dict[str, Any]:
     registered in the ingestion registry. Sources that haven't been run yet
     appear with status="unknown".
     """
-    return {"sources": _collect_source_health(session)}
+    sources, _ = _collect_source_health(session)
+    return {"sources": sources}
 
 
 @router.get(
@@ -90,18 +101,36 @@ def health_summary(session: Session = Depends(get_session)) -> dict[str, Any]:
     problems: list[str] = []
     checked_at = datetime.now(timezone.utc)
 
+    expose_detail = get_settings().error_detail_is_public
+
     database_ok = True
     try:
         session.exec(text("SELECT 1"))
     except Exception as exc:
         database_ok = False
-        problems.append(f"database: unreachable ({type(exc).__name__}: {exc})"[:300])
+        problems.append(
+            f"database: unreachable ({describe_exception(exc, include_message=expose_detail)})"[
+                :300
+            ]
+        )
         logger.exception("Health summary: database unreachable.")
 
-    sources = _collect_source_health(session) if database_ok else []
+    sources, source_read_failed = (
+        _collect_source_health(session) if database_ok else ([], False)
+    )
     by_status: dict[str, int] = {}
     for source in sources:
         by_status[source["status"]] = by_status.get(source["status"], 0) + 1
+
+    # A failed source_health read must never look like "no problems". Reporting
+    # ok because the query blew up is the worst possible failure mode for a
+    # check whose entire job is to notice breakage.
+    if source_read_failed:
+        problems.append(
+            "source health: could not be read from the database — the "
+            "source_health table may be missing or its schema out of date "
+            "(run `alembic upgrade head`)"
+        )
 
     ran_sources = [s for s in sources if s.get("last_run_at")]
     stale_sources = [s for s in sources if s.get("is_stale")]
@@ -117,10 +146,24 @@ def health_summary(session: Session = Depends(get_session)) -> dict[str, Any]:
             "the ingestion worker looks stopped (`make worker-loop`, or "
             "`docker compose up -d worker`)"
         )
+    elif database_ok and sources and not ran_sources:
+        # Sources are registered but none has ever reported. Without this, a
+        # worker that never started reports "ok" as long as the corpus has
+        # rows — a false green precisely at first deploy, when a deployment
+        # check is most likely to be trusted.
+        problems.append(
+            "worker: no ingestion run has ever completed — the worker has not "
+            "started (`make worker-loop`, or `docker compose up -d worker`)"
+        )
 
     for source in sources:
         if source["status"] == "failing":
-            detail = source.get("last_error") or "returned 0 events on consecutive runs"
+            # last_error was redacted before it was stored; redact again on the
+            # way out so rows written by an older build can't leak either.
+            detail = (
+                redact_secrets(source.get("last_error"))
+                or "returned 0 events on consecutive runs"
+            )
             problems.append(f"source {source['name']}: failing — {detail}"[:300])
         elif source["status"] == "degraded":
             problems.append(f"source {source['name']}: degraded — returned 0 events last run")
@@ -159,12 +202,18 @@ def health_summary(session: Session = Depends(get_session)) -> dict[str, Any]:
     }
 
 
-def _collect_source_health(session: Session) -> list[dict[str, Any]]:
-    """Union of registry-known, DB-persisted, and in-process source health."""
+def _collect_source_health(session: Session) -> tuple[list[dict[str, Any]], bool]:
+    """Union of registry-known, DB-persisted, and in-process source health.
+
+    Returns ``(sources, read_failed)``. ``read_failed`` is True when the
+    persisted health could not be read at all — the caller must surface that
+    as a problem rather than letting an empty result read as "nothing wrong".
+    """
     from app.ingestion import registry
     from app.worker import _source_health_state
 
     sources: dict[str, dict[str, Any]] = {}
+    read_failed = False
 
     try:
         registered = registry.list_sources()
@@ -190,6 +239,7 @@ def _collect_source_health(session: Session) -> list[dict[str, Any]]:
     except Exception:
         logger.exception("Could not read persisted source health.")
         records = []
+        read_failed = True
     for record in records:
         sources[record.source_name] = {
             "name": record.source_name,
@@ -197,7 +247,9 @@ def _collect_source_health(session: Session) -> list[dict[str, Any]]:
             "last_run_at": _iso(record.last_run_at),
             "last_event_count": record.last_event_count,
             "consecutive_zeros": record.consecutive_zeros,
-            "last_error": record.last_error,
+            # Redact on read as well as on write: rows persisted by an older
+            # build predate the write-side redaction.
+            "last_error": redact_secrets(record.last_error),
             "last_error_at": _iso(record.last_error_at),
             "last_success_at": _iso(record.last_success_at),
         }
@@ -214,7 +266,7 @@ def _collect_source_health(session: Session) -> list[dict[str, Any]]:
             "last_run_at": in_process_run_at,
             "last_event_count": state.get("last_event_count"),
             "consecutive_zeros": state.get("consecutive_zeros", 0),
-            "last_error": state.get("last_error"),
+            "last_error": redact_secrets(state.get("last_error")),
             "last_error_at": state.get("last_error_at"),
             "last_success_at": state.get("last_success_at"),
         }
@@ -223,7 +275,7 @@ def _collect_source_health(session: Session) -> list[dict[str, Any]]:
     for source in sources.values():
         source["is_stale"] = _is_before(source.get("last_run_at"), cutoff)
 
-    return list(sources.values())
+    return list(sources.values()), read_failed
 
 
 def _event_corpus_stats(session: Session) -> dict[str, Any]:

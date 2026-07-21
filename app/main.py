@@ -67,6 +67,11 @@ app.add_middleware(
     allow_credentials=settings.cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Browsers hide every response header except a short safelist unless it is
+    # named here. Without this the web client reads null from X-Total-Count
+    # even though the server sent it, and a user reporting a bug can't see the
+    # request id to quote.
+    expose_headers=["X-Total-Count", "X-Request-ID"],
 )
 app.add_middleware(RequestContextMiddleware)
 

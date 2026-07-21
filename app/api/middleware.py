@@ -49,61 +49,66 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         request.state.request_id = request_id
 
         started = time.perf_counter()
+        # The reset lives in a finally: a cancelled request raises
+        # CancelledError, which is a BaseException and so escapes `except
+        # Exception`, leaving the id bound to the task and mislabelling any
+        # further lines it logs while unwinding.
         try:
-            response = await call_next(request)
-        except Exception:
+            try:
+                response = await call_next(request)
+            except Exception:
+                duration_ms = (time.perf_counter() - started) * 1000
+                # exception() rather than error() so the traceback lands in the
+                # log next to the request id that produced it.
+                logger.exception(
+                    "Unhandled error %s %s after %.1fms",
+                    request.method,
+                    request.url.path,
+                    duration_ms,
+                    extra={
+                        "http_method": request.method,
+                        "http_path": request.url.path,
+                        "duration_ms": round(duration_ms, 1),
+                        "outcome": "unhandled_exception",
+                    },
+                )
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "detail": "Internal server error.",
+                        "request_id": request_id,
+                    },
+                    headers={REQUEST_ID_HEADER: request_id},
+                )
+
             duration_ms = (time.perf_counter() - started) * 1000
-            # exception() rather than error() so the traceback lands in the log
-            # next to the request id that produced it.
-            logger.exception(
-                "Unhandled error %s %s after %.1fms",
-                request.method,
-                request.url.path,
-                duration_ms,
-                extra={
-                    "http_method": request.method,
-                    "http_path": request.url.path,
-                    "duration_ms": round(duration_ms, 1),
-                    "outcome": "unhandled_exception",
-                },
+            response.headers[REQUEST_ID_HEADER] = request_id
+
+            level = _access_level(
+                status_code=response.status_code,
+                path=request.url.path,
+                duration_ms=duration_ms,
+                slow_request_ms=self._slow_request_ms,
             )
+            if level is not None:
+                logger.log(
+                    level,
+                    "%s %s -> %s (%.1fms)",
+                    request.method,
+                    request.url.path,
+                    response.status_code,
+                    duration_ms,
+                    extra={
+                        "http_method": request.method,
+                        "http_path": request.url.path,
+                        "http_status": response.status_code,
+                        "duration_ms": round(duration_ms, 1),
+                    },
+                )
+
+            return response
+        finally:
             request_id_var.reset(token)
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "detail": "Internal server error.",
-                    "request_id": request_id,
-                },
-                headers={REQUEST_ID_HEADER: request_id},
-            )
-
-        duration_ms = (time.perf_counter() - started) * 1000
-        response.headers[REQUEST_ID_HEADER] = request_id
-
-        level = _access_level(
-            status_code=response.status_code,
-            path=request.url.path,
-            duration_ms=duration_ms,
-            slow_request_ms=self._slow_request_ms,
-        )
-        if level is not None:
-            logger.log(
-                level,
-                "%s %s -> %s (%.1fms)",
-                request.method,
-                request.url.path,
-                response.status_code,
-                duration_ms,
-                extra={
-                    "http_method": request.method,
-                    "http_path": request.url.path,
-                    "http_status": response.status_code,
-                    "duration_ms": round(duration_ms, 1),
-                },
-            )
-
-        request_id_var.reset(token)
-        return response
 
 
 def _access_level(

@@ -61,6 +61,22 @@ class Settings(BaseSettings):
             "regressions surface without reading every access line."
         ),
     )
+    expose_error_detail: bool | None = Field(
+        default=None,
+        description=(
+            "Whether publicly reachable health endpoints include exception "
+            "messages as well as exception types. Defaults to true only in "
+            "development: messages are where DSNs, hosts, and API keys leak. "
+            "Full detail is always written to the logs regardless."
+        ),
+    )
+
+    @property
+    def error_detail_is_public(self) -> bool:
+        """Resolve ``expose_error_detail``, defaulting by environment."""
+        if self.expose_error_detail is not None:
+            return self.expose_error_detail
+        return self.app_env == "development"
 
     # Proxy configuration for scrapers (IP rotation when needed)
     proxy_url: str | None = Field(
