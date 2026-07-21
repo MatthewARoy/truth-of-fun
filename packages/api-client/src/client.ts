@@ -3,8 +3,11 @@ import type {
   AuthResponse,
   ConciergeRequest,
   ConciergeResponse,
+  EventDetailResponse,
   EventResponse,
+  EventsPage,
   EventsQuery,
+  HealthSummary,
   FolderDetailResponse,
   FolderResponse,
   InterestRequest,
@@ -14,7 +17,7 @@ import type {
   OnboardingResponse,
   RecommendationResponse,
   SourceHealthEntry,
-} from "./types";
+} from "./types.js";
 
 export class ApiClientError extends Error {
   status: number;
@@ -53,6 +56,19 @@ export class TruthOfFunApiClient {
     init?: RequestInit,
     options?: RequestOptions
   ): Promise<T> {
+    const { data } = await this.requestWithResponse<T>(path, init, options);
+    return data;
+  }
+
+  /**
+   * Same as request(), but also hands back the Response so callers can read
+   * headers (X-Total-Count for pagination, X-Request-ID when reporting a bug).
+   */
+  private async requestWithResponse<T>(
+    path: string,
+    init?: RequestInit,
+    options?: RequestOptions
+  ): Promise<{ data: T; response: Response }> {
     const url = `${this.baseUrl}${path}`;
     const method = (init?.method || "GET").toUpperCase();
     const retries = method === "GET" ? Math.max(0, options?.retries ?? 1) : 0;
@@ -84,7 +100,7 @@ export class TruthOfFunApiClient {
               : `Request failed: ${response.status}`;
           throw new ApiClientError(detail, response.status, payload);
         }
-        return payload as T;
+        return { data: payload as T, response };
       } catch (error) {
         lastError = error;
         if (attempts >= retries) {
@@ -113,15 +129,40 @@ export class TruthOfFunApiClient {
   }
 
   // Events
-  async getEvents(query: EventsQuery = {}): Promise<EventResponse[]> {
+  private static buildEventsQuery(query: EventsQuery): string {
     const params = new URLSearchParams();
     Object.entries(query).forEach(([key, value]) => {
       if (value !== undefined && value !== null) {
         params.set(key, String(value));
       }
     });
-    const suffix = params.toString() ? `?${params.toString()}` : "";
-    return this.request<EventResponse[]>(`/events${suffix}`);
+    return params.toString() ? `?${params.toString()}` : "";
+  }
+
+  async getEvents(query: EventsQuery = {}): Promise<EventResponse[]> {
+    return this.request<EventResponse[]>(
+      `/events${TruthOfFunApiClient.buildEventsQuery(query)}`
+    );
+  }
+
+  /**
+   * Like getEvents, but also returns the total number of matches before
+   * pagination (from the X-Total-Count header) so callers can page correctly.
+   */
+  async getEventsPage(query: EventsQuery = {}): Promise<EventsPage> {
+    const { data, response } = await this.requestWithResponse<EventResponse[]>(
+      `/events${TruthOfFunApiClient.buildEventsQuery(query)}`
+    );
+    const header = response.headers.get("X-Total-Count");
+    const total = header === null ? null : Number.parseInt(header, 10);
+    return {
+      events: data,
+      total: total !== null && Number.isFinite(total) ? total : null,
+    };
+  }
+
+  async getEvent(eventId: number): Promise<EventDetailResponse> {
+    return this.request<EventDetailResponse>(`/events/${eventId}`);
   }
 
   async getRecommendations(limit = 25, offset = 0): Promise<RecommendationResponse[]> {
@@ -154,6 +195,11 @@ export class TruthOfFunApiClient {
   // Health
   async getSourceHealth(): Promise<{ sources: SourceHealthEntry[] }> {
     return this.request<{ sources: SourceHealthEntry[] }>("/health/sources");
+  }
+
+  /** One call answering "is anything broken?" — see docs/operations.md. */
+  async getHealthSummary(): Promise<HealthSummary> {
+    return this.request<HealthSummary>("/health/summary");
   }
 
   // Folders

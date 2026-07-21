@@ -83,6 +83,8 @@ def _snapshot_health(
 @router.get(
     "/{provider}/active-key",
     response_model=ActiveKeyResponse,
+    operation_id="internalGetActiveKey",
+    summary="Lease the active API key for a provider (internal scope)",
     dependencies=[Depends(require_internal_scope("internal:secrets:read"))],
 )
 def get_active_key(
@@ -108,6 +110,8 @@ def get_active_key(
 @router.post(
     "/{provider}/usage",
     response_model=UsageReportResponse,
+    operation_id="internalReportKeyUsage",
+    summary="Report API-key usage against a provider quota (internal scope)",
     dependencies=[Depends(require_internal_scope("internal:secrets:write"))],
 )
 def report_key_usage(
@@ -138,6 +142,8 @@ def report_key_usage(
 @router.get(
     "/{provider}/health",
     response_model=ProviderHealthResponse,
+    operation_id="internalGetProviderHealth",
+    summary="Per-key quota health for a provider (internal scope)",
     dependencies=[Depends(require_internal_scope("internal:secrets:read"))],
 )
 def get_provider_health(

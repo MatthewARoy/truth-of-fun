@@ -3,10 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 from geoalchemy2 import Geography
 from sqlalchemy import cast, func, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Session, select
 
 from app.core.database import get_session
@@ -51,6 +52,22 @@ class EventResponse(BaseModel):
 class RecommendationResponse(EventResponse):
     match_score: int
     matched_vibes: list[str]
+
+
+class EventDetailResponse(EventResponse):
+    """Single-event detail, with the provenance fields agents need to cite it.
+
+    ``first_seen_at`` is deliberately *not* called ``created_at``: it is when
+    this platform first ingested the event, which is not when the event was
+    announced. Naming it honestly stops downstream clients from presenting it
+    as an announcement date.
+    """
+
+    first_seen_at: datetime
+    updated_at: datetime
+    source_name: str
+    source_tier: int
+    raw_address: str | None = None
 
 
 class ConciergeRequest(BaseModel):
@@ -243,9 +260,15 @@ def _location_keyword_for_preset(location_preset: str | None) -> str | None:
     return None
 
 
-@router.get("/events", response_model=list[EventResponse])
+@router.get(
+    "/events",
+    response_model=list[EventResponse],
+    operation_id="searchEvents",
+    summary="Search and filter events",
+)
 def search_events(
     *,
+    response: Response,
     session: Session = Depends(get_session),
     q: str | None = Query(default=None, description="Full-text search query"),
     lat: float | None = Query(default=None, description="Latitude for geo search"),
@@ -310,7 +333,11 @@ def search_events(
     if end_bound is not None:
         stmt = stmt.where(Event.start_at <= end_bound)
     if vibe_tag:
-        stmt = stmt.where(Event.tags.contains([vibe_tag]))
+        # events.tags is a plain JSON column, and SQLAlchemy renders
+        # `.contains()` on JSON as a SQL LIKE — which Postgres rejects with
+        # "operator does not exist: json ~~ text", 500ing every tagged query.
+        # Cast to JSONB so containment uses the @> operator it was meant to.
+        stmt = stmt.where(cast(Event.tags, JSONB).contains([vibe_tag]))
 
     location_keyword = _location_keyword_for_preset(location_preset)
     if location_keyword:
@@ -337,6 +364,16 @@ def search_events(
     else:
         stmt = stmt.order_by(Event.start_at.asc())
 
+    # Total matching rows before pagination, so a client (notably an agent
+    # driving this through the MCP server) knows whether to keep paging without
+    # having to fetch a page to find out.
+    total_count = session.exec(
+        select(func.count()).select_from(stmt.order_by(None).subquery())
+    ).one()
+    response.headers["X-Total-Count"] = str(
+        total_count[0] if isinstance(total_count, tuple) else total_count
+    )
+
     stmt = stmt.offset(offset).limit(limit)
     results = session.exec(stmt).all()
 
@@ -355,18 +392,56 @@ def search_events(
         event_ids=[int(ev.id or 0) for ev, _ in events_with_distance if ev.id is not None],
     )
 
-    response: list[EventResponse] = []
+    serialized: list[EventResponse] = []
     for event, distance_meters in events_with_distance:
         event_resp = _serialize_event(
             event, people_interested=counts.get(int(event.id or 0), 0)
         )
         if distance_meters is not None:
             event_resp.distance_miles = round(distance_meters / 1609.34, 2)
-        response.append(event_resp)
-    return response
+        serialized.append(event_resp)
+    return serialized
 
 
-@router.post("/users/me/interests", response_model=InterestResponse)
+@router.get(
+    "/events/{event_id}",
+    response_model=EventDetailResponse,
+    operation_id="getEvent",
+    summary="Get one event with provenance detail",
+)
+def get_event(
+    *,
+    event_id: int,
+    session: Session = Depends(get_session),
+) -> EventDetailResponse:
+    """Return a single event, including which source it came from and when.
+
+    Agents relaying an event to a person need to cite it (``external_url``,
+    ``source_name``) and qualify its freshness (``first_seen_at``), which the
+    list endpoint does not carry.
+    """
+    event = session.get(Event, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found.")
+
+    counts = _people_interested_counts(session=session, event_ids=[event_id])
+    base = _serialize_event(event, people_interested=counts.get(event_id, 0))
+    return EventDetailResponse(
+        **base.model_dump(),
+        first_seen_at=event.created_at,
+        updated_at=event.updated_at,
+        source_name=event.source_name,
+        source_tier=event.source_tier,
+        raw_address=event.raw_address,
+    )
+
+
+@router.post(
+    "/users/me/interests",
+    response_model=InterestResponse,
+    operation_id="updateInterests",
+    summary="Record a save/like/click signal for the current user",
+)
 def update_me_interests(
     *,
     payload: InterestRequest,
@@ -431,7 +506,12 @@ def update_me_interests(
     )
 
 
-@router.post("/users/me/onboarding", response_model=OnboardingResponse)
+@router.post(
+    "/users/me/onboarding",
+    response_model=OnboardingResponse,
+    operation_id="submitOnboarding",
+    summary="Extract vibe tags from a free-text onboarding answer",
+)
 async def set_onboarding_profile(
     *,
     payload: OnboardingRequest,
@@ -463,7 +543,12 @@ async def set_onboarding_profile(
     )
 
 
-@router.get("/recommendations", response_model=list[RecommendationResponse])
+@router.get(
+    "/recommendations",
+    response_model=list[RecommendationResponse],
+    operation_id="getRecommendations",
+    summary="Personalized event recommendations for the current user",
+)
 def get_recommendations(
     *,
     session: Session = Depends(get_session),
@@ -528,7 +613,12 @@ def get_recommendations(
     return recommendations
 
 
-@router.post("/concierge/itinerary", response_model=ConciergeResponse)
+@router.post(
+    "/concierge/itinerary",
+    response_model=ConciergeResponse,
+    operation_id="buildItinerary",
+    summary="Turn a natural-language request into a sequenced itinerary",
+)
 async def build_concierge_itinerary(
     *,
     payload: ConciergeRequest,

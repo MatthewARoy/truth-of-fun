@@ -1,5 +1,16 @@
+# Bounded log retention for every service. Docker's json-file driver is
+# unbounded by default, so a long-running box eventually fills its disk with
+# logs — 3 x 10MB per service keeps roughly a week of normal traffic while
+# staying safe. `make logs` reads these files; see docs/operations.md.
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   db:
+    logging: *default-logging
     image: postgis/postgis:16-3.4
     container_name: truth-of-fun-db
     restart: unless-stopped
@@ -28,8 +39,13 @@ services:
       target: api
     container_name: truth-of-fun-api
     restart: unless-stopped
+    logging: *default-logging
     environment:
       DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/truth_of_fun
+      # Structured logs in containers: one JSON object per line, so
+      # `make logs-errors` and any aggregator can filter on fields rather
+      # than regexing prose. Local `make api` stays human-readable text.
+      LOG_FORMAT: json
       # To enable AAIM key rotation, uncomment these (and the redis service
       # below), then see "Enabling AAIM key rotation" in docs/architecture.md:
       #   AAIM_ENABLED: "true"
@@ -55,9 +71,11 @@ services:
       target: worker
     container_name: truth-of-fun-worker
     restart: unless-stopped
+    logging: *default-logging
     command: ["python", "-m", "app.worker"]
     environment:
       DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/truth_of_fun
+      LOG_FORMAT: json
     depends_on:
       db:
         condition: service_healthy
@@ -76,6 +94,7 @@ services:
     container_name: truth-of-fun-redis
     profiles: ["aaim"]
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "6379:6379"
     healthcheck:

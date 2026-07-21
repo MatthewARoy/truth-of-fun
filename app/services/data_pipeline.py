@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -9,6 +11,23 @@ from sqlmodel import Session, select
 
 from app.models.event import Event
 from app.services.vibe_tagger import ClaudeVibeTagger, VibeTagger
+
+logger = logging.getLogger(__name__)
+
+# Column widths from app/models/event.py. Sources are third-party and their
+# field lengths are not ours to control — 19hz, for instance, uses the event
+# URL as its identifier, and those carry Instagram tracking parameters well
+# past 255 characters. Because the whole cycle commits in one transaction, a
+# single over-long value used to abort ingestion for *every* source, discarding
+# a run's worth of events from all eleven. Clamping at the normalization
+# boundary keeps one bad record from costing the entire cycle.
+_MAX_TITLE = 500
+_MAX_SOURCE_NAME = 100
+_MAX_SOURCE_EVENT_ID = 255
+_MAX_URL = 2048
+_MAX_VENUE_NAME = 255
+_MAX_ORGANIZER_NAME = 255
+_MAX_STATUS = 50
 
 
 class DataPipelineService:
@@ -260,24 +279,32 @@ class DataPipelineService:
             return None
 
         return {
-            "title": title.strip(),
+            "title": self._clamp(title.strip(), _MAX_TITLE),
             "description": self._normalize_str(event.get("description")),
             "start_at": start_at,
             "end_at": self._coerce_datetime(event.get("end_at")),
-            "source_name": source_name.strip(),
+            "source_name": self._clamp(source_name.strip(), _MAX_SOURCE_NAME),
             "source_tier": source_tier,
-            "source_event_id": self._normalize_str(event.get("source_event_id")),
-            "external_url": self._normalize_str(event.get("external_url")),
-            "venue_name": self._normalize_str(event.get("venue_name")),
+            "source_event_id": self._normalize_source_event_id(
+                event.get("source_event_id")
+            ),
+            "external_url": self._clamp(
+                self._normalize_str(event.get("external_url")), _MAX_URL
+            ),
+            "venue_name": self._clamp(
+                self._normalize_str(event.get("venue_name")), _MAX_VENUE_NAME
+            ),
             "raw_address": self._normalize_str(event.get("raw_address")),
             "location": location.strip(),
             "categories": self._normalize_list(event.get("categories")),
             "tags": self._normalize_list(event.get("tags")),
             "price": self._coerce_decimal(event.get("price")),
             "currency": self._normalize_currency(event.get("currency")),
-            "image_url": self._normalize_str(event.get("image_url")),
-            "status": status.strip().lower(),
-            "organizer_name": self._normalize_str(event.get("organizer_name")),
+            "image_url": self._clamp(self._normalize_str(event.get("image_url")), _MAX_URL),
+            "status": self._clamp(status.strip().lower(), _MAX_STATUS),
+            "organizer_name": self._clamp(
+                self._normalize_str(event.get("organizer_name")), _MAX_ORGANIZER_NAME
+            ),
             "attendee_count": self._coerce_int(event.get("attendee_count")),
             "location_confidence": self._coerce_confidence(event.get("location_confidence")),
             "is_free": bool(event.get("is_free", False)),
@@ -380,6 +407,44 @@ class DataPipelineService:
             return None
         cleaned = value.strip()
         return cleaned or None
+
+    def _clamp(self, value: str | None, max_length: int) -> str | None:
+        """Truncate a display string to its column width.
+
+        Losing the tail of an over-long title or venue name is a cosmetic
+        problem; letting it abort the transaction costs the whole cycle.
+        """
+        if value is None or len(value) <= max_length:
+            return value
+        logger.warning(
+            "Truncating a %d-character value to %d for storage: %r",
+            len(value),
+            max_length,
+            value[:80],
+        )
+        return value[:max_length]
+
+    def _normalize_source_event_id(self, value: Any) -> str | None:
+        """Clamp the source identifier without breaking its identity.
+
+        Unlike display text, this field is used to recognise the same event on
+        a later run, so a plain truncation is unsafe: two long URLs sharing a
+        prefix would collapse into one id and the events would be treated as
+        duplicates. Keep a readable prefix and append a digest of the full
+        value, which stays stable across runs and unique per source id.
+        """
+        normalized = self._normalize_str(value)
+        if normalized is None or len(normalized) <= _MAX_SOURCE_EVENT_ID:
+            return normalized
+
+        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:32]
+        prefix = normalized[: _MAX_SOURCE_EVENT_ID - len(digest) - 1]
+        logger.warning(
+            "source_event_id exceeded %d characters; storing prefix+digest for %r",
+            _MAX_SOURCE_EVENT_ID,
+            normalized[:80],
+        )
+        return f"{prefix}:{digest}"
 
     def _normalize_currency(self, value: Any) -> str | None:
         normalized = self._normalize_str(value)

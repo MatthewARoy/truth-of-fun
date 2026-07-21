@@ -35,6 +35,8 @@ The hard parts aren't the scrapers. They're:
 | **Concierge** | Anchor + pre/post sequencing within a 0.5-mile radius of the main event. Inserts 30-minute travel buffers between stops. |
 | **Social** | Shared shortlist folders with invite-based membership, soft-RSVP votes, public share tokens, interest counts on event cards. |
 | **Frontend** | Next.js 15 / React 19 / Tailwind. Typed API client (`packages/api-client`) consumable by any client (web today, mobile later). |
+| **Agent access** | MCP server (`packages/mcp-server`) exposing 10 tools — search, event detail, itinerary building, recommendations, saves, folders, platform health — to Claude Desktop/Code over stdio. Wraps the HTTP API, so auth and rate limits are enforced in one place. |
+| **Operability** | Request-id correlation on every log line, text or JSON output, per-source error capture persisted to the database, and `GET /health/summary` — one call that answers "is anything broken?". See the [operations runbook](./docs/operations.md). |
 | **Infra** | FastAPI (async) + SQLModel + Alembic + Redis. Docker Compose for local. Production guard refuses to boot if `JWT_SECRET_KEY` is unset outside development. |
 
 ## Architecture
@@ -118,8 +120,9 @@ app/                  FastAPI backend (~7,400 LoC Python)
 alembic/              Database migrations
 apps/web/             Next.js frontend (~2,300 LoC TS)
 packages/api-client/  Shared TypeScript HTTP client + types
-scripts/              seed_demo.py, capture_screenshots.mjs
-docs/                 Public architecture and contract docs
+packages/mcp-server/  MCP server exposing the platform to Claude and other agents
+scripts/              seed_demo.py, capture_screenshots.mjs, status.py
+docs/                 Public architecture, contract, and operations docs
 tests/                pytest suite (30 files)
 ```
 
@@ -139,6 +142,8 @@ All runtime config is read from environment variables — see [`.env.example`](.
 ## Documentation
 
 - [Architecture](./docs/architecture.md) — pipeline, dedupe heuristic, scoring weights, intelligence plane
+- [Operations runbook](./docs/operations.md) — health checks, reading logs, what each failure means
+- [MCP server](./packages/mcp-server/README.md) — connecting Claude to the platform
 - [API contract (v1)](./docs/api-contract-v1.md) — request/response shapes for all 20 endpoints
 - [Frontend architecture](./docs/frontend-architecture.md) — shared-client strategy
 - [Input agents](./docs/input-agents/README.md) — per-source ingestion specs
@@ -147,13 +152,22 @@ All runtime config is read from environment variables — see [`.env.example`](.
 ## Testing
 
 ```bash
-.venv/bin/pytest                   # backend (30 test files)
+.venv/bin/pytest                   # backend
 npm run web:typecheck              # web type check
 npm run web:lint                   # web lint
 npm run web:test                   # web route + interaction tests (Playwright; auto-starts the Next dev server, no backend needed)
+npm run mcp-server:typecheck       # MCP server type check
 ```
 
-The backend suite is hermetic except for one database integration test (`tests/test_health_db.py`), which skips automatically when Postgres isn't running (`make db-up` to include it). CI runs the full suite against a PostGIS service container.
+The backend suite is hermetic except for the database integration tests
+(`tests/test_health_db.py`, `tests/test_event_detail_api.py`), which skip
+automatically when Postgres isn't running (`make db-up` to include them). Those
+two need a real Postgres because the events table carries a PostGIS geometry
+column and a tsvector index that SQLite cannot create. CI runs the full suite
+against a PostGIS service container.
+
+Note that `npm run web:test` asserts the UI's no-backend degradation paths, so
+it expects the API to be **stopped**.
 
 ## Responsible-use notes
 

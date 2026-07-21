@@ -21,6 +21,7 @@ The entire `/internal/secrets/*` tree returns **404** unless `AAIM_ENABLED=true`
 | POST | `/auth/register` | none |
 | POST | `/auth/login` | none |
 | GET | `/events` | none |
+| GET | `/events/{event_id}` | none |
 | GET | `/recommendations` | user JWT |
 | POST | `/users/me/onboarding` | user JWT |
 | POST | `/users/me/interests` | user JWT |
@@ -34,7 +35,10 @@ The entire `/internal/secrets/*` tree returns **404** unless `AAIM_ENABLED=true`
 | POST | `/folders/invites/{invite_token}/accept` | user JWT |
 | GET | `/shared/folders/{token}` | none |
 | GET | `/health` | none |
+| GET | `/health/live` | none |
+| GET | `/health/ready` | none |
 | GET | `/health/sources` | none |
+| GET | `/health/summary` | none |
 | GET | `/internal/secrets/{provider}/active-key` | AAIM JWT (`internal:secrets:read`) |
 | POST | `/internal/secrets/{provider}/usage` | AAIM JWT (`internal:secrets:write`) |
 | GET | `/internal/secrets/{provider}/health` | AAIM JWT (`internal:secrets:read`) |
@@ -137,6 +141,33 @@ Query parameters:
 | `offset` | int ≥ 0 (default 0) | |
 
 Response: `EventResponse[]`.
+
+Response headers:
+
+| Header | Notes |
+|---|---|
+| `X-Total-Count` | Total events matching the filters *before* `limit`/`offset`, so clients know whether to keep paging. |
+
+### GET /events/{event_id}
+
+Auth: none. One event with the provenance needed to cite and qualify it.
+Returns `404` when no event has that id.
+
+Response: `EventResponse` plus:
+
+```json
+{
+  "first_seen_at": "datetime (when this platform first ingested the event — NOT when it was announced)",
+  "updated_at": "datetime",
+  "source_name": "string (e.g. ticketmaster, funcheap_sf)",
+  "source_tier": "int (1 = most trusted)",
+  "raw_address": "string | null"
+}
+```
+
+`first_seen_at` is deliberately not named `created_at`: it records when Truth of
+Fun ingested the event, which is not the event's announcement date. Clients must
+not present it as one.
 
 ### GET /recommendations
 
@@ -355,7 +386,8 @@ Response: `FolderDetailResponse`.
 
 ### GET /health
 
-Auth: none. Liveness probe; runs `SELECT 1` against the database.
+Auth: none. Combined check; runs `SELECT 1` against the database. Retained for
+the Docker Compose healthcheck — prefer `/health/live` and `/health/ready`.
 
 Response:
 
@@ -363,6 +395,25 @@ Response:
 {
   "status": "ok",
   "database": "connected"
+}
+```
+
+### GET /health/live
+
+Auth: none. Liveness probe. Does **not** touch the database, so a transient
+database outage does not cause an orchestrator to restart a healthy process.
+
+Response: `{"status": "ok"}`
+
+### GET /health/ready
+
+Auth: none. Readiness probe. Returns `200` when the database answers, and
+`503` (not an exception) with the reason in the body when it does not.
+
+```json
+{
+  "status": "string (ready | unavailable)",
+  "database": "string (connected, or the error type and message)"
 }
 ```
 
@@ -377,14 +428,52 @@ Response:
   "sources": [
     {
       "name": "string",
-      "status": "string (e.g. healthy | degraded | unknown)",
+      "status": "string (healthy | degraded | failing | unknown)",
       "last_run_at": "string (ISO 8601) | null",
       "last_event_count": "int | null",
-      "consecutive_zeros": "int"
+      "consecutive_zeros": "int",
+      "last_error": "string | null (exception type and message from the last failed fetch; cleared on a successful run)",
+      "last_error_at": "string (ISO 8601) | null",
+      "last_success_at": "string (ISO 8601) | null",
+      "is_stale": "bool (no completed run within 14 hours — two ingestion cycles plus headroom)"
     }
   ]
 }
 ```
+
+A source whose fetch raised is reported `failing` immediately, rather than
+climbing the consecutive-zero ladder: an exception is a harder signal than a
+zero count.
+
+### GET /health/summary
+
+Auth: none. Every health signal rolled into one verdict plus an actionable
+problem list — the endpoint to poll when the question is "is anything broken?".
+See [the operations runbook](./operations.md).
+
+```json
+{
+  "status": "string (ok | degraded | failing)",
+  "checked_at": "string (ISO 8601)",
+  "problems": "string[] (human-readable, each naming its subsystem; empty when status is ok)",
+  "database": { "connected": "bool" },
+  "sources": {
+    "total": "int",
+    "by_status": "object (status -> count)",
+    "stale": "int",
+    "worker_stalled": "bool (every source that has ever run is stale — the worker looks stopped)"
+  },
+  "events": {
+    "total_events": "int",
+    "upcoming_events": "int",
+    "newest_event_first_seen_at": "string (ISO 8601) | null"
+  }
+}
+```
+
+When `worker_stalled` is true, the per-source staleness entries are collapsed
+into a single `worker:` problem: every source going stale at once means one
+stopped process, not eleven broken scrapers.
 
 ## Internal secrets (AAIM)
 

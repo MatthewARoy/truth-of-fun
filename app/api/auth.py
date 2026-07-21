@@ -53,7 +53,13 @@ def _create_access_token(*, user: User, settings: Settings) -> str:
     return jwt.encode(payload, settings.jwt_secret_key, algorithm="HS256")
 
 
-@router.post("/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/register",
+    response_model=AuthResponse,
+    status_code=status.HTTP_201_CREATED,
+    operation_id="register",
+    summary="Create an account and return a JWT",
+)
 def register(
     *,
     payload: RegisterRequest,
@@ -86,7 +92,12 @@ def register(
     )
 
 
-@router.post("/login", response_model=AuthResponse)
+@router.post(
+    "/login",
+    response_model=AuthResponse,
+    operation_id="login",
+    summary="Exchange credentials for a JWT",
+)
 def login(
     *,
     payload: LoginRequest,

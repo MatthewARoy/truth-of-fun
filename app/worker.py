@@ -15,6 +15,8 @@ from sqlmodel import Session
 
 from app.core.config import get_settings
 from app.core.database import create_db_and_tables, engine
+from app.core.logging import configure_logging
+from app.core.redaction import redact_secrets
 from app.ingestion import registry
 from app.models.event import Event
 from app.models.source_health import SourceHealthRecord
@@ -26,6 +28,16 @@ logger = logging.getLogger(__name__)
 
 # Module-level source health state, readable by the /health/sources endpoint.
 _source_health_state: dict[str, dict[str, Any]] = {}
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    """Parse an ISO timestamp from the in-memory health state, or None."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 class DataPipelineLike(Protocol):
@@ -105,19 +117,52 @@ class IngestionWorker:
         for source_name in self._registry.list_sources():
             source: SourceLike | None = None
             fetched_events: list[dict[str, Any]] = []
+            fetch_error: str | None = None
             try:
                 source = self._registry.create(source_name)
                 fetched_events = await source.fetch_events()
-            except Exception:
-                logger.exception("Source '%s' failed during fetch.", source_name)
+            except Exception as exc:
+                # Keep the type as well as the message: "TimeoutError" and
+                # "403 Forbidden" call for very different fixes, and the
+                # message alone often omits the class. Redact before storing —
+                # this string is served by GET /health/sources, and scraper
+                # exceptions routinely carry the full request URL.
+                fetch_error = (
+                    f"{type(exc).__name__}: {redact_secrets(str(exc))}"
+                )[:1000]
+                logger.exception(
+                    "Source '%s' failed during fetch.",
+                    source_name,
+                    extra={"source_name": source_name, "outcome": "fetch_failed"},
+                )
             finally:
                 if source is not None:
+                    # A source that recovered from a partial failure returns
+                    # normally but records it here; without this a half-read
+                    # Ticketmaster window looks like a healthy small result.
+                    if fetch_error is None:
+                        partial = getattr(source, "last_fetch_error", None)
+                        if partial:
+                            fetch_error = str(partial)[:1000]
+                            logger.warning(
+                                "Source '%s' completed with a partial failure: %s",
+                                source_name,
+                                partial,
+                                extra={
+                                    "source_name": source_name,
+                                    "outcome": "partial_fetch",
+                                },
+                            )
                     with suppress(Exception):
                         await source.close()
 
             per_source_counts[source_name] = len(fetched_events)
             all_events.extend(fetched_events)
-            self._log_canary_metrics(source_name=source_name, current_count=len(fetched_events))
+            self._log_canary_metrics(
+                source_name=source_name,
+                current_count=len(fetched_events),
+                error=fetch_error,
+            )
             self._log_quota_health(source_name=source_name)
 
         with self._session_factory() as session:
@@ -183,18 +228,19 @@ class IngestionWorker:
                         status=state.get("status", "unknown"),
                         last_event_count=state.get("last_event_count", 0),
                         consecutive_zeros=state.get("consecutive_zeros", 0),
-                        last_run_at=(
-                            datetime.fromisoformat(last_run_at)
-                            if isinstance(last_run_at, str)
-                            else None
-                        ),
+                        last_run_at=_parse_iso(last_run_at),
+                        last_error=state.get("last_error"),
+                        last_error_at=_parse_iso(state.get("last_error_at")),
+                        last_success_at=_parse_iso(state.get("last_success_at")),
                     )
                     session.merge(record)
                 session.commit()
         except Exception:
             logger.debug("Source health persistence skipped (no database session).")
 
-    def _log_canary_metrics(self, *, source_name: str, current_count: int) -> None:
+    def _log_canary_metrics(
+        self, *, source_name: str, current_count: int, error: str | None = None
+    ) -> None:
         history = self._source_count_history[source_name]
         historic_avg = (sum(history) / len(history)) if history else 0.0
 
@@ -203,6 +249,11 @@ class IngestionWorker:
             source_name,
             current_count,
             historic_avg,
+            extra={
+                "source_name": source_name,
+                "events_fetched": current_count,
+                "historic_avg": round(historic_avg, 2),
+            },
         )
 
         if history and historic_avg > 10 and current_count == 0:
@@ -227,18 +278,33 @@ class IngestionWorker:
         else:
             consecutive_zeros = 0
 
-        if consecutive_zeros == 0:
+        # An exception is a harder signal than a zero count: report it as
+        # failing on the first occurrence rather than waiting for the
+        # consecutive-zero ladder to escalate.
+        if error is not None:
+            status = "failing"
+        elif consecutive_zeros == 0:
             status = "healthy"
         elif consecutive_zeros == 1:
             status = "degraded"
         else:
             status = "failing"
 
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
         _source_health_state[source_name] = {
-            "last_run_at": datetime.now(timezone.utc).isoformat(),
+            "last_run_at": now_iso,
             "last_event_count": current_count,
             "status": status,
             "consecutive_zeros": consecutive_zeros,
+            # A successful run clears the error so a recovered source doesn't
+            # keep displaying a stale failure; last_error_at/last_success_at
+            # preserve the history either way.
+            "last_error": error,
+            "last_error_at": now_iso if error is not None else prev.get("last_error_at"),
+            "last_success_at": (
+                now_iso if error is None and current_count > 0 else prev.get("last_success_at")
+            ),
         }
 
     def _reset_quota_exhausted_keys(self) -> None:
@@ -291,10 +357,7 @@ class IngestionWorker:
 
 
 async def _main(*, run_once: bool) -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
-    )
+    configure_logging()
     create_db_and_tables()
     settings = get_settings()
     worker = IngestionWorker(run_interval_seconds=settings.worker_interval_seconds)
