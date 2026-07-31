@@ -55,7 +55,9 @@ class NineteenHzSource(InputAgentSource):
             return None
 
         venue_name = raw_item.get("venue_name")
-        location_is_private = isinstance(venue_name, str) and venue_name.upper() == "TBA"
+        location_is_private = (
+            isinstance(venue_name, str) and venue_name.upper() == "TBA"
+        )
         source_url = raw_item.get("source_url") or self.events_url
         source_record_id = raw_item.get("source_record_id") or source_url
 
@@ -68,9 +70,7 @@ class NineteenHzSource(InputAgentSource):
         city_coords = None if coords else lookup_city_coordinates(city)
         lat, lon = coords or city_coords or (DEFAULT_SF_LAT, DEFAULT_SF_LON)
 
-        if location_is_private:
-            confidence = 0.5
-        elif coords:
+        if coords:
             confidence = 0.9
         elif city_coords:
             # Right city, wrong block — better than a fabricated venue point,
@@ -205,7 +205,9 @@ class NineteenHzSource(InputAgentSource):
         start_local = datetime(
             year, month_value, day_value, start_hour, start_min, tzinfo=SF_TZ
         )
-        end_local = datetime(year, month_value, day_value, end_hour, end_min, tzinfo=SF_TZ)
+        end_local = datetime(
+            year, month_value, day_value, end_hour, end_min, tzinfo=SF_TZ
+        )
         if end_local <= start_local:
             end_local = end_local + timedelta(days=1)
 

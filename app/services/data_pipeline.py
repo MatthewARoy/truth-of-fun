@@ -20,12 +20,14 @@ class DataPipelineService:
     # Live event titles are frequently lineup listings whose artist order
     # rotates between sources and whose support acts differ. Whole-string edit
     # distance reads those as different events (the same Brick & Mortar show
-    # scored 62.9), so compare token sets as well: order-insensitive and
+    # scored 62.9), so compare token sets instead: order-insensitive and
     # tolerant of one side carrying extra names.
-    DEDUPE_TOKEN_SET_THRESHOLD = 85.0
-    # A shared venue inside the time window is strong evidence on its own, so
-    # the title bar drops once the venue matches. Distinct bills at one venue
-    # score far below this (the two Stud parties score 24).
+    #
+    # Only ever applied once the venue matches. Token-set similarity is not
+    # identity on its own — it returns 100 whenever one title's tokens are a
+    # subset of the other — so it needs corroboration. With the venue agreed,
+    # 60 separates the same bill from a different one: distinct parties at one
+    # venue score around 24.
     DEDUPE_SAME_VENUE_TOKEN_THRESHOLD = 60.0
 
     def __init__(self, *, vibe_tagger: VibeTagger | None = None) -> None:
@@ -44,16 +46,24 @@ class DataPipelineService:
         skipped = 0
 
         for event_payload in deduped_events:
-            llm_tags = await self._vibe_tagger.generate_vibe_tags(event_payload.get("description"))
-            event_payload["tags"] = self._merge_lists(event_payload.get("tags", []), llm_tags)
+            llm_tags = await self._vibe_tagger.generate_vibe_tags(
+                event_payload.get("description")
+            )
+            event_payload["tags"] = self._merge_lists(
+                event_payload.get("tags", []), llm_tags
+            )
 
-            existing = self._find_existing_event(session=session, incoming_event=event_payload)
+            existing = self._find_existing_event(
+                session=session, incoming_event=event_payload
+            )
             if existing is None:
                 session.add(Event(**event_payload))
                 inserted += 1
                 continue
 
-            if self.has_significant_new_information(existing_event=existing, incoming_event=event_payload):
+            if self.has_significant_new_information(
+                existing_event=existing, incoming_event=event_payload
+            ):
                 merged_for_update = self._merge_event_payloads(
                     primary=self._event_to_payload(existing),
                     secondary=event_payload,
@@ -79,7 +89,11 @@ class DataPipelineService:
                 continue
 
             duplicate_index = next(
-                (i for i, existing in enumerate(deduped) if self._is_duplicate(existing, normalized)),
+                (
+                    i
+                    for i, existing in enumerate(deduped)
+                    if self._is_duplicate(existing, normalized)
+                ),
                 None,
             )
             if duplicate_index is None:
@@ -114,7 +128,9 @@ class DataPipelineService:
                 candidate,
                 max(
                     self._title_similarity(candidate.title, incoming_event["title"]),
-                    self._token_set_similarity(candidate.title, incoming_event["title"]),
+                    self._token_set_similarity(
+                        candidate.title, incoming_event["title"]
+                    ),
                 ),
             )
             for candidate in candidates
@@ -152,7 +168,9 @@ class DataPipelineService:
             "price",
             "currency",
         ):
-            if self._is_missing(existing_payload.get(key)) and not self._is_missing(incoming_event.get(key)):
+            if self._is_missing(existing_payload.get(key)) and not self._is_missing(
+                incoming_event.get(key)
+            ):
                 return True
 
         existing_categories = set(existing_payload.get("categories") or [])
@@ -167,39 +185,56 @@ class DataPipelineService:
 
         existing_description = existing_payload.get("description")
         incoming_description = incoming_event.get("description")
-        if isinstance(existing_description, str) and isinstance(incoming_description, str):
-            similarity = self._text_similarity(existing_description, incoming_description)
-            if len(incoming_description.strip()) > len(existing_description.strip()) + 30 and similarity < 95:
+        if isinstance(existing_description, str) and isinstance(
+            incoming_description, str
+        ):
+            similarity = self._text_similarity(
+                existing_description, incoming_description
+            )
+            if (
+                len(incoming_description.strip())
+                > len(existing_description.strip()) + 30
+                and similarity < 95
+            ):
                 return True
 
         if existing_payload.get("start_at") and incoming_event.get("start_at"):
-            delta = abs((incoming_event["start_at"] - existing_payload["start_at"]).total_seconds())
+            delta = abs(
+                (
+                    incoming_event["start_at"] - existing_payload["start_at"]
+                ).total_seconds()
+            )
             if delta > 30 * 60:
                 return True
 
         return False
 
     def _is_duplicate(self, left: dict[str, Any], right: dict[str, Any]) -> bool:
-        # A shared ticketing URL is the same event whatever the titles say, and
-        # is worth checking before the time window: sources disagree about
-        # start times more often than they invent a URL.
-        if self._same_external_url(left.get("external_url"), right.get("external_url")):
-            return True
-
+        # Everything below needs the events to be close in time. A URL match
+        # is deliberately inside this guard: connectors fall back to a venue
+        # calendar or profile page when a row has no event-specific link, so
+        # the same URL routinely covers a whole season of different nights.
         start_delta_hours = (
             abs((left["start_at"] - right["start_at"]).total_seconds()) / 3600
         )
         if start_delta_hours > self.DEDUPE_WINDOW_HOURS:
             return False
 
-        if self._title_similarity(left["title"], right["title"]) > self.DEDUPE_TITLE_SIMILARITY_THRESHOLD:
+        if self._same_external_url(left.get("external_url"), right.get("external_url")):
             return True
 
-        token_similarity = self._token_set_similarity(left["title"], right["title"])
-        if token_similarity >= self.DEDUPE_TOKEN_SET_THRESHOLD:
+        if (
+            self._title_similarity(left["title"], right["title"])
+            > self.DEDUPE_TITLE_SIMILARITY_THRESHOLD
+        ):
             return True
 
+        # Token-set similarity alone is not identity: it scores 100 whenever
+        # one title's tokens are a subset of the other ("Comedy Night" vs
+        # "Free Sunday Comedy Night in Downtown SF"). Only trust it when the
+        # venue corroborates.
         if self._same_venue(left.get("venue_name"), right.get("venue_name")):
+            token_similarity = self._token_set_similarity(left["title"], right["title"])
             return token_similarity >= self.DEDUPE_SAME_VENUE_TOKEN_THRESHOLD
 
         return False
@@ -224,7 +259,10 @@ class DataPipelineService:
         return venue_name.split("(")[0].strip().casefold()
 
     def _same_venue(self, left: Any, right: Any) -> bool:
-        left_venue, right_venue = self._normalize_venue(left), self._normalize_venue(right)
+        left_venue, right_venue = (
+            self._normalize_venue(left),
+            self._normalize_venue(right),
+        )
         if not left_venue or not right_venue:
             return False
         return left_venue == right_venue
@@ -277,7 +315,9 @@ class DataPipelineService:
             "source_event_id",
             "currency",
         ):
-            merged[field] = self._prefer_richer_value(primary.get(field), secondary.get(field))
+            merged[field] = self._prefer_richer_value(
+                primary.get(field), secondary.get(field)
+            )
 
         # Status only escalates: scheduled < postponed < cancelled < past.
         merged["status"] = max(
@@ -293,9 +333,15 @@ class DataPipelineService:
             int(primary.get("source_tier", 99)),
             int(secondary.get("source_tier", 99)),
         )
-        merged["categories"] = self._merge_lists(primary.get("categories", []), secondary.get("categories", []))
-        merged["tags"] = self._merge_lists(primary.get("tags", []), secondary.get("tags", []))
-        merged["price"] = self._prefer_price(primary.get("price"), secondary.get("price"))
+        merged["categories"] = self._merge_lists(
+            primary.get("categories", []), secondary.get("categories", [])
+        )
+        merged["tags"] = self._merge_lists(
+            primary.get("tags", []), secondary.get("tags", [])
+        )
+        merged["price"] = self._prefer_price(
+            primary.get("price"), secondary.get("price")
+        )
         merged["organizer_name"] = self._prefer_richer_value(
             primary.get("organizer_name"), secondary.get("organizer_name")
         )
@@ -307,7 +353,9 @@ class DataPipelineService:
             float(primary.get("location_confidence") or 1.0),
             float(secondary.get("location_confidence") or 1.0),
         )
-        merged["is_free"] = bool(primary.get("is_free")) or bool(secondary.get("is_free"))
+        merged["is_free"] = bool(primary.get("is_free")) or bool(
+            secondary.get("is_free")
+        )
 
         return merged
 
@@ -353,7 +401,9 @@ class DataPipelineService:
             "status": status.strip().lower(),
             "organizer_name": self._normalize_str(event.get("organizer_name")),
             "attendee_count": self._coerce_int(event.get("attendee_count")),
-            "location_confidence": self._coerce_confidence(event.get("location_confidence")),
+            "location_confidence": self._coerce_confidence(
+                event.get("location_confidence")
+            ),
             "is_free": bool(event.get("is_free", False)),
         }
 
@@ -498,7 +548,9 @@ class DataPipelineService:
             return left
         return max(left, right)
 
-    def _prefer_price(self, left: Decimal | None, right: Decimal | None) -> Decimal | None:
+    def _prefer_price(
+        self, left: Decimal | None, right: Decimal | None
+    ) -> Decimal | None:
         if left is None:
             return right
         if right is None:

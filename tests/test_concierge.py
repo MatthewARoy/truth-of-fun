@@ -73,3 +73,25 @@ def test_extract_timeframe_recognises_sunday() -> None:
 def test_sunday_is_an_accepted_llm_timeframe() -> None:
     """The LLM schema and the validator must agree the label exists."""
     assert "this_sunday" in _KNOWN_TIMEFRAMES
+
+
+def test_named_weekday_wins_over_the_weekend_branch() -> None:
+    """"this weekend on Sunday" must resolve to Sunday (review P2).
+
+    The weekend branch ran first, so the deterministic parser — the path taken
+    whenever the LLM is unavailable — searched the whole weekend and could
+    still anchor on Saturday.
+    """
+    now = datetime(2026, 7, 30, 19, 0, tzinfo=timezone.utc)  # Thursday
+    label, start, _ = _extract_timeframe("date night this weekend on sunday", now=now)
+
+    assert label == "this_sunday"
+    assert start.astimezone(SF_TZ).day == 2
+
+
+def test_plain_weekend_request_still_resolves_to_the_weekend() -> None:
+    """No weekday named means the weekend window, unchanged."""
+    now = datetime(2026, 7, 30, 19, 0, tzinfo=timezone.utc)
+    label, _, _ = _extract_timeframe("something fun this weekend", now=now)
+
+    assert label == "this_weekend"

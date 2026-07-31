@@ -369,3 +369,55 @@ def test_find_existing_event_matches_a_stored_rotating_lineup(monkeypatch) -> No
     )
 
     assert service._find_existing_event(session=_FakeSession(), incoming_event=incoming) is stored
+
+
+# Codex review of PR #22 found the two rules below were over-broad.
+
+def test_shared_listing_url_does_not_merge_events_on_different_nights() -> None:
+    """A venue calendar URL is not an event identity (review P1).
+
+    Sources fall back to a listing/profile URL when a row has no event-specific
+    link: 8 Kips Berkeley events across 8 different nights all carry
+    https://www.instagram.com/kipsberkeley/. Matching on URL alone, before the
+    time window, collapsed all of them into one.
+    """
+    service = DataPipelineService()
+    url = "https://www.instagram.com/kipsberkeley/"
+    events = [
+        _event(
+            title="College Thursday",
+            start_at=datetime(2026, 7, 30, 22, 0, tzinfo=timezone.utc),
+            external_url=url,
+        ),
+        _event(
+            title="Friday Party",
+            start_at=datetime(2026, 7, 31, 22, 0, tzinfo=timezone.utc),
+            external_url=url,
+        ),
+    ]
+
+    assert len(service.deduplicate_events(events)) == 2
+
+
+def test_token_subset_titles_at_different_venues_are_not_merged() -> None:
+    """token_set_ratio returns 100 for a subset, which is not identity (review P1).
+
+    "Comedy Night" scores 100 against "Free Sunday Comedy Night in Downtown SF".
+    Without venue or URL corroboration that merged unrelated events an hour
+    apart and silently dropped one.
+    """
+    service = DataPipelineService()
+    events = [
+        _event(
+            title="Comedy Night",
+            start_at=datetime(2026, 8, 2, 19, 0, tzinfo=timezone.utc),
+            venue_name="The Punch Line",
+        ),
+        _event(
+            title="Free Sunday Comedy Night in Downtown SF",
+            start_at=datetime(2026, 8, 2, 20, 0, tzinfo=timezone.utc),
+            venue_name="The Function",
+        ),
+    ]
+
+    assert len(service.deduplicate_events(events)) == 2

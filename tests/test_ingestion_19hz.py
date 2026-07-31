@@ -77,3 +77,27 @@ def test_sf_venue_without_a_cache_entry_still_reports_san_francisco() -> None:
     normalized = source.normalize_raw(rows[0])
     assert normalized is not None
     assert normalized.location.city == "San Francisco"
+
+
+def test_private_location_confidence_stays_below_the_radius_threshold() -> None:
+    """A TBA venue is still a centroid guess (review P2).
+
+    GET /events excludes location_confidence < 0.5 from radius search, but a
+    private/TBA venue was assigned exactly 0.5 while sitting on the SF
+    centroid, so it passed the inclusive >= comparison and stayed in results.
+    """
+    source = NineteenHzSource()
+    html = """
+    <table>
+      <tr>
+        <td>Sun: Aug 2 (10pm-4am)</td>
+        <td><a href="https://19hz.info/e/9">Secret Party @ TBA</a></td>
+        <td>techno</td>
+      </tr>
+    </table>
+    """
+    rows = source._extract_rows(html)
+    normalized = source.normalize_raw(rows[0])
+    assert normalized is not None
+    assert normalized.location.location_is_private is True
+    assert normalized.location.location_confidence < 0.5

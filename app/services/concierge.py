@@ -99,17 +99,31 @@ def sequence_itinerary(
 
     stops: list[SequencedStop] = []
     if pre_event is not None:
-        stops.append(_build_stop(kind="pre_event_drink", event=pre_event, travel_buffer_minutes_before=0))
+        stops.append(
+            _build_stop(
+                kind="pre_event_drink", event=pre_event, travel_buffer_minutes_before=0
+            )
+        )
 
-    stops.append(_build_stop(kind="main_event", event=anchor, travel_buffer_minutes_before=30))
+    stops.append(
+        _build_stop(kind="main_event", event=anchor, travel_buffer_minutes_before=30)
+    )
 
     if post_event is not None:
-        stops.append(_build_stop(kind="late_night_snack", event=post_event, travel_buffer_minutes_before=30))
+        stops.append(
+            _build_stop(
+                kind="late_night_snack",
+                event=post_event,
+                travel_buffer_minutes_before=30,
+            )
+        )
 
     return stops
 
 
-def _build_stop(*, kind: str, event: EventLike, travel_buffer_minutes_before: int) -> SequencedStop:
+def _build_stop(
+    *, kind: str, event: EventLike, travel_buffer_minutes_before: int
+) -> SequencedStop:
     return SequencedStop(
         kind=kind,
         event_id=int(event.id or 0),
@@ -144,19 +158,29 @@ def _extract_timeframe(
     *,
     now: datetime,
 ) -> tuple[str, datetime, datetime]:
+    # A named weekday is more specific than "this weekend" and is checked
+    # first: "date night this weekend on Sunday" means Sunday, and the LLM is
+    # already instructed to prefer the weekday. Matches a bare weekday too
+    # ("date night Sunday"), not just "this X".
+    named_weekday = next(
+        (
+            weekday_label
+            for weekday_label in _WEEKDAY_LABELS
+            if weekday_label.removeprefix("this_") in text
+        ),
+        None,
+    )
+
     if "tonight" in text:
         label = "tonight"
     elif "tomorrow" in text:
         label = "tomorrow"
+    elif named_weekday is not None:
+        label = named_weekday
     elif "this weekend" in text:
         label = "this_weekend"
     else:
-        # Match a bare weekday too ("date night Sunday"), not just "this X".
         label = "upcoming_week"
-        for weekday_label in _WEEKDAY_LABELS:
-            if weekday_label.removeprefix("this_") in text:
-                label = weekday_label
-                break
     start, end = _resolve_timeframe_window(label, now=now)
     return label, start, end
 
@@ -217,7 +241,9 @@ class ClaudeIntentParser:
         settings = get_settings()
         self._api_key = api_key or settings.anthropic_api_key
         self._model = model or settings.anthropic_model
-        self._client = anthropic.AsyncAnthropic(api_key=self._api_key) if self._api_key else None
+        self._client = (
+            anthropic.AsyncAnthropic(api_key=self._api_key) if self._api_key else None
+        )
 
     async def parse(self, prompt: str, *, now: datetime) -> ParsedIntent | None:
         if self._client is None or not prompt or not prompt.strip():
@@ -230,7 +256,10 @@ class ClaudeIntentParser:
                 messages=[{"role": "user", "content": prompt.strip()}],
             )
         except Exception:
-            logger.warning("Claude intent parse failed; falling back to keyword parser.", exc_info=True)
+            logger.warning(
+                "Claude intent parse failed; falling back to keyword parser.",
+                exc_info=True,
+            )
             return None
 
         content = response.content[0].text if response.content else ""
@@ -247,7 +276,11 @@ class ClaudeIntentParser:
             timeframe = "upcoming_week"
 
         geography_raw = payload.get("geography")
-        geography = geography_raw.strip().lower() if isinstance(geography_raw, str) and geography_raw.strip() else None
+        geography = (
+            geography_raw.strip().lower()
+            if isinstance(geography_raw, str) and geography_raw.strip()
+            else None
+        )
 
         window_start, window_end = _resolve_timeframe_window(timeframe, now=now)
         return ParsedIntent(
@@ -287,7 +320,9 @@ def anchor_hour_range(intent: str) -> tuple[int, int] | None:
     return _INTENT_ANCHOR_HOURS.get(intent)
 
 
-def _resolve_timeframe_window(label: str, *, now: datetime) -> tuple[datetime, datetime]:
+def _resolve_timeframe_window(
+    label: str, *, now: datetime
+) -> tuple[datetime, datetime]:
     """Resolve a timeframe label to a UTC window computed in SF local time.
 
     Day windows run into the small hours of the next local morning so that
@@ -296,11 +331,15 @@ def _resolve_timeframe_window(label: str, *, now: datetime) -> tuple[datetime, d
     local_now = now.astimezone(LOCAL_TZ)
     day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    def _to_utc(start_local: datetime, end_local: datetime) -> tuple[datetime, datetime]:
+    def _to_utc(
+        start_local: datetime, end_local: datetime
+    ) -> tuple[datetime, datetime]:
         return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
 
     if label == "tonight":
-        return _to_utc(day_start.replace(hour=18), day_start + timedelta(days=1, hours=3))
+        return _to_utc(
+            day_start.replace(hour=18), day_start + timedelta(days=1, hours=3)
+        )
     if label == "tomorrow":
         tomorrow = day_start + timedelta(days=1)
         return _to_utc(tomorrow.replace(hour=10), tomorrow + timedelta(days=1, hours=2))
@@ -312,7 +351,10 @@ def _resolve_timeframe_window(label: str, *, now: datetime) -> tuple[datetime, d
     if label == "this_weekend":
         days_until_sat = (5 - day_start.weekday()) % 7
         saturday = day_start + timedelta(days=days_until_sat)
-        return _to_utc(saturday.replace(hour=10), saturday + timedelta(days=1, hours=23, minutes=59))
+        return _to_utc(
+            saturday.replace(hour=10),
+            saturday + timedelta(days=1, hours=23, minutes=59),
+        )
     return now, now + timedelta(days=7)
 
 

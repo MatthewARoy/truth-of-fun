@@ -31,13 +31,31 @@ class FuncheapSFSource(BaseSource):
     day_index_url_template = "https://sf.funcheap.com/%Y/%m/%d/"
 
     # Section and nav slugs that share the single-segment shape of event URLs.
-    _NAV_SLUGS = frozenset({
-        "events", "free-events", "today", "weekend", "win", "subscribe",
-        "submit-form", "about", "privacy-policy", "terms-service",
-        "dmca-requests", "contact", "advertise", "newsletter",
-        "free-museum-days", "add-event", "category", "venue", "region",
-        "city-guide", "feed",
-    })
+    _NAV_SLUGS = frozenset(
+        {
+            "events",
+            "free-events",
+            "today",
+            "weekend",
+            "win",
+            "subscribe",
+            "submit-form",
+            "about",
+            "privacy-policy",
+            "terms-service",
+            "dmca-requests",
+            "contact",
+            "advertise",
+            "newsletter",
+            "free-museum-days",
+            "add-event",
+            "category",
+            "venue",
+            "region",
+            "city-guide",
+            "feed",
+        }
+    )
 
     def __init__(
         self,
@@ -278,7 +296,10 @@ class FuncheapSFSource(BaseSource):
             "venue_name": venue_name,
             "raw_address": raw_address,
             "location": f"POINT({lon} {lat})",
-            "location_confidence": 0.9 if coords else (0.5 if venue_name else 0.3),
+            # Knowing the venue's name doesn't locate it: without a cache hit
+            # this is still the SF centroid, so it must stay below the radius
+            # search threshold rather than claiming 0.5.
+            "location_confidence": 0.9 if coords else 0.4,
             "categories": [],
             "tags": [],
             "price": cost_fields["price"],
@@ -371,7 +392,13 @@ class FuncheapSFSource(BaseSource):
                     hour = 0
 
         start_dt = datetime(
-            base_date.year, base_date.month, base_date.day, hour, minute, 0, tzinfo=SF_TZ
+            base_date.year,
+            base_date.month,
+            base_date.day,
+            hour,
+            minute,
+            0,
+            tzinfo=SF_TZ,
         )
         start_utc = start_dt.astimezone(timezone.utc)
 
@@ -382,7 +409,7 @@ class FuncheapSFSource(BaseSource):
         if time_match:
             end_match = re.search(
                 r"(?:to|until|[-–])\s*(?:(\d{1,2}):(\d{2})\s*(am|pm)?|(\d{1,2})\s*(am|pm))",
-                full_text[time_match.end():],
+                full_text[time_match.end() :],
                 re.IGNORECASE,
             )
         if end_match:
@@ -401,7 +428,13 @@ class FuncheapSFSource(BaseSource):
                     eh = 0
             try:
                 end_dt = datetime(
-                    base_date.year, base_date.month, base_date.day, eh, em, 0, tzinfo=SF_TZ
+                    base_date.year,
+                    base_date.month,
+                    base_date.day,
+                    eh,
+                    em,
+                    0,
+                    tzinfo=SF_TZ,
                 )
                 if end_dt <= start_dt:
                     end_dt += timedelta(days=1)
@@ -419,8 +452,18 @@ class FuncheapSFSource(BaseSource):
             r"(\d{4})-(\d{2})-(\d{2})",
         ]
         months = {
-            "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-            "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+            "jan": 1,
+            "feb": 2,
+            "mar": 3,
+            "apr": 4,
+            "may": 5,
+            "jun": 6,
+            "jul": 7,
+            "aug": 8,
+            "sep": 9,
+            "oct": 10,
+            "nov": 11,
+            "dec": 12,
         }
         for pat in patterns:
             m = re.search(pat, text, re.IGNORECASE)
