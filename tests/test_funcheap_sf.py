@@ -192,3 +192,60 @@ def test_is_event_url_rejects_day_index_and_nav_pages() -> None:
         "https://example.com/some-event/",
     ]:
         assert not source._is_event_url(url), url
+
+
+def test_cost_fields_marks_free_events_as_free() -> None:
+    """A free event must set is_free, not just price 0 (regression for #19)."""
+    source = FuncheapSFSource(proxy=None)
+    fields = source._cost_fields("Sunday, August 2, 2026 - 11:00 am to 5:00 pm | Cost: FREE")
+    assert fields == {"price": 0.0, "currency": "USD", "is_free": True}
+
+
+def test_cost_fields_free_despite_dollar_amounts_elsewhere_in_block() -> None:
+    """The detail block carries more than the cost; a nearby $ must not mask FREE.
+
+    'Manny's Neighborhood Trash Cleanup w/ $1 Beer' is a real Aug 2 event whose
+    admission is free — the old whole-string check returned $1 as the price.
+    """
+    source = FuncheapSFSource(proxy=None)
+    fields = source._cost_fields(
+        "Sunday, August 2, 2026 - 10:00 am | Cost: FREE | Manny's, $1 Beer after"
+    )
+    assert fields["is_free"] is True
+    assert fields["price"] == 0.0
+
+
+def test_cost_fields_reads_the_priced_cost_label() -> None:
+    """A priced event takes its price from the Cost: label, not a stray amount."""
+    source = FuncheapSFSource(proxy=None)
+    fields = source._cost_fields("Saturday, March 14, 2026 - 7pm | Cost: $10 | 21+")
+    assert fields == {"price": 10.0, "currency": "USD", "is_free": False}
+
+
+def test_cost_fields_unknown_cost_stays_null() -> None:
+    """No cost information means null, never a fabricated zero."""
+    source = FuncheapSFSource(proxy=None)
+    fields = source._cost_fields("Sunday, August 2, 2026 - 1:00 pm")
+    assert fields == {"price": None, "currency": None, "is_free": False}
+
+
+def test_cost_fields_falls_through_an_empty_cost_element_to_the_detail_block() -> None:
+    """An empty '.cost' element must not shadow the detail block (regression for #19).
+
+    funcheap renders the label and the value in different places: the .cost
+    element is often just ' | Cost:' while the real value sits in the detail
+    block, so `cost_text or detail_text` picked the useless one.
+    """
+    source = FuncheapSFSource(proxy=None)
+    fields = source._cost_fields(
+        " | Cost:",
+        "Sunday, August 2, 2026 - 10:00 am to 5:00 pm | Cost: FREE* Asian Art Museum",
+    )
+    assert fields["is_free"] is True
+    assert fields["price"] == 0.0
+
+
+def test_cost_fields_reads_free_with_a_footnote_asterisk() -> None:
+    """'FREE*' is how the site marks free-with-conditions; still free."""
+    source = FuncheapSFSource(proxy=None)
+    assert source._cost_fields("Cost: FREE*")["is_free"] is True

@@ -259,7 +259,7 @@ class FuncheapSFSource(BaseSource):
         if start_at is None:
             return None
 
-        price, currency = self._parse_cost(cost_text or detail_text)
+        cost_fields = self._cost_fields(cost_text, detail_text)
 
         source_event_id = url.rstrip("/").split("/")[-1] or url
 
@@ -281,8 +281,9 @@ class FuncheapSFSource(BaseSource):
             "location_confidence": 0.9 if coords else (0.5 if venue_name else 0.3),
             "categories": [],
             "tags": [],
-            "price": price,
-            "currency": currency,
+            "price": cost_fields["price"],
+            "currency": cost_fields["currency"],
+            "is_free": cost_fields["is_free"],
             "image_url": None,
             "status": "scheduled",
         }
@@ -439,6 +440,47 @@ class FuncheapSFSource(BaseSource):
                     except (ValueError, KeyError, IndexError):
                         continue
         return None
+
+    _NO_COST: dict[str, Any] = {"price": None, "currency": None, "is_free": False}
+
+    def _cost_fields(self, *texts: str) -> dict[str, Any]:
+        """Extract price/currency/is_free from the first informative text.
+
+        Candidates are tried in order because the site splits the label from
+        the value: the ``.cost`` element is frequently just ``" | Cost:"``
+        while the real figure sits in the detail block, so a plain
+        ``cost_text or detail_text`` picks the useless one.
+
+        Within a candidate, scope to the ``Cost:`` label when present. The
+        detail block also carries date, venue and address, so a bare "is there
+        a ``$`` anywhere" test misreads free events that merely mention a price
+        nearby ("Cost: FREE | $1 Beer after").
+        """
+        for text in texts:
+            if not text:
+                continue
+            fields = self._cost_fields_from(text)
+            if fields != self._NO_COST:
+                return fields
+        return dict(self._NO_COST)
+
+    def _cost_fields_from(self, text: str) -> dict[str, Any]:
+        label = re.search(r"cost:\s*([^|\n]*)", text, flags=re.IGNORECASE)
+        scope = label.group(1) if label else text
+
+        # "FREE*" is the site's free-with-conditions marker; still free.
+        if re.search(r"\bfree\b", scope, flags=re.IGNORECASE) and "$" not in scope:
+            return {"price": 0.0, "currency": "USD", "is_free": True}
+
+        amount = re.search(r"\$\s*(\d+(?:\.\d{2})?)", scope)
+        if amount:
+            try:
+                value = float(amount.group(1))
+            except ValueError:
+                return dict(self._NO_COST)
+            return {"price": value, "currency": "USD", "is_free": value == 0.0}
+
+        return dict(self._NO_COST)
 
     def _parse_cost(self, text: str) -> tuple[float | None, str | None]:
         """Extract numeric price and currency from cost text."""

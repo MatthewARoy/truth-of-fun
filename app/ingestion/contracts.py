@@ -52,7 +52,9 @@ class OffersModel(BaseModel):
     is_free: bool = False
     price_min: float | None = None
     price_max: float | None = None
-    currency: str | None = Field(default="USD", min_length=3, max_length=3)
+    # No default: a currency is only meaningful alongside an amount. Sources
+    # that parse a price set this explicitly.
+    currency: str | None = Field(default=None, min_length=3, max_length=3)
     price_text: str | None = None
 
 
