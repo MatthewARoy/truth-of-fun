@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import Any
 
 from Levenshtein import ratio as levenshtein_ratio
+from rapidfuzz import fuzz
 from sqlmodel import Session, select
 
 from app.models.event import Event
@@ -16,6 +17,16 @@ class DataPipelineService:
 
     DEDUPE_WINDOW_HOURS = 2
     DEDUPE_TITLE_SIMILARITY_THRESHOLD = 85.0
+    # Live event titles are frequently lineup listings whose artist order
+    # rotates between sources and whose support acts differ. Whole-string edit
+    # distance reads those as different events (the same Brick & Mortar show
+    # scored 62.9), so compare token sets as well: order-insensitive and
+    # tolerant of one side carrying extra names.
+    DEDUPE_TOKEN_SET_THRESHOLD = 85.0
+    # A shared venue inside the time window is strong evidence on its own, so
+    # the title bar drops once the venue matches. Distinct bills at one venue
+    # score far below this (the two Stud parties score 24).
+    DEDUPE_SAME_VENUE_TOKEN_THRESHOLD = 60.0
 
     def __init__(self, *, vibe_tagger: VibeTagger | None = None) -> None:
         self._vibe_tagger = vibe_tagger or ClaudeVibeTagger()
@@ -96,14 +107,32 @@ class DataPipelineService:
         if not candidates:
             return None
 
-        scored = [
-            (candidate, self._title_similarity(candidate.title, incoming_event["title"]))
+        # Same rule as in-batch dedupe: matching on title alone here would let
+        # a duplicate that survived one cycle be re-inserted on the next.
+        viable = [
+            (
+                candidate,
+                max(
+                    self._title_similarity(candidate.title, incoming_event["title"]),
+                    self._token_set_similarity(candidate.title, incoming_event["title"]),
+                ),
+            )
             for candidate in candidates
+            if self._is_duplicate(self._candidate_payload(candidate), incoming_event)
         ]
-        viable = [item for item in scored if item[1] > self.DEDUPE_TITLE_SIMILARITY_THRESHOLD]
         if not viable:
             return None
         return max(viable, key=lambda item: item[1])[0]
+
+    @staticmethod
+    def _candidate_payload(candidate: Event) -> dict[str, Any]:
+        """The subset of a stored event the duplicate check reads."""
+        return {
+            "title": candidate.title,
+            "start_at": candidate.start_at,
+            "venue_name": candidate.venue_name,
+            "external_url": candidate.external_url,
+        }
 
     def has_significant_new_information(
         self,
@@ -151,16 +180,61 @@ class DataPipelineService:
         return False
 
     def _is_duplicate(self, left: dict[str, Any], right: dict[str, Any]) -> bool:
-        start_at_left = left["start_at"]
-        start_at_right = right["start_at"]
-        start_delta_hours = abs((start_at_left - start_at_right).total_seconds()) / 3600
+        # A shared ticketing URL is the same event whatever the titles say, and
+        # is worth checking before the time window: sources disagree about
+        # start times more often than they invent a URL.
+        if self._same_external_url(left.get("external_url"), right.get("external_url")):
+            return True
+
+        start_delta_hours = (
+            abs((left["start_at"] - right["start_at"]).total_seconds()) / 3600
+        )
         if start_delta_hours > self.DEDUPE_WINDOW_HOURS:
             return False
-        title_similarity = self._title_similarity(left["title"], right["title"])
-        return title_similarity > self.DEDUPE_TITLE_SIMILARITY_THRESHOLD
+
+        if self._title_similarity(left["title"], right["title"]) > self.DEDUPE_TITLE_SIMILARITY_THRESHOLD:
+            return True
+
+        token_similarity = self._token_set_similarity(left["title"], right["title"])
+        if token_similarity >= self.DEDUPE_TOKEN_SET_THRESHOLD:
+            return True
+
+        if self._same_venue(left.get("venue_name"), right.get("venue_name")):
+            return token_similarity >= self.DEDUPE_SAME_VENUE_TOKEN_THRESHOLD
+
+        return False
+
+    @staticmethod
+    def _same_external_url(left: Any, right: Any) -> bool:
+        if not isinstance(left, str) or not isinstance(right, str):
+            return False
+        left_url, right_url = left.strip().rstrip("/"), right.strip().rstrip("/")
+        return bool(left_url) and left_url == right_url
+
+    @staticmethod
+    def _normalize_venue(venue_name: Any) -> str:
+        """Reduce a venue string to a comparable core.
+
+        Sources append their own decoration — 19hz tacks the city and genre
+        list onto the name ("The Stud (San Francisco) house, disco") — so
+        compare only the part before the first parenthesis.
+        """
+        if not isinstance(venue_name, str):
+            return ""
+        return venue_name.split("(")[0].strip().casefold()
+
+    def _same_venue(self, left: Any, right: Any) -> bool:
+        left_venue, right_venue = self._normalize_venue(left), self._normalize_venue(right)
+        if not left_venue or not right_venue:
+            return False
+        return left_venue == right_venue
 
     def _title_similarity(self, left_title: str, right_title: str) -> float:
         return self._text_similarity(left_title, right_title)
+
+    @staticmethod
+    def _token_set_similarity(left_title: str, right_title: str) -> float:
+        return float(fuzz.token_set_ratio(left_title, right_title))
 
     def _text_similarity(self, left_text: str, right_text: str) -> float:
         left = (left_text or "").strip().lower()
