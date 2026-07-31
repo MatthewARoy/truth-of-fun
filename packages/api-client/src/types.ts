@@ -104,6 +104,9 @@ export type EventsQuery = {
   lat?: number;
   lng?: number;
   radius_miles?: number;
+  /** Radius search only. Defaults to 0.5 server-side, excluding city-centroid
+   * fallbacks; pass 0 to include them. */
+  min_location_confidence?: number;
   vibe_tag?: string;
   time_preset?: "tonight" | "this_weekend";
   location_preset?: "sf" | "oakland" | "san_jose";

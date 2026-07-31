@@ -9,7 +9,7 @@ from app.ingestion.contracts import CanonicalEvent
 from app.ingestion.contracts import LocationModel
 from app.ingestion.contracts import SourceMetadata
 from app.ingestion.input_agent import InputAgentSource
-from app.ingestion.venue_cache import lookup_venue_coordinates
+from app.ingestion.venue_cache import lookup_city_coordinates, lookup_venue_coordinates
 
 SF_TZ = ZoneInfo("America/Los_Angeles")
 DEFAULT_SF_LAT = 37.7749
@@ -30,6 +30,21 @@ class NineteenHzSource(InputAgentSource):
     async def extract_candidate(self, candidate: Any) -> dict[str, Any] | None:
         return candidate if isinstance(candidate, dict) else None
 
+    @staticmethod
+    def _parse_venue_city(venue_name: str | None) -> str | None:
+        """Read the parenthesised city out of a 19hz venue string.
+
+        The listing renders venues as "Venue Name (City) genre, genre", so the
+        first parenthesised group is the city.
+        """
+        if not venue_name:
+            return None
+        match = re.search(r"\(([^)]+)\)", venue_name)
+        if not match:
+            return None
+        city = match.group(1).strip()
+        return city or None
+
     def normalize_raw(self, raw_item: dict[str, Any]) -> CanonicalEvent | None:
         title = raw_item.get("title")
         if not isinstance(title, str) or not title.strip():
@@ -44,13 +59,23 @@ class NineteenHzSource(InputAgentSource):
         source_url = raw_item.get("source_url") or self.events_url
         source_record_id = raw_item.get("source_record_id") or source_url
 
+        # 19hz lists the city in parentheses after the venue ("Fuze (San Jose)
+        # house, disco"), so an unresolvable venue can still be placed in the
+        # right city instead of on SF's centroid.
+        city = self._parse_venue_city(venue_name) or "San Francisco"
+
         coords = lookup_venue_coordinates(venue_name)
-        lat = coords[0] if coords else DEFAULT_SF_LAT
-        lon = coords[1] if coords else DEFAULT_SF_LON
+        city_coords = None if coords else lookup_city_coordinates(city)
+        lat, lon = coords or city_coords or (DEFAULT_SF_LAT, DEFAULT_SF_LON)
+
         if location_is_private:
             confidence = 0.5
         elif coords:
             confidence = 0.9
+        elif city_coords:
+            # Right city, wrong block — better than a fabricated venue point,
+            # but never to be treated as an exact location.
+            confidence = 0.4
         else:
             confidence = 0.3
 
@@ -69,7 +94,7 @@ class NineteenHzSource(InputAgentSource):
             end_time=end_time,
             location=LocationModel(
                 venue_name=venue_name,
-                city="San Francisco",
+                city=city,
                 region="CA",
                 lat=lat,
                 lon=lon,

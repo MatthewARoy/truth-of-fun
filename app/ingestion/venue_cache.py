@@ -95,6 +95,52 @@ VENUE_COORDINATES: dict[str, tuple[float, float]] = {
 }
 
 
+# City centroids, used only when a venue can't be resolved but its city is
+# known. Coarse by design: the point is to land in the right city rather than
+# to pretend to venue-level precision. Callers must pair these with a low
+# location_confidence.
+CITY_COORDINATES: dict[str, tuple[float, float]] = {
+    "san francisco": (37.7749, -122.4194),
+    "oakland": (37.8044, -122.2712),
+    "berkeley": (37.8715, -122.2730),
+    "san jose": (37.3382, -121.8863),
+    "santa cruz": (36.9741, -122.0308),
+    "sacramento": (38.5816, -121.4944),
+    "palo alto": (37.4419, -122.1430),
+    "san mateo": (37.5630, -122.3255),
+    "redwood city": (37.4852, -122.2364),
+    "richmond": (37.9358, -122.3477),
+    "emeryville": (37.8313, -122.2852),
+    "alameda": (37.7652, -122.2416),
+    "napa": (38.2975, -122.2869),
+    "sonoma": (38.2919, -122.4580),
+    "santa rosa": (38.4404, -122.7141),
+    "novato": (38.1074, -122.5697),
+    "san rafael": (37.9735, -122.5311),
+    "vallejo": (38.1041, -122.2566),
+    "concord": (37.9780, -122.0311),
+    "walnut creek": (37.9101, -122.0652),
+    "fremont": (37.5485, -121.9886),
+    "union city": (37.5934, -122.0438),
+    "hayward": (37.6688, -122.0808),
+    "daly city": (37.6879, -122.4702),
+    "half moon bay": (37.4636, -122.4286),
+    "mountain view": (37.3861, -122.0839),
+    "sunnyvale": (37.3688, -122.0363),
+    "santa clara": (37.3541, -121.9552),
+    "reno": (39.5296, -119.8138),
+    "fresno": (36.7378, -119.7871),
+    "stockton": (37.9577, -121.2908),
+}
+
+
+def lookup_city_coordinates(city: str | None) -> tuple[float, float] | None:
+    """Look up a city centroid. Returns (lat, lon) or None when unknown."""
+    if not city:
+        return None
+    return CITY_COORDINATES.get(city.strip().lower())
+
+
 def lookup_venue_coordinates(venue_name: str | None) -> tuple[float, float] | None:
     """Look up coordinates for a known venue. Returns (lat, lon) or None."""
     if not venue_name:

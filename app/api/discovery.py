@@ -251,6 +251,15 @@ def search_events(
     lat: float | None = Query(default=None, description="Latitude for geo search"),
     lng: float | None = Query(default=None, description="Longitude for geo search"),
     radius_miles: float | None = Query(default=None, gt=0, description="Search radius miles"),
+    min_location_confidence: float = Query(
+        default=0.5,
+        ge=0,
+        le=1,
+        description=(
+            "Minimum location_confidence for radius search. Defaults to 0.5 so "
+            "city-centroid fallbacks are excluded; pass 0 to include them."
+        ),
+    ),
     vibe_tag: str | None = Query(default=None, description="Filter by vibe tag"),
     time_preset: Literal["tonight", "this_weekend"] | None = Query(
         default=None,
@@ -330,6 +339,10 @@ def search_events(
                 radius_meters,
             )
         )
+        # Sources fall back to a city centroid when a venue can't be resolved,
+        # which otherwise puts out-of-town events inside every SF radius
+        # search. Exclude those guesses unless the caller opts back in.
+        stmt = stmt.where(Event.location_confidence >= min_location_confidence)
 
     # Sort order: distance (when geo available) or date (default / fallback).
     if sort_by == "distance" and has_geo:
