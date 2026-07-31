@@ -16,6 +16,7 @@ SourceId = Literal[
     "luma",
     "dothebay",
     "sfstation",
+    "sterngrove",
     "minnesotastreet",
     "reddit",
     "eddies_list",
