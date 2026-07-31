@@ -2,12 +2,16 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from app.core.localtime import LOCAL_TZ as SF_TZ
+from app.models.event import Event
+from app.models.user import User
 from app.services.concierge import (
     _KNOWN_TIMEFRAMES,
     _extract_timeframe,
+    intent_vibe_profile,
     parse_intent_prompt,
     sequence_itinerary,
 )
+from app.services.recommender import RecommenderService
 
 
 @dataclass
@@ -73,6 +77,93 @@ def test_extract_timeframe_recognises_sunday() -> None:
 def test_sunday_is_an_accepted_llm_timeframe() -> None:
     """The LLM schema and the validator must agree the label exists."""
     assert "this_sunday" in _KNOWN_TIMEFRAMES
+
+
+def test_anonymous_intents_rank_the_same_events_by_different_content() -> None:
+    """Anonymous date and general-night requests need distinct content anchors."""
+    now = datetime.now(timezone.utc)
+    start = now + timedelta(days=1)
+    events = [
+        Event(
+            id=1,
+            title="Quiet Jazz Date",
+            start_at=start,
+            source_name="test",
+            source_tier=2,
+            location="POINT(-122.4194 37.7749)",
+            tags=["#Date", "#Chill", "#Jazz"],
+            categories=["music"],
+            created_at=now,
+            updated_at=now,
+        ),
+        Event(
+            id=2,
+            title="High Energy Night Out",
+            start_at=start,
+            source_name="test",
+            source_tier=2,
+            location="POINT(-122.4194 37.7749)",
+            tags=["NightOut", "HighEnergy", "Social"],
+            categories=["nightlife"],
+            created_at=now,
+            updated_at=now,
+        ),
+    ]
+    service = RecommenderService()
+
+    date_ranked = service.score_events(
+        events=events,
+        user=None,
+        user_vibe_scores=intent_vibe_profile("date_night"),
+        popularity_counts={},
+    )
+    night_ranked = service.score_events(
+        events=events,
+        user=None,
+        user_vibe_scores=intent_vibe_profile("general_night_out"),
+        popularity_counts={},
+    )
+
+    assert date_ranked[0].event.title == "Quiet Jazz Date"
+    assert night_ranked[0].event.title == "High Energy Night Out"
+
+
+def test_authenticated_preference_upgrades_the_static_intent_profile() -> None:
+    now = datetime.now(timezone.utc)
+    start = now + timedelta(days=1)
+    events = [
+        Event(
+            id=1,
+            title="Static Date Pick",
+            start_at=start,
+            source_name="test",
+            source_tier=2,
+            location="POINT(-122.4194 37.7749)",
+            tags=["#Date"],
+            created_at=now,
+            updated_at=now,
+        ),
+        Event(
+            id=2,
+            title="User's Techno Pick",
+            start_at=start,
+            source_name="test",
+            source_tier=2,
+            location="POINT(-122.4194 37.7749)",
+            tags=["#Techno"],
+            created_at=now,
+            updated_at=now,
+        ),
+    ]
+
+    ranked = RecommenderService().score_events(
+        events=events,
+        user=User(email="listener@example.com", preferred_vibes=["#Techno"]),
+        user_vibe_scores=intent_vibe_profile("date_night"),
+        popularity_counts={},
+    )
+
+    assert ranked[0].event.title == "User's Techno Pick"
 
 
 def test_named_weekday_wins_over_the_weekend_branch() -> None:

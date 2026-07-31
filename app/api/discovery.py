@@ -17,6 +17,7 @@ from app.models.user import User
 from app.models.user_signal import UserSignal
 from app.services.concierge import (
     anchor_hour_range,
+    intent_vibe_profile,
     parse_intent_async,
     sequence_itinerary,
 )
@@ -550,6 +551,7 @@ async def build_concierge_itinerary(
     *,
     payload: ConciergeRequest,
     session: Session = Depends(get_session),
+    user: User | None = Depends(get_optional_user),
 ) -> ConciergeResponse:
     parsed = await parse_intent_async(payload.query)
     limit = max(3, min(int(payload.limit), 100))
@@ -576,7 +578,32 @@ async def build_concierge_itinerary(
     anchor_events = session.exec(_anchor_query(restrict_to_intent_hours=True)).all()
     if not anchor_events:
         anchor_events = session.exec(_anchor_query(restrict_to_intent_hours=False)).all()
-    anchor = anchor_events[0] if anchor_events else None
+    if anchor_events:
+        vibe_scores = intent_vibe_profile(parsed.intent)
+        if user is not None and user.id is not None:
+            user_scores = _user_profile_service.compute_vibe_scores_for_user(
+                session=session,
+                user_id=int(user.id),
+                now=datetime.now(timezone.utc),
+            )
+            for tag, score in user_scores.items():
+                vibe_scores[tag] = vibe_scores.get(tag, 0.0) + score
+
+        popularity_counts = _people_interested_counts(
+            session=session,
+            event_ids=[
+                int(event.id) for event in anchor_events if event.id is not None
+            ],
+        )
+        ranked_anchors = _recommender_service.score_events(
+            events=list(anchor_events),
+            user=user,
+            user_vibe_scores=vibe_scores,
+            popularity_counts=popularity_counts,
+        )
+        anchor = ranked_anchors[0].event if ranked_anchors else None
+    else:
+        anchor = None
     if anchor is None:
         return ConciergeResponse(
             intent=parsed.intent,
@@ -586,7 +613,6 @@ async def build_concierge_itinerary(
             itinerary=[],
         )
 
-    radius_meters = 0.5 * 1609.34
     anchor_lat, anchor_lng = _extract_lat_lng(anchor)
     if anchor_lat is None or anchor_lng is None:
         support_events = []
@@ -594,23 +620,28 @@ async def build_concierge_itinerary(
         anchor_point = func.ST_SetSRID(
             func.ST_MakePoint(anchor_lng, anchor_lat), 4326
         )
-        support_stmt = (
-            select(Event)
-            .where(
-                Event.id != anchor.id,
-                Event.start_at >= parsed.window_start,
-                Event.start_at <= parsed.window_end,
-                Event.source_tier >= 3,
-                func.ST_DWithin(
-                    cast(Event.location, Geography),
-                    cast(anchor_point, Geography),
-                    radius_meters,
-                ),
+
+        def _support_query(*, radius_miles: float):
+            return (
+                select(Event)
+                .where(
+                    Event.id != anchor.id,
+                    Event.start_at >= parsed.window_start,
+                    Event.start_at <= parsed.window_end,
+                    Event.source_tier >= 3,
+                    func.ST_DWithin(
+                        cast(Event.location, Geography),
+                        cast(anchor_point, Geography),
+                        radius_miles * 1609.34,
+                    ),
+                )
+                .order_by(Event.start_at.asc())
+                .limit(limit)
             )
-            .order_by(Event.start_at.asc())
-            .limit(limit)
-        )
-        support_events = session.exec(support_stmt).all()
+
+        support_events = session.exec(_support_query(radius_miles=0.5)).all()
+        if not support_events:
+            support_events = session.exec(_support_query(radius_miles=1.0)).all()
     sequenced = sequence_itinerary(anchor=anchor, support_events=support_events)
 
     itinerary = [

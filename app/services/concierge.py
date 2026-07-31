@@ -314,10 +314,52 @@ _INTENT_ANCHOR_HOURS: dict[str, tuple[int, int]] = {
     "out_of_town_guests": (9, 23),
 }
 
+# Anonymous concierge callers still need content-level intent. These weights
+# use the same normalized vibe vocabulary as event tags and the recommender's
+# behavioral profile; authenticated profile scores are added to this baseline.
+_INTENT_VIBE_PROFILES: dict[str, dict[str, float]] = {
+    "date_night": {
+        "#date": 5.0,
+        "#chill": 3.0,
+        "#jazz": 2.0,
+        "#film": 2.0,
+        "#art": 2.0,
+        "#livemusic": 1.0,
+    },
+    "general_night_out": {
+        "#nightout": 5.0,
+        "#highenergy": 4.0,
+        "#social": 3.0,
+        "#nightlife": 3.0,
+        "#comedy": 2.0,
+        "#livemusic": 1.0,
+    },
+    "bar_crawl": {
+        "#nightlife": 5.0,
+        "#latenight": 4.0,
+        "#highenergy": 3.0,
+        "#social": 3.0,
+        "#foodanddrink": 2.0,
+    },
+    "out_of_town_guests": {
+        "#outdoors": 4.0,
+        "#art": 3.0,
+        "#livemusic": 2.0,
+        "#social": 2.0,
+        "#intellectual": 2.0,
+        "#festival": 1.0,
+    },
+}
+
 
 def anchor_hour_range(intent: str) -> tuple[int, int] | None:
     """Preferred local start-hour range for an intent's anchor event."""
     return _INTENT_ANCHOR_HOURS.get(intent)
+
+
+def intent_vibe_profile(intent: str) -> dict[str, float]:
+    """Return an isolated static vibe-score baseline for an intent."""
+    return dict(_INTENT_VIBE_PROFILES.get(intent, {}))
 
 
 def _resolve_timeframe_window(
