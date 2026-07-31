@@ -15,7 +15,11 @@ from app.core.security import get_current_user, get_optional_user
 from app.models.event import Event
 from app.models.user import User
 from app.models.user_signal import UserSignal
-from app.services.concierge import parse_intent_async, sequence_itinerary
+from app.services.concierge import (
+    anchor_hour_range,
+    parse_intent_async,
+    sequence_itinerary,
+)
 from app.services.recommender import RecommenderService, ScoredEvent
 from app.services.user_profile import UserProfileService
 
@@ -550,18 +554,28 @@ async def build_concierge_itinerary(
     parsed = await parse_intent_async(payload.query)
     limit = max(3, min(int(payload.limit), 100))
 
-    anchor_stmt = (
-        select(Event)
-        .where(
+    def _anchor_query(*, restrict_to_intent_hours: bool):
+        stmt = select(Event).where(
             Event.start_at >= parsed.window_start,
             Event.start_at <= parsed.window_end,
             Event.source_tier <= 2,
         )
-        .order_by(Event.start_at.asc())
-        .limit(limit)
-    )
-    anchor_stmt = _apply_concierge_geography_filter(anchor_stmt, parsed.geography)
-    anchor_events = session.exec(anchor_stmt).all()
+        hours = anchor_hour_range(parsed.intent) if restrict_to_intent_hours else None
+        if hours is not None:
+            # Compare in SF local time: the stored timestamps are UTC, so a
+            # naive hour filter would drift by the offset.
+            local_hour = func.extract(
+                "hour", func.timezone(str(LOCAL_TZ), Event.start_at)
+            )
+            stmt = stmt.where(local_hour >= hours[0], local_hour <= hours[1])
+        stmt = stmt.order_by(Event.start_at.asc()).limit(limit)
+        return _apply_concierge_geography_filter(stmt, parsed.geography)
+
+    # Prefer an anchor that fits the intent's time of day; fall back to the
+    # whole window rather than returning nothing when the day is thin.
+    anchor_events = session.exec(_anchor_query(restrict_to_intent_hours=True)).all()
+    if not anchor_events:
+        anchor_events = session.exec(_anchor_query(restrict_to_intent_hours=False)).all()
     anchor = anchor_events[0] if anchor_events else None
     if anchor is None:
         return ConciergeResponse(

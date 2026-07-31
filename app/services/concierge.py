@@ -148,12 +148,15 @@ def _extract_timeframe(
         label = "tonight"
     elif "tomorrow" in text:
         label = "tomorrow"
-    elif "this saturday" in text:
-        label = "this_saturday"
     elif "this weekend" in text:
         label = "this_weekend"
     else:
+        # Match a bare weekday too ("date night Sunday"), not just "this X".
         label = "upcoming_week"
+        for weekday_label in _WEEKDAY_LABELS:
+            if weekday_label.removeprefix("this_") in text:
+                label = weekday_label
+                break
     start, end = _resolve_timeframe_window(label, now=now)
     return label, start, end
 
@@ -170,12 +173,24 @@ _KNOWN_INTENTS = {
     "general_night_out",
 }
 
+# Every weekday, not just Saturday: "Sunday" used to degrade to the whole
+# weekend, which then anchored on Saturday's earliest event.
+_WEEKDAY_LABELS = {
+    "this_monday": 0,
+    "this_tuesday": 1,
+    "this_wednesday": 2,
+    "this_thursday": 3,
+    "this_friday": 4,
+    "this_saturday": 5,
+    "this_sunday": 6,
+}
+
 _KNOWN_TIMEFRAMES = {
     "tonight",
     "tomorrow",
-    "this_saturday",
     "this_weekend",
     "upcoming_week",
+    *_WEEKDAY_LABELS,
 }
 
 
@@ -192,7 +207,10 @@ class ClaudeIntentParser:
         "Return ONLY valid JSON matching this schema:\n"
         '{"intent": one of ["date_night","out_of_town_guests","bar_crawl","general_night_out"],\n'
         ' "geography": neighborhood/city string in lowercase or null,\n'
-        ' "timeframe": one of ["tonight","tomorrow","this_saturday","this_weekend","upcoming_week"]}'
+        ' "timeframe": one of ["tonight","tomorrow","this_monday","this_tuesday",'
+        '"this_wednesday","this_thursday","this_friday","this_saturday","this_sunday",'
+        '"this_weekend","upcoming_week"]}\n'
+        "Prefer a specific weekday over this_weekend when the request names one."
     )
 
     def __init__(self, *, api_key: str | None = None, model: str | None = None) -> None:
@@ -253,6 +271,22 @@ class ClaudeIntentParser:
         return value if isinstance(value, dict) else None
 
 
+# Local hour ranges an anchor event may start in, per intent. A date night
+# doesn't begin with a 10am trampoline workshop; showing guests around does
+# want the whole day.
+_INTENT_ANCHOR_HOURS: dict[str, tuple[int, int]] = {
+    "date_night": (17, 23),
+    "bar_crawl": (17, 23),
+    "general_night_out": (17, 23),
+    "out_of_town_guests": (9, 23),
+}
+
+
+def anchor_hour_range(intent: str) -> tuple[int, int] | None:
+    """Preferred local start-hour range for an intent's anchor event."""
+    return _INTENT_ANCHOR_HOURS.get(intent)
+
+
 def _resolve_timeframe_window(label: str, *, now: datetime) -> tuple[datetime, datetime]:
     """Resolve a timeframe label to a UTC window computed in SF local time.
 
@@ -270,10 +304,11 @@ def _resolve_timeframe_window(label: str, *, now: datetime) -> tuple[datetime, d
     if label == "tomorrow":
         tomorrow = day_start + timedelta(days=1)
         return _to_utc(tomorrow.replace(hour=10), tomorrow + timedelta(days=1, hours=2))
-    if label == "this_saturday":
-        days_until_sat = (5 - day_start.weekday()) % 7
-        saturday = day_start + timedelta(days=days_until_sat)
-        return _to_utc(saturday.replace(hour=10), saturday + timedelta(days=1, hours=2))
+    weekday = _WEEKDAY_LABELS.get(label)
+    if weekday is not None:
+        days_until = (weekday - day_start.weekday()) % 7
+        target = day_start + timedelta(days=days_until)
+        return _to_utc(target.replace(hour=10), target + timedelta(days=1, hours=2))
     if label == "this_weekend":
         days_until_sat = (5 - day_start.weekday()) % 7
         saturday = day_start + timedelta(days=days_until_sat)

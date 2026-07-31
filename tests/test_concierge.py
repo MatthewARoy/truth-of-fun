@@ -1,7 +1,13 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from app.services.concierge import parse_intent_prompt, sequence_itinerary
+from app.core.localtime import LOCAL_TZ as SF_TZ
+from app.services.concierge import (
+    _KNOWN_TIMEFRAMES,
+    _extract_timeframe,
+    parse_intent_prompt,
+    sequence_itinerary,
+)
 
 
 @dataclass
@@ -53,3 +59,17 @@ def test_itinerary_sequencing_with_travel_buffers() -> None:
     ]
     assert itinerary[1].travel_buffer_minutes_before == 30
     assert itinerary[2].travel_buffer_minutes_before == 30
+
+
+def test_extract_timeframe_recognises_sunday() -> None:
+    """The keyword fallback must reach Sunday, not drop to upcoming_week."""
+    now = datetime(2026, 7, 30, 19, 0, tzinfo=timezone.utc)
+    label, start, _ = _extract_timeframe("date night in san francisco this sunday", now=now)
+
+    assert label == "this_sunday"
+    assert start.astimezone(SF_TZ).day == 2
+
+
+def test_sunday_is_an_accepted_llm_timeframe() -> None:
+    """The LLM schema and the validator must agree the label exists."""
+    assert "this_sunday" in _KNOWN_TIMEFRAMES
