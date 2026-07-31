@@ -26,6 +26,9 @@ def test_19hz_extract_rows_and_normalize_private_location() -> None:
     assert payload["title"] == "Techno Night"
     assert payload["location"] == "POINT(-122.4194 37.7749)"
     assert normalized.location.location_is_private is True
+    # The listing has no cost column or cost text, so unknown is correct.
+    assert normalized.offers.price_min is None
+    assert normalized.offers.currency is None
 
 
 def test_parse_venue_city_reads_the_parenthesised_city() -> None:
@@ -101,3 +104,55 @@ def test_private_location_confidence_stays_below_the_radius_threshold() -> None:
     assert normalized is not None
     assert normalized.location.location_is_private is True
     assert normalized.location.location_confidence < 0.5
+
+
+def test_price_column_becomes_a_price_not_a_category() -> None:
+    """19hz's third column is cost/age, not genres.
+
+    The connector read it as tags, so `categories` filled up with strings like
+    "$22-37 | 21+" (visible across the live table) while price stayed null.
+    Contrary to the earlier survey for #19, this source does carry cost text.
+    """
+    source = NineteenHzSource()
+    html = """
+    <table>
+      <tr>
+        <td>Sun: Aug 2 (2pm-10pm)</td>
+        <td><a href="https://19hz.info/e/5">Sweet Tooth Fest @ The Stud (San Francisco) house</a></td>
+        <td>$22-37 | 21+</td>
+        <td>Some Artist</td>
+        <td>Instagram Page</td>
+        <td>2026/08/02</td>
+      </tr>
+    </table>
+    """
+    rows = source._extract_rows(html)
+    normalized = source.normalize_raw(rows[0])
+    assert normalized is not None
+
+    assert normalized.offers.price_min == 22.0
+    assert normalized.offers.currency == "USD"
+    assert normalized.offers.is_free is False
+    assert "$22-37 | 21+" not in normalized.category_tags
+
+
+def test_free_19hz_listing_is_marked_free() -> None:
+    """A free show in the cost column sets is_free, not a null price."""
+    source = NineteenHzSource()
+    html = """
+    <table>
+      <tr>
+        <td>Sun: Aug 2 (2pm-10pm)</td>
+        <td><a href="https://19hz.info/e/6">Park Party @ Somewhere (San Francisco) house</a></td>
+        <td>Free | All ages</td>
+        <td>Some Artist</td>
+        <td>Instagram Page</td>
+        <td>2026/08/02</td>
+      </tr>
+    </table>
+    """
+    rows = source._extract_rows(html)
+    normalized = source.normalize_raw(rows[0])
+    assert normalized is not None
+    assert normalized.offers.is_free is True
+    assert normalized.offers.price_min == 0.0

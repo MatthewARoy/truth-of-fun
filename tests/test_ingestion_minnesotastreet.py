@@ -111,6 +111,9 @@ def test_minnesotastreet_exhibition_extract_and_normalize() -> None:
     payload = normalized.to_legacy_event_payload(source_tier=source.source_tier)
     assert payload["source_name"] == "minnesotastreet"
     assert "exhibition_window" in normalized.category_tags
+    # The listing block carries no admission or cost text, so unknown is correct.
+    assert normalized.offers.price_min is None
+    assert normalized.offers.currency is None
 
     second = candidates[1]
     assert second["title"] == "Virtual Crush"

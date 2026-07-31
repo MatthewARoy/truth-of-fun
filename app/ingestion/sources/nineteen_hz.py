@@ -7,8 +7,10 @@ from zoneinfo import ZoneInfo
 
 from app.ingestion.contracts import CanonicalEvent
 from app.ingestion.contracts import LocationModel
+from app.ingestion.contracts import OffersModel
 from app.ingestion.contracts import SourceMetadata
 from app.ingestion.input_agent import InputAgentSource
+from app.ingestion.scraper_utils import parse_price
 from app.ingestion.venue_cache import lookup_city_coordinates, lookup_venue_coordinates
 
 SF_TZ = ZoneInfo("America/Los_Angeles")
@@ -61,6 +63,9 @@ class NineteenHzSource(InputAgentSource):
         source_url = raw_item.get("source_url") or self.events_url
         source_record_id = raw_item.get("source_record_id") or source_url
 
+        cost_text = raw_item.get("cost_text")
+        price_min, is_free = parse_price(cost_text)
+
         # 19hz lists the city in parentheses after the venue ("Fuze (San Jose)
         # house, disco"), so an unresolvable venue can still be placed in the
         # right city instead of on SF's centroid.
@@ -101,6 +106,12 @@ class NineteenHzSource(InputAgentSource):
                 location_is_private=location_is_private,
                 location_confidence=confidence,
             ),
+            offers=OffersModel(
+                price_min=price_min,
+                is_free=is_free,
+                currency="USD" if price_min is not None else None,
+                price_text=cost_text or None,
+            ),
             category_tags=raw_item.get("tags", []),
             vibe_tags=["HighEnergy"],
         )
@@ -116,7 +127,10 @@ class NineteenHzSource(InputAgentSource):
                 continue
             time_text = self._strip_tags(columns[0])
             event_text = self._strip_tags(columns[1])
-            tags_text = self._strip_tags(columns[2]) if len(columns) >= 3 else ""
+            # Column 2 is cost and age restriction ("$22-37 | 21+"), not genres
+            # — those trail the venue in column 1. Reading it as tags filled
+            # `categories` with price strings and left price null.
+            cost_text = self._strip_tags(columns[2]) if len(columns) >= 3 else ""
             if not time_text or not event_text:
                 continue
 
@@ -133,7 +147,8 @@ class NineteenHzSource(InputAgentSource):
                     "time_text": time_text,
                     "title": title,
                     "venue_name": venue_name,
-                    "tags": self._parse_tags(tags_text),
+                    "tags": [],
+                    "cost_text": cost_text,
                     "source_url": source_url,
                     "source_record_id": source_url,
                 }
@@ -213,9 +228,6 @@ class NineteenHzSource(InputAgentSource):
 
         return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
 
-    def _parse_tags(self, text: str) -> list[str]:
-        values = [part.strip() for part in text.split(",")]
-        return [tag for tag in values if tag]
 
     def _strip_tags(self, value: str) -> str:
         without_tags = re.sub(r"<[^>]+>", " ", value)
