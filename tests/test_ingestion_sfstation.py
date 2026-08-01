@@ -87,6 +87,17 @@ CALENDAR_HTML = """
 </div>
 """
 
+PRICED_EVENT_HTML = """
+<div class="event-wrapper" itemscope itemtype="http://schema.org/Event">
+  <div itemprop="startDate" content="2026-06-12"></div>
+  <div class="event-time hidden">8pm - 11pm</div>
+  <h4>
+    <a href="/priced-show-e1234567"><span itemprop="name">Priced Show</span></a>
+  </h4>
+  <meta class="event-price" content="25.00">
+</div>
+"""
+
 
 def test_sfstation_testable() -> None:
     assert TESTABLE is True
@@ -145,3 +156,28 @@ def test_sfstation_ignores_nav_and_venue_links() -> None:
         assert "/calendar" not in candidate["source_url"]
         # Event detail pages use -e<id> slugs; venue pages use -b<id>.
         assert "-e" in candidate["source_url"].rsplit("/", 1)[-1]
+
+
+def test_sfstation_unknown_price_has_no_currency() -> None:
+    """Unknown cost stays fully null; USD only accompanies a known amount."""
+    source = SFStationSource()
+    candidates = source._extract_candidates(CALENDAR_HTML)
+
+    normalized = source.normalize_raw(candidates[1])
+
+    assert normalized is not None
+    assert normalized.offers.price_min is None
+    assert normalized.offers.currency is None
+
+
+def test_sfstation_routes_surfaced_price_through_shared_parser() -> None:
+    source = SFStationSource()
+
+    candidates = source._extract_candidates(PRICED_EVENT_HTML)
+    normalized = source.normalize_raw(candidates[0])
+
+    assert candidates[0]["price_text"] == "$25.00"
+    assert normalized is not None
+    assert normalized.offers.price_min == 25.0
+    assert normalized.offers.currency == "USD"
+    assert normalized.offers.is_free is False

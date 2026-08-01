@@ -41,7 +41,7 @@ class RecommenderService:
         self,
         *,
         events: list[Event],
-        user: User,
+        user: User | None,
         user_vibe_scores: dict[str, float],
         popularity_counts: dict[int, int],
     ) -> list[ScoredEvent]:
@@ -50,9 +50,11 @@ class RecommenderService:
         Returns a list of ``ScoredEvent`` sorted by total score descending,
         with diversity penalties applied during the final ranking pass.
         """
-        preferred_vibes = set(
-            v.lower() for v in (user.preferred_vibes or []) if isinstance(v, str)
-        )
+        preferred_vibes = {
+            vibe.lower()
+            for vibe in ((user.preferred_vibes if user is not None else None) or [])
+            if isinstance(vibe, str)
+        }
         now = datetime.now(timezone.utc)
 
         # Phase 1: compute per-event raw scores (no diversity yet).
@@ -111,16 +113,29 @@ class RecommenderService:
         if not event_tags:
             return 0.0, []
 
-        tag_map = {tag.lower(): tag for tag in event_tags}
-        matched_keys = sorted(set(tag_map.keys()).intersection(preferred_vibes))
-        weighted_score = sum(profile_scores.get(key, 0.0) for key in tag_map.keys())
+        def normalize_key(tag: str) -> str:
+            return f"#{tag.strip().lstrip('#').lower()}"
+
+        tag_map = {normalize_key(tag): tag for tag in event_tags if tag.strip("# ")}
+        preferred_keys = {normalize_key(tag) for tag in preferred_vibes}
+        normalized_profile_scores: dict[str, float] = {}
+        for key, score in profile_scores.items():
+            normalized_key = normalize_key(key)
+            normalized_profile_scores[normalized_key] = (
+                normalized_profile_scores.get(normalized_key, 0.0) + score
+            )
+
+        matched_keys = sorted(set(tag_map).intersection(preferred_keys))
+        weighted_score = sum(
+            normalized_profile_scores.get(key, 0.0) for key in tag_map
+        )
 
         if not matched_keys and weighted_score <= 0:
             return 0.0, []
 
         matched = [tag_map[key] for key in matched_keys]
         for key in tag_map:
-            if profile_scores.get(key, 0.0) > 0:
+            if normalized_profile_scores.get(key, 0.0) > 0:
                 original = tag_map[key]
                 if original not in matched:
                     matched.append(original)

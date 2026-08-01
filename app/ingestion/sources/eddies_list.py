@@ -102,7 +102,9 @@ class EddiesListSource(InputAgentSource):
             if allowed_senders is not None
             else settings.eddies_list_allowed_senders
         )
-        self._allowed_senders = [s.strip().lower() for s in configured_senders if s.strip()]
+        self._allowed_senders = [
+            s.strip().lower() for s in configured_senders if s.strip()
+        ]
         self._imap_host = imap_host or settings.imap_host
         self._imap_port = imap_port or settings.imap_port
         self._imap_user = imap_user or settings.imap_user
@@ -139,7 +141,9 @@ class EddiesListSource(InputAgentSource):
                 datetime.now(timezone.utc) - timedelta(days=_IMAP_LOOKBACK_DAYS)
             ).strftime("%d-%b-%Y")
             for sender in self._allowed_senders:
-                status, data = connection.search(None, "FROM", f'"{sender}"', "SINCE", since)
+                status, data = connection.search(
+                    None, "FROM", f'"{sender}"', "SINCE", since
+                )
                 if status != "OK" or not data or not data[0]:
                     continue
                 for message_id in data[0].split()[-_MAX_ISSUES:]:
@@ -189,7 +193,11 @@ class EddiesListSource(InputAgentSource):
             return False
         domain = address.rsplit("@", 1)[-1]
         for allowed in self._allowed_senders:
-            if address == allowed or domain == allowed or domain.endswith("." + allowed):
+            if (
+                address == allowed
+                or domain == allowed
+                or domain.endswith("." + allowed)
+            ):
                 return True
         return False
 
@@ -314,9 +322,15 @@ class EddiesListSource(InputAgentSource):
                 region="CA",
                 lat=lat,
                 lon=lon,
-                location_confidence=0.9 if coords else (0.5 if venue_name else 0.3),
+                # A named but unresolved venue is still the SF centroid, so it
+                # stays below the radius-search threshold rather than at 0.5.
+                location_confidence=0.9 if coords else 0.4,
             ),
-            offers=OffersModel(price_min=price, is_free=is_free),
+            offers=OffersModel(
+                price_min=price,
+                is_free=is_free,
+                currency="USD" if price is not None else None,
+            ),
             organizer=OrganizerModel(name="Eddie's List"),
             category_tags=["curated", "local"],
             compliance=ComplianceModel(

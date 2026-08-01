@@ -7,9 +7,11 @@ from zoneinfo import ZoneInfo
 
 from app.ingestion.contracts import CanonicalEvent
 from app.ingestion.contracts import LocationModel
+from app.ingestion.contracts import OffersModel
 from app.ingestion.contracts import SourceMetadata
 from app.ingestion.input_agent import InputAgentSource
-from app.ingestion.venue_cache import lookup_venue_coordinates
+from app.ingestion.scraper_utils import parse_price
+from app.ingestion.venue_cache import lookup_city_coordinates, lookup_venue_coordinates
 
 SF_TZ = ZoneInfo("America/Los_Angeles")
 DEFAULT_SF_LAT = 37.7749
@@ -30,6 +32,21 @@ class NineteenHzSource(InputAgentSource):
     async def extract_candidate(self, candidate: Any) -> dict[str, Any] | None:
         return candidate if isinstance(candidate, dict) else None
 
+    @staticmethod
+    def _parse_venue_city(venue_name: str | None) -> str | None:
+        """Read the parenthesised city out of a 19hz venue string.
+
+        The listing renders venues as "Venue Name (City) genre, genre", so the
+        first parenthesised group is the city.
+        """
+        if not venue_name:
+            return None
+        match = re.search(r"\(([^)]+)\)", venue_name)
+        if not match:
+            return None
+        city = match.group(1).strip()
+        return city or None
+
     def normalize_raw(self, raw_item: dict[str, Any]) -> CanonicalEvent | None:
         title = raw_item.get("title")
         if not isinstance(title, str) or not title.strip():
@@ -40,17 +57,30 @@ class NineteenHzSource(InputAgentSource):
             return None
 
         venue_name = raw_item.get("venue_name")
-        location_is_private = isinstance(venue_name, str) and venue_name.upper() == "TBA"
+        location_is_private = (
+            isinstance(venue_name, str) and venue_name.upper() == "TBA"
+        )
         source_url = raw_item.get("source_url") or self.events_url
         source_record_id = raw_item.get("source_record_id") or source_url
 
+        cost_text = raw_item.get("cost_text")
+        price_min, is_free = parse_price(cost_text)
+
+        # 19hz lists the city in parentheses after the venue ("Fuze (San Jose)
+        # house, disco"), so an unresolvable venue can still be placed in the
+        # right city instead of on SF's centroid.
+        city = self._parse_venue_city(venue_name) or "San Francisco"
+
         coords = lookup_venue_coordinates(venue_name)
-        lat = coords[0] if coords else DEFAULT_SF_LAT
-        lon = coords[1] if coords else DEFAULT_SF_LON
-        if location_is_private:
-            confidence = 0.5
-        elif coords:
+        city_coords = None if coords else lookup_city_coordinates(city)
+        lat, lon = coords or city_coords or (DEFAULT_SF_LAT, DEFAULT_SF_LON)
+
+        if coords:
             confidence = 0.9
+        elif city_coords:
+            # Right city, wrong block — better than a fabricated venue point,
+            # but never to be treated as an exact location.
+            confidence = 0.4
         else:
             confidence = 0.3
 
@@ -69,12 +99,18 @@ class NineteenHzSource(InputAgentSource):
             end_time=end_time,
             location=LocationModel(
                 venue_name=venue_name,
-                city="San Francisco",
+                city=city,
                 region="CA",
                 lat=lat,
                 lon=lon,
                 location_is_private=location_is_private,
                 location_confidence=confidence,
+            ),
+            offers=OffersModel(
+                price_min=price_min,
+                is_free=is_free,
+                currency="USD" if price_min is not None else None,
+                price_text=cost_text or None,
             ),
             category_tags=raw_item.get("tags", []),
             vibe_tags=["HighEnergy"],
@@ -91,7 +127,10 @@ class NineteenHzSource(InputAgentSource):
                 continue
             time_text = self._strip_tags(columns[0])
             event_text = self._strip_tags(columns[1])
-            tags_text = self._strip_tags(columns[2]) if len(columns) >= 3 else ""
+            # Column 2 is cost and age restriction ("$22-37 | 21+"), not genres
+            # — those trail the venue in column 1. Reading it as tags filled
+            # `categories` with price strings and left price null.
+            cost_text = self._strip_tags(columns[2]) if len(columns) >= 3 else ""
             if not time_text or not event_text:
                 continue
 
@@ -108,7 +147,8 @@ class NineteenHzSource(InputAgentSource):
                     "time_text": time_text,
                     "title": title,
                     "venue_name": venue_name,
-                    "tags": self._parse_tags(tags_text),
+                    "tags": [],
+                    "cost_text": cost_text,
                     "source_url": source_url,
                     "source_record_id": source_url,
                 }
@@ -180,15 +220,14 @@ class NineteenHzSource(InputAgentSource):
         start_local = datetime(
             year, month_value, day_value, start_hour, start_min, tzinfo=SF_TZ
         )
-        end_local = datetime(year, month_value, day_value, end_hour, end_min, tzinfo=SF_TZ)
+        end_local = datetime(
+            year, month_value, day_value, end_hour, end_min, tzinfo=SF_TZ
+        )
         if end_local <= start_local:
             end_local = end_local + timedelta(days=1)
 
         return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
 
-    def _parse_tags(self, text: str) -> list[str]:
-        values = [part.strip() for part in text.split(",")]
-        return [tag for tag in values if tag]
 
     def _strip_tags(self, value: str) -> str:
         without_tags = re.sub(r"<[^>]+>", " ", value)

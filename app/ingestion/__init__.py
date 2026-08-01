@@ -13,6 +13,7 @@ from app.ingestion.sources.eddies_list import EddiesListSource
 from app.ingestion.sources.luma import LumaSource
 from app.ingestion.sources.minnesotastreet import MinnesotaStreetSource
 from app.ingestion.sources.sfstation import SFStationSource
+from app.ingestion.sources.sterngrove import SternGroveSource
 from app.ingestion.ticketmaster import TicketmasterSource
 
 registry = SourceRegistry()
@@ -24,6 +25,7 @@ registry.register(NineteenHzSource.source_name, NineteenHzSource)
 registry.register(LumaSource.source_name, LumaSource)
 registry.register(DoTheBaySource.source_name, DoTheBaySource)
 registry.register(SFStationSource.source_name, SFStationSource)
+registry.register(SternGroveSource.source_name, SternGroveSource)
 registry.register(MinnesotaStreetSource.source_name, MinnesotaStreetSource)
 registry.register(RedditSource.source_name, RedditSource)
 registry.register(EddiesListSource.source_name, EddiesListSource)
@@ -41,6 +43,7 @@ __all__ = [
     "NineteenHzSource",
     "RedditSource",
     "SFStationSource",
+    "SternGroveSource",
     "SourceRegistry",
     "TicketmasterSource",
     "registry",

@@ -172,3 +172,14 @@ def test_eventbrite_skips_non_event_links() -> None:
     """
     candidates = source._extract_listing_candidates(html)
     assert candidates == []
+
+
+def test_offers_omit_currency_when_no_price_is_known() -> None:
+    """A currency without an amount is meaningless metadata (regression for #19)."""
+    source = EventbriteSource()
+    candidates = source._extract_listing_candidates(LIVE_LDJSON_HTML)
+    event = source.normalize_raw(candidates[0])
+
+    assert event is not None
+    assert event.offers.price_min is None
+    assert event.offers.currency is None
