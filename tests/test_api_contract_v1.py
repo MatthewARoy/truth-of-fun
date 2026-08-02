@@ -11,6 +11,8 @@ def test_ui_contract_v1_paths_exist() -> None:
         "/users/me/onboarding",
         "/users/me/interests",
         "/concierge/itinerary",
+        "/concierge/itinerary/share",
+        "/shared/itineraries/{token}",
         "/folders",
         "/folders/{folder_id}",
         "/folders/{folder_id}/items",
