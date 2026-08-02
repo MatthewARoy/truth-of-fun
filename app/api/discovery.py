@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from geoalchemy2 import Geography
 from sqlalchemy import cast, func, text
 from sqlmodel import Session, select
@@ -13,6 +14,7 @@ from app.core.database import get_session
 from app.core.localtime import LOCAL_TZ
 from app.core.security import get_current_user, get_optional_user
 from app.models.event import Event
+from app.models.itinerary import SavedItinerary
 from app.models.user import User
 from app.models.user_signal import UserSignal
 from app.services.concierge import (
@@ -21,7 +23,14 @@ from app.services.concierge import (
     parse_intent_async,
     sequence_itinerary,
 )
+from app.services.itinerary import (
+    StopLocation,
+    build_stop_links,
+    itinerary_title,
+    render_itinerary_text,
+)
 from app.services.recommender import RecommenderService, ScoredEvent
+from app.services.social import generate_share_token, is_valid_share_token
 from app.services.user_profile import UserProfileService
 
 router = APIRouter(tags=["discovery"])
@@ -63,6 +72,18 @@ class ConciergeRequest(BaseModel):
     limit: int = 25
 
 
+class StopLinksResponse(BaseModel):
+    """Tap targets for one stop. Any of these is null when the stop has no
+    resolvable location (no coordinates, address, or venue name)."""
+
+    tickets_url: str | None = None
+    map_url: str | None = None
+    directions_url: str | None = None
+    food_url: str | None = None
+    drinks_url: str | None = None
+    parking_url: str | None = None
+
+
 class ItineraryStopResponse(BaseModel):
     kind: str
     event_id: int
@@ -72,6 +93,10 @@ class ItineraryStopResponse(BaseModel):
     venue_name: str | None
     external_url: str | None
     travel_buffer_minutes_before: int
+    address: str | None = None
+    lat: float | None = None
+    lng: float | None = None
+    links: StopLinksResponse = StopLinksResponse()
 
 
 class ConciergeResponse(BaseModel):
@@ -80,6 +105,46 @@ class ConciergeResponse(BaseModel):
     geography: str | None
     anchor_event_id: int | None
     itinerary: list[ItineraryStopResponse]
+    title: str = ""
+    text: str = ""
+
+
+class ShareItineraryStopRequest(BaseModel):
+    """A stop the client is asking to freeze.
+
+    Only the identity and ordering of a stop come from the client; every
+    display fact is re-read from the database when the snapshot is written, so
+    a shared page can never be made to show text the caller supplied.
+    """
+
+    kind: str
+    event_id: int
+    travel_buffer_minutes_before: int = 0
+
+
+class ShareItineraryRequest(BaseModel):
+    # Bounded because this endpoint writes a row for an unauthenticated caller:
+    # a real night out is a handful of stops, and the prompt is a sentence.
+    query: str = Field(default="", max_length=2000)
+    intent: str = Field(default="general_night_out", max_length=100)
+    timeframe: str = Field(default="upcoming_week", max_length=100)
+    geography: str | None = Field(default=None, max_length=255)
+    anchor_event_id: int | None = None
+    stops: list[ShareItineraryStopRequest] = Field(min_length=1, max_length=20)
+
+
+class PortableItineraryResponse(BaseModel):
+    share_token: str
+    share_url: str
+    title: str
+    query: str
+    intent: str
+    timeframe: str
+    geography: str | None
+    anchor_event_id: int | None
+    created_at: datetime
+    itinerary: list[ItineraryStopResponse]
+    text: str
 
 
 class InterestRequest(BaseModel):
@@ -157,6 +222,54 @@ def _serialize_event(event: Event, *, people_interested: int = 0) -> EventRespon
         else 1.0,
         is_free=bool(event.is_free),
     )
+
+
+def _event_location(event: Event | None) -> StopLocation:
+    """Map-addressable location for an event, or an empty one if it's gone."""
+    if event is None:
+        return StopLocation()
+    lat, lng = _extract_lat_lng(event)
+    return StopLocation(
+        venue_name=event.venue_name,
+        address=event.raw_address,
+        lat=lat,
+        lng=lng,
+        location_confidence=(
+            event.location_confidence if event.location_confidence is not None else 1.0
+        ),
+    )
+
+
+def _portable_stops(
+    raw_stops: list[tuple[ItineraryStopResponse, StopLocation]],
+) -> list[ItineraryStopResponse]:
+    """Attach maps links to each stop, routing each one from the previous stop.
+
+    A stop we can't locate is left linkless and does not become the origin for
+    the next leg — otherwise one venue-less entry would break directions for
+    the rest of the night.
+    """
+    enriched: list[ItineraryStopResponse] = []
+    previous: StopLocation | None = None
+    for stop, location in raw_stops:
+        links = build_stop_links(
+            location=location,
+            previous_location=previous,
+            tickets_url=stop.external_url,
+        )
+        enriched.append(
+            stop.model_copy(
+                update={
+                    "address": location.address,
+                    "lat": location.lat,
+                    "lng": location.lng,
+                    "links": StopLinksResponse(**asdict(links)),
+                }
+            )
+        )
+        if location.is_locatable:
+            previous = location
+    return enriched
 
 
 def _score_event_for_user(
@@ -644,23 +757,196 @@ async def build_concierge_itinerary(
             support_events = session.exec(_support_query(radius_miles=1.0)).all()
     sequenced = sequence_itinerary(anchor=anchor, support_events=support_events)
 
-    itinerary = [
-        ItineraryStopResponse(
-            kind=item.kind,
-            event_id=item.event_id,
-            title=item.title,
-            start_at=item.start_at,
-            end_at=item.end_at,
-            venue_name=item.venue_name,
-            external_url=item.external_url,
-            travel_buffer_minutes_before=item.travel_buffer_minutes_before,
-        )
-        for item in sequenced
-    ]
+    # The anchor and its support events are already loaded, so locations come
+    # from memory rather than a second round of queries.
+    events_by_id = {
+        int(event.id): event
+        for event in [anchor, *support_events]
+        if event.id is not None
+    }
+    itinerary = _portable_stops(
+        [
+            (
+                ItineraryStopResponse(
+                    kind=item.kind,
+                    event_id=item.event_id,
+                    title=item.title,
+                    start_at=item.start_at,
+                    end_at=item.end_at,
+                    venue_name=item.venue_name,
+                    external_url=item.external_url,
+                    travel_buffer_minutes_before=item.travel_buffer_minutes_before,
+                ),
+                _event_location(events_by_id.get(item.event_id)),
+            )
+            for item in sequenced
+        ]
+    )
+    title = itinerary_title(
+        intent=parsed.intent,
+        geography=parsed.geography,
+        starts_at=itinerary[0].start_at if itinerary else None,
+    )
     return ConciergeResponse(
         intent=parsed.intent,
         timeframe=parsed.timeframe_label,
         geography=parsed.geography,
         anchor_event_id=int(anchor.id or 0),
         itinerary=itinerary,
+        title=title,
+        text=render_itinerary_text(title=title, stops=itinerary),
     )
+
+
+def _share_url_for(token: str) -> str:
+    return f"/itinerary/{token}"
+
+
+def _portable_response(itinerary: SavedItinerary) -> PortableItineraryResponse:
+    """Rehydrate a stored snapshot, recomputing links from the stored facts.
+
+    Links are derived rather than stored so that improvements to how we build
+    map URLs reach itineraries that were shared before the change.
+    """
+    stops = _portable_stops(
+        [
+            (
+                ItineraryStopResponse(
+                    kind=str(stop.get("kind") or "stop"),
+                    event_id=int(stop.get("event_id") or 0),
+                    title=str(stop.get("title") or "Untitled"),
+                    start_at=datetime.fromisoformat(stop["start_at"]),
+                    end_at=(
+                        datetime.fromisoformat(stop["end_at"])
+                        if stop.get("end_at")
+                        else None
+                    ),
+                    venue_name=stop.get("venue_name"),
+                    external_url=stop.get("external_url"),
+                    travel_buffer_minutes_before=int(
+                        stop.get("travel_buffer_minutes_before") or 0
+                    ),
+                ),
+                StopLocation(
+                    venue_name=stop.get("venue_name"),
+                    address=stop.get("address"),
+                    lat=stop.get("lat"),
+                    lng=stop.get("lng"),
+                    location_confidence=float(
+                        stop.get("location_confidence") or 1.0
+                    ),
+                ),
+            )
+            for stop in (itinerary.stops or [])
+        ]
+    )
+    share_url = _share_url_for(itinerary.share_token)
+    return PortableItineraryResponse(
+        share_token=itinerary.share_token,
+        share_url=share_url,
+        title=itinerary.title,
+        query=itinerary.query,
+        intent=itinerary.intent,
+        timeframe=itinerary.timeframe,
+        geography=itinerary.geography,
+        anchor_event_id=itinerary.anchor_event_id,
+        created_at=itinerary.created_at,
+        itinerary=stops,
+        text=render_itinerary_text(
+            title=itinerary.title, stops=stops, share_url=share_url
+        ),
+    )
+
+
+@router.post("/concierge/itinerary/share", response_model=PortableItineraryResponse)
+def share_concierge_itinerary(
+    *,
+    payload: ShareItineraryRequest,
+    session: Session = Depends(get_session),
+    user: User | None = Depends(get_optional_user),
+) -> PortableItineraryResponse:
+    """Freeze an itinerary and hand back a link you can send to someone.
+
+    Takes the stops the caller is looking at rather than re-running the
+    concierge: re-planning here would quietly hand back a different night than
+    the one on screen. Titles, venues, and coordinates are re-read from the
+    database so the public page only ever renders our own data.
+    """
+    requested_ids = [stop.event_id for stop in payload.stops]
+    events_by_id = {
+        int(event.id): event
+        for event in session.exec(select(Event).where(Event.id.in_(requested_ids))).all()
+        if event.id is not None
+    }
+    missing = [event_id for event_id in requested_ids if event_id not in events_by_id]
+    if missing:
+        raise HTTPException(
+            status_code=404, detail=f"Unknown event ids: {sorted(set(missing))}"
+        )
+
+    snapshot: list[dict] = []
+    for stop in payload.stops:
+        event = events_by_id[stop.event_id]
+        lat, lng = _extract_lat_lng(event)
+        snapshot.append(
+            {
+                "kind": stop.kind,
+                "event_id": int(event.id or 0),
+                "title": event.title,
+                "start_at": event.start_at.isoformat(),
+                "end_at": event.end_at.isoformat() if event.end_at else None,
+                "venue_name": event.venue_name,
+                "address": event.raw_address,
+                "lat": lat,
+                "lng": lng,
+                "location_confidence": (
+                    event.location_confidence
+                    if event.location_confidence is not None
+                    else 1.0
+                ),
+                "external_url": event.external_url,
+                "travel_buffer_minutes_before": max(
+                    0, int(stop.travel_buffer_minutes_before)
+                ),
+            }
+        )
+
+    first_start = min(
+        events_by_id[stop.event_id].start_at for stop in payload.stops
+    )
+    saved = SavedItinerary(
+        share_token=generate_share_token(),
+        user_id=int(user.id) if user is not None and user.id is not None else None,
+        title=itinerary_title(
+            intent=payload.intent,
+            geography=payload.geography,
+            starts_at=first_start,
+        ),
+        query=payload.query,
+        intent=payload.intent,
+        timeframe=payload.timeframe,
+        geography=payload.geography,
+        anchor_event_id=payload.anchor_event_id,
+        stops=snapshot,
+    )
+    session.add(saved)
+    session.commit()
+    session.refresh(saved)
+    return _portable_response(saved)
+
+
+@router.get("/shared/itineraries/{token}", response_model=PortableItineraryResponse)
+def get_shared_itinerary(
+    *,
+    token: str,
+    session: Session = Depends(get_session),
+) -> PortableItineraryResponse:
+    """Public read of a shared itinerary — no auth, so the link just works."""
+    if not is_valid_share_token(token):
+        raise HTTPException(status_code=404, detail="Itinerary not found")
+    saved = session.exec(
+        select(SavedItinerary).where(SavedItinerary.share_token == token)
+    ).first()
+    if saved is None:
+        raise HTTPException(status_code=404, detail="Itinerary not found")
+    return _portable_response(saved)

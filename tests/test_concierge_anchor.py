@@ -39,9 +39,16 @@ pytestmark = pytest.mark.skipif(
 
 
 def _next_sunday_at(hour: int, minute: int = 0) -> datetime:
-    """The coming Sunday at ``hour`` SF-local, as UTC."""
+    """The Sunday the concierge will target, at ``hour`` SF-local, as UTC.
+
+    On a Sunday that is *today*: the app resolves "Sunday" to the current day
+    (concierge ``_resolve_window`` uses ``% 7`` with no bump), so the fixture
+    must too, or every anchor test goes red on Sundays. The anchor query
+    bounds on the intent window rather than ``now()``, so an event earlier
+    the same day still qualifies whenever CI runs.
+    """
     now_local = datetime.now(LOCAL_TZ)
-    days_until = (6 - now_local.weekday()) % 7 or 7
+    days_until = (6 - now_local.weekday()) % 7
     target = (now_local + timedelta(days=days_until)).replace(
         hour=hour, minute=minute, second=0, microsecond=0
     )

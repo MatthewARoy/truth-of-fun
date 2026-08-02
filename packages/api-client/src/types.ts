@@ -52,6 +52,19 @@ export type ConciergeRequest = {
   limit?: number;
 };
 
+/** Google Maps deep links for one stop. Null when the stop has no resolvable
+ * location (no coordinates, address, or venue name). */
+export type StopLinks = {
+  tickets_url: string | null;
+  map_url: string | null;
+  /** Driving directions from the previous stop, or from current location for
+   * the first one. */
+  directions_url: string | null;
+  food_url: string | null;
+  drinks_url: string | null;
+  parking_url: string | null;
+};
+
 export type ItineraryStopResponse = {
   kind: string;
   event_id: number;
@@ -61,6 +74,10 @@ export type ItineraryStopResponse = {
   venue_name: string | null;
   external_url: string | null;
   travel_buffer_minutes_before: number;
+  address: string | null;
+  lat: number | null;
+  lng: number | null;
+  links: StopLinks;
 };
 
 export type ConciergeResponse = {
@@ -69,6 +86,42 @@ export type ConciergeResponse = {
   geography: string | null;
   anchor_event_id: number | null;
   itinerary: ItineraryStopResponse[];
+  /** Subject-line summary, e.g. "Date night in Mission — Sat, Aug 8". */
+  title: string;
+  /** Pasteable plain-text rendering of the whole plan. */
+  text: string;
+};
+
+/** Only identity and ordering come from the client; the server re-reads every
+ * display fact from the database when it writes the snapshot. */
+export type ShareItineraryStop = {
+  kind: string;
+  event_id: number;
+  travel_buffer_minutes_before?: number;
+};
+
+export type ShareItineraryRequest = {
+  query?: string;
+  intent?: string;
+  timeframe?: string;
+  geography?: string | null;
+  anchor_event_id?: number | null;
+  stops: ShareItineraryStop[];
+};
+
+export type PortableItineraryResponse = {
+  share_token: string;
+  /** Relative path to the public page, e.g. "/itinerary/<token>". */
+  share_url: string;
+  title: string;
+  query: string;
+  intent: string;
+  timeframe: string;
+  geography: string | null;
+  anchor_event_id: number | null;
+  created_at: string;
+  itinerary: ItineraryStopResponse[];
+  text: string;
 };
 
 export type FolderResponse = {
