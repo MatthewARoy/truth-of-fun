@@ -12,6 +12,7 @@ from sqlmodel import Session, select
 
 from app.core.database import get_session
 from app.core.localtime import LOCAL_TZ
+from app.core.ratelimit import llm_rate_limit, share_rate_limit
 from app.core.security import get_current_user, get_optional_user
 from app.models.event import Event
 from app.models.itinerary import SavedItinerary
@@ -562,7 +563,11 @@ def update_me_interests(
     )
 
 
-@router.post("/users/me/onboarding", response_model=OnboardingResponse)
+@router.post(
+    "/users/me/onboarding",
+    response_model=OnboardingResponse,
+    dependencies=[Depends(llm_rate_limit)],
+)
 async def set_onboarding_profile(
     *,
     payload: OnboardingRequest,
@@ -659,7 +664,11 @@ def get_recommendations(
     return recommendations
 
 
-@router.post("/concierge/itinerary", response_model=ConciergeResponse)
+@router.post(
+    "/concierge/itinerary",
+    response_model=ConciergeResponse,
+    dependencies=[Depends(llm_rate_limit)],
+)
 async def build_concierge_itinerary(
     *,
     payload: ConciergeRequest,
@@ -858,7 +867,11 @@ def _portable_response(itinerary: SavedItinerary) -> PortableItineraryResponse:
     )
 
 
-@router.post("/concierge/itinerary/share", response_model=PortableItineraryResponse)
+@router.post(
+    "/concierge/itinerary/share",
+    response_model=PortableItineraryResponse,
+    dependencies=[Depends(share_rate_limit)],
+)
 def share_concierge_itinerary(
     *,
     payload: ShareItineraryRequest,
