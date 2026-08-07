@@ -14,6 +14,16 @@ In the JSON shapes below, values are field types (`int`, `float`, `string`, `boo
 
 The entire `/internal/secrets/*` tree returns **404** unless `AAIM_ENABLED=true`. When enabled, each endpoint additionally requires the scope listed below (`403` if the token lacks it).
 
+## Rate limits
+
+Abuse-prone endpoints enforce per-client sliding windows and return **429** with a `Retry-After` header (seconds) when exceeded. Limits are tunable via env (`0` disables — see `.env.example`).
+
+| Window | Default | Applies to |
+|---|---|---|
+| LLM | 30 / hour | `POST /concierge/itinerary`, `POST /users/me/onboarding` |
+| Share | 60 / hour | `POST /concierge/itinerary/share` |
+| Auth | 20 / 15 min | `POST /auth/login`, `POST /auth/register` (shared window) |
+
 ## Endpoint index
 
 | Method | Path | Auth |

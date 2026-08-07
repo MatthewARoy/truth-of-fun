@@ -10,6 +10,7 @@ from sqlmodel import Session, select
 
 from app.core.config import Settings, get_settings
 from app.core.database import get_session
+from app.core.ratelimit import auth_rate_limit
 from app.models.user import User
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -53,7 +54,12 @@ def _create_access_token(*, user: User, settings: Settings) -> str:
     return jwt.encode(payload, settings.jwt_secret_key, algorithm="HS256")
 
 
-@router.post("/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/register",
+    response_model=AuthResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(auth_rate_limit)],
+)
 def register(
     *,
     payload: RegisterRequest,
@@ -86,7 +92,7 @@ def register(
     )
 
 
-@router.post("/login", response_model=AuthResponse)
+@router.post("/login", response_model=AuthResponse, dependencies=[Depends(auth_rate_limit)])
 def login(
     *,
     payload: LoginRequest,

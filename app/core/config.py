@@ -93,6 +93,28 @@ class Settings(BaseSettings):
         description="JWT expiration in minutes (default 7 days)",
     )
 
+    rate_limit_llm_per_hour: int = Field(
+        default=30,
+        description=(
+            "Per-client hourly cap on endpoints that call the LLM per request "
+            "(concierge itinerary builds, onboarding tag extraction). 0 disables."
+        ),
+    )
+    rate_limit_share_per_hour: int = Field(
+        default=60,
+        description=(
+            "Per-client hourly cap on itinerary share creation (each share "
+            "persists a public snapshot row). 0 disables."
+        ),
+    )
+    rate_limit_auth_per_quarter_hour: int = Field(
+        default=20,
+        description=(
+            "Per-client cap on login/register attempts per 15 minutes "
+            "(credential-stuffing and signup-abuse guard). 0 disables."
+        ),
+    )
+
     alert_webhook_url: str | None = Field(
         default=None,
         description="Webhook URL (Slack/Discord) for operational alerts. POST with JSON body.",
