@@ -7,10 +7,12 @@ from app.api.health import router as health_router
 from app.api.internal_secrets import router as internal_secrets_router
 from app.api.social import router as social_router
 from app.core.config import get_settings
+from app.core.request_limits import RequestBodyLimitMiddleware
 
 settings = get_settings()
 
 app = FastAPI(title=settings.app_name)
+app.add_middleware(RequestBodyLimitMiddleware, max_bytes=settings.max_request_body_bytes)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_allowed_origins,

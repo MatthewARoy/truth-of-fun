@@ -70,8 +70,8 @@ class RecommendationResponse(EventResponse):
 
 
 class ConciergeRequest(BaseModel):
-    query: str
-    limit: int = 25
+    query: str = Field(min_length=1, max_length=2000)
+    limit: int = Field(default=25, ge=3, le=100)
 
 
 class StopLinksResponse(BaseModel):
@@ -119,9 +119,9 @@ class ShareItineraryStopRequest(BaseModel):
     a shared page can never be made to show text the caller supplied.
     """
 
-    kind: str
+    kind: str = Field(max_length=50)
     event_id: int
-    travel_buffer_minutes_before: int = 0
+    travel_buffer_minutes_before: int = Field(default=0, ge=0, le=24 * 60)
 
 
 class ShareItineraryRequest(BaseModel):
@@ -152,7 +152,7 @@ class PortableItineraryResponse(BaseModel):
 class InterestRequest(BaseModel):
     action: Literal["save", "like", "click", "external_ticket_click"]
     event_id: int | None = None
-    vibe_tag: str | None = None
+    vibe_tag: str | None = Field(default=None, max_length=100)
 
 
 class InterestResponse(BaseModel):
@@ -162,7 +162,7 @@ class InterestResponse(BaseModel):
 
 
 class OnboardingRequest(BaseModel):
-    perfect_saturday: str
+    perfect_saturday: str = Field(min_length=1, max_length=2000)
 
 
 class OnboardingResponse(BaseModel):
@@ -358,10 +358,10 @@ def _location_keyword_for_preset(location_preset: str | None) -> str | None:
 def search_events(
     *,
     session: Session = Depends(get_session),
-    q: str | None = Query(default=None, description="Full-text search query"),
-    lat: float | None = Query(default=None, description="Latitude for geo search"),
-    lng: float | None = Query(default=None, description="Longitude for geo search"),
-    radius_miles: float | None = Query(default=None, gt=0, description="Search radius miles"),
+    q: str | None = Query(default=None, max_length=200, description="Full-text search query"),
+    lat: float | None = Query(default=None, ge=-90, le=90, description="Latitude for geo search"),
+    lng: float | None = Query(default=None, ge=-180, le=180, description="Longitude for geo search"),
+    radius_miles: float | None = Query(default=None, gt=0, le=500, description="Search radius miles"),
     min_location_confidence: float = Query(
         default=0.5,
         ge=0,
@@ -371,7 +371,7 @@ def search_events(
             "city-centroid fallbacks are excluded; pass 0 to include them."
         ),
     ),
-    vibe_tag: str | None = Query(default=None, description="Filter by vibe tag"),
+    vibe_tag: str | None = Query(default=None, max_length=100, description="Filter by vibe tag"),
     time_preset: Literal["tonight", "this_weekend"] | None = Query(
         default=None,
         description="Friendly time filter for quick UI controls",
@@ -386,7 +386,7 @@ def search_events(
     sort_by: Literal["date", "distance"] = Query(
         "date", description="Sort order: 'date' (default) or 'distance' (requires lat/lng)"
     ),
-    status: str | None = Query(None, description="Filter by event status"),
+    status: str | None = Query(None, max_length=50, description="Filter by event status"),
     limit: int = Query(default=25, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[EventResponse]:
@@ -668,7 +668,7 @@ async def build_concierge_itinerary(
     user: User | None = Depends(get_optional_user),
 ) -> ConciergeResponse:
     parsed = await parse_intent_async(payload.query)
-    limit = max(3, min(int(payload.limit), 100))
+    limit = payload.limit
 
     def _anchor_query(*, restrict_to_intent_hours: bool):
         stmt = select(Event).where(

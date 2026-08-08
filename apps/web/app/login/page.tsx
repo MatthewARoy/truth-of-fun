@@ -159,11 +159,12 @@ export default function LoginPage() {
           <Input
             label="Password"
             type="password"
-            placeholder="Min 6 characters"
+            placeholder={mode === "signup" ? "Min 12 characters" : "Your password"}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
-            minLength={6}
+            minLength={mode === "signup" ? 12 : 1}
+            maxLength={72}
           />
           {error && <InlineNotice tone="error">{error}</InlineNotice>}
           <Button type="submit" fullWidth disabled={loading}>

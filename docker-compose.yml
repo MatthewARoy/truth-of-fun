@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -29,6 +29,9 @@ services:
     container_name: truth-of-fun-api
     restart: unless-stopped
     environment:
+      # Compose is the local development stack. The image itself defaults to
+      # production and refuses the checked-in development JWT secret.
+      APP_ENV: development
       DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/truth_of_fun
       # To enable AAIM key rotation, uncomment these (and the redis service
       # below), then see "Enabling AAIM key rotation" in docs/architecture.md:
@@ -38,7 +41,7 @@ services:
       db:
         condition: service_healthy
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')\""]
       interval: 10s
@@ -57,6 +60,7 @@ services:
     restart: unless-stopped
     command: ["python", "-m", "app.worker"]
     environment:
+      APP_ENV: development
       DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/truth_of_fun
     depends_on:
       db:
@@ -77,7 +81,7 @@ services:
     profiles: ["aaim"]
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

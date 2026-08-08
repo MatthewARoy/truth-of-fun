@@ -125,6 +125,6 @@ def test_register_shares_the_auth_window_with_login() -> None:
         assert response.status_code == 401
         response = client.post(
             "/auth/register",
-            json={"email": "new@example.com", "password": "hunter22"},
+            json={"email": "new@example.com", "password": "hunter2hunter2"},
         )
         assert response.status_code == 429
