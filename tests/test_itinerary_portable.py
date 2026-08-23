@@ -140,6 +140,7 @@ class _Stop:
     address: str | None
     travel_buffer_minutes_before: int
     links: StopLinks
+    start_time_is_estimated: bool = False
 
 
 def _renderable(**overrides) -> _Stop:
@@ -209,3 +210,14 @@ def test_stop_links_omits_nothing_it_can_build() -> None:
             links.parking_url,
         )
     )
+
+
+def test_an_estimated_start_shows_the_day_instead_of_a_made_up_clock_time() -> None:
+    """Eventbrite's 19:00 default must not print as "7:00 PM" in a shared plan."""
+    text = render_itinerary_text(
+        title="Night out",
+        stops=[_renderable(start_time_is_estimated=True)],
+    )
+
+    assert "1. Sat, Aug 8 · time TBA · Main event" in text
+    assert "8:00 PM" not in text

@@ -16,6 +16,13 @@ class Event(SQLModel, table=True):
     start_at: datetime = Field(
         sa_column=Column(DateTime(timezone=True), index=True, nullable=False)
     )
+    # True when the calendar date is real but the clock time is a connector
+    # placeholder. Dedupe widens its time window for these, and the API tells
+    # clients not to render a precise time.
+    start_time_is_estimated: bool = Field(
+        default=False,
+        sa_column=Column(Boolean, nullable=False, server_default="false"),
+    )
     end_at: Optional[datetime] = Field(
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),

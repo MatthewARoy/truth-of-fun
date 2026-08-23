@@ -246,6 +246,7 @@ class StopLike(Protocol):
     kind: str
     title: str
     start_at: datetime
+    start_time_is_estimated: bool
     end_at: datetime | None
     venue_name: str | None
     address: str | None
@@ -278,9 +279,14 @@ def render_itinerary_text(
 
     for index, stop in enumerate(stops, start=1):
         lines.append("")
-        time_range = format_local_time(stop.start_at)
-        if stop.end_at is not None:
-            time_range += f"–{format_local_time(stop.end_at)}"
+        # A placeholder hour printed as "7:00 PM" is a lie the reader will
+        # plan around; give them the day and say the time isn't published.
+        if stop.start_time_is_estimated:
+            time_range = f"{format_local_day(stop.start_at)} · time TBA"
+        else:
+            time_range = format_local_time(stop.start_at)
+            if stop.end_at is not None:
+                time_range += f"–{format_local_time(stop.end_at)}"
         lines.append(f"{index}. {time_range} · {stop_kind_label(stop.kind)}")
         lines.append(f"   {stop.title}")
 

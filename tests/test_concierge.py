@@ -23,6 +23,7 @@ class _Event:
     source_tier: int
     venue_name: str | None = None
     external_url: str | None = None
+    start_time_is_estimated: bool = False
 
 
 def test_parse_intent_extracts_fields() -> None:

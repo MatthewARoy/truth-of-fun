@@ -17,6 +17,7 @@ def _event(
     categories: list[str] | None = None,
     venue_name: str | None = None,
     external_url: str | None = None,
+    start_time_is_estimated: bool = False,
 ) -> dict:
     return {
         "title": title,
@@ -36,6 +37,7 @@ def _event(
         "currency": None,
         "image_url": None,
         "status": "scheduled",
+        "start_time_is_estimated": start_time_is_estimated,
     }
 
 
@@ -421,3 +423,209 @@ def test_token_subset_titles_at_different_venues_are_not_merged() -> None:
     ]
 
     assert len(service.deduplicate_events(events)) == 2
+
+
+# --- Estimated start times -------------------------------------------------
+#
+# Some connectors only get a calendar date off the page and stamp a placeholder
+# wall-clock hour (Eventbrite listings default to 19:00 SF-local). Those rows
+# carry start_time_is_estimated=True so the rest of the pipeline can stop
+# treating the clock as fact.
+
+# 2026-08-23 in SF: a real 13:00 PDT start is 20:00Z the same day, while the
+# 19:00 PDT placeholder is 02:00Z the *next* UTC day. Any same-day rule has to
+# be evaluated in SF local time, not UTC.
+_REAL_1PM_SF = datetime(2026, 8, 23, 20, 0, tzinfo=timezone.utc)
+_ESTIMATED_7PM_SF = datetime(2026, 8, 24, 2, 0, tzinfo=timezone.utc)
+
+
+def test_deduplicate_matches_across_day_when_one_start_time_is_estimated() -> None:
+    """"Tea Party at the Zoo": funcheap had 13:00, Eventbrite defaulted to 19:00."""
+    service = DataPipelineService()
+
+    deduped = service.deduplicate_events(
+        [
+            _event(
+                title="Tea Party at the Zoo",
+                start_at=_ESTIMATED_7PM_SF,
+                source_name="eventbrite",
+                source_tier=1,
+                venue_name="San Francisco Zoo",
+                start_time_is_estimated=True,
+            ),
+            _event(
+                title="Tea Party at the Zoo",
+                start_at=_REAL_1PM_SF,
+                source_name="funcheap_sf",
+                source_tier=2,
+                venue_name="San Francisco Zoo",
+            ),
+        ]
+    )
+
+    assert len(deduped) == 1
+    merged = deduped[0]
+    # A real time beats an estimated one even though Eventbrite is the more
+    # authoritative tier: the tier hierarchy ranks sources, not placeholders.
+    assert merged["start_at"] == _REAL_1PM_SF
+    assert merged["start_time_is_estimated"] is False
+
+
+def test_deduplicate_keeps_estimated_time_when_it_is_the_only_one() -> None:
+    """Nothing to fall back to: the placeholder survives, still flagged."""
+    service = DataPipelineService()
+
+    deduped = service.deduplicate_events(
+        [
+            _event(
+                title="Suds Francisco",
+                start_at=_ESTIMATED_7PM_SF,
+                source_name="eventbrite",
+                source_tier=1,
+                venue_name="Salesforce Park",
+                start_time_is_estimated=True,
+            ),
+            _event(
+                title="Suds Francisco Beer Festival",
+                start_at=_ESTIMATED_7PM_SF,
+                source_name="sfstation",
+                source_tier=2,
+                venue_name="Salesforce Park",
+                start_time_is_estimated=True,
+            ),
+        ]
+    )
+
+    assert len(deduped) == 1
+    assert deduped[0]["start_at"] == _ESTIMATED_7PM_SF
+    assert deduped[0]["start_time_is_estimated"] is True
+
+
+def test_estimated_time_does_not_merge_unrelated_same_day_events() -> None:
+    """Widening the window drops the clock guard, so title/venue must still hold."""
+    service = DataPipelineService()
+
+    deduped = service.deduplicate_events(
+        [
+            _event(
+                title="R&B Brunch",
+                start_at=_ESTIMATED_7PM_SF,
+                source_name="eventbrite",
+                source_tier=1,
+                venue_name="Mission Bowling Club",
+                start_time_is_estimated=True,
+            ),
+            _event(
+                title="Warehouse Techno Dayclub",
+                start_at=_REAL_1PM_SF,
+                source_name="funcheap_sf",
+                source_tier=2,
+                venue_name="Public Works",
+            ),
+        ]
+    )
+
+    assert len(deduped) == 2
+
+
+def test_estimated_time_does_not_merge_across_local_days() -> None:
+    """The date is real even when the clock isn't; a different day is a different event."""
+    service = DataPipelineService()
+
+    deduped = service.deduplicate_events(
+        [
+            _event(
+                title="Tea Party at the Zoo",
+                start_at=_ESTIMATED_7PM_SF,
+                source_name="eventbrite",
+                source_tier=1,
+                venue_name="San Francisco Zoo",
+                start_time_is_estimated=True,
+            ),
+            _event(
+                title="Tea Party at the Zoo",
+                start_at=_REAL_1PM_SF + timedelta(days=1),
+                source_name="funcheap_sf",
+                source_tier=2,
+                venue_name="San Francisco Zoo",
+            ),
+        ]
+    )
+
+    assert len(deduped) == 2
+
+
+def test_two_real_times_still_need_the_two_hour_window() -> None:
+    """The widening applies only when a placeholder is involved."""
+    service = DataPipelineService()
+
+    deduped = service.deduplicate_events(
+        [
+            _event(
+                title="Tea Party at the Zoo",
+                start_at=_REAL_1PM_SF,
+                source_name="funcheap_sf",
+                source_tier=2,
+                venue_name="San Francisco Zoo",
+            ),
+            _event(
+                title="Tea Party at the Zoo",
+                start_at=_ESTIMATED_7PM_SF,
+                source_name="dothebay",
+                source_tier=2,
+                venue_name="San Francisco Zoo",
+            ),
+        ]
+    )
+
+    assert len(deduped) == 2
+
+
+def test_real_time_replacing_an_estimate_is_significant_new_information() -> None:
+    """Even at the same clock value, losing the placeholder flag is worth an update."""
+    service = DataPipelineService()
+    existing = Event(
+        **_event(
+            title="Suds Francisco",
+            start_at=_ESTIMATED_7PM_SF,
+            source_name="eventbrite",
+            source_tier=1,
+            venue_name="Salesforce Park",
+            start_time_is_estimated=True,
+        )
+    )
+    incoming = _event(
+        title="Suds Francisco",
+        start_at=_ESTIMATED_7PM_SF,
+        source_name="funcheap_sf",
+        source_tier=2,
+        venue_name="Salesforce Park",
+    )
+
+    assert service.has_significant_new_information(
+        existing_event=existing, incoming_event=incoming
+    )
+
+
+def test_estimate_does_not_overwrite_a_stored_real_time() -> None:
+    """The reverse direction: a placeholder must never re-flag a known time."""
+    service = DataPipelineService()
+
+    merged = service._merge_event_payloads(
+        primary=_event(
+            title="Tea Party at the Zoo",
+            start_at=_REAL_1PM_SF,
+            source_name="funcheap_sf",
+            source_tier=2,
+        ),
+        secondary=_event(
+            title="Tea Party at the Zoo",
+            start_at=_ESTIMATED_7PM_SF,
+            source_name="eventbrite",
+            source_tier=1,
+            start_time_is_estimated=True,
+        ),
+    )
+
+    assert merged["start_at"] == _REAL_1PM_SF
+    assert merged["start_time_is_estimated"] is False
