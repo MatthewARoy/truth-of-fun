@@ -11,9 +11,12 @@ original breakage went unnoticed. Use ``scripts/audit_vibe_coverage.py``.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from app.services.concierge import _INTENT_VIBE_PROFILES, intent_vibe_profile
+from app.models.event import Event
 from app.services.data_pipeline import DataPipelineService
 from app.services.recommender import RecommenderService
 from app.services.tags import (
@@ -143,3 +146,39 @@ def test_backfill_canonicalization_is_form_only() -> None:
     """The backfill must not relabel events, only restyle their tags."""
     assert canonical_tag("#standup") == "#standup"
     assert canonical_tag("Relaxed") == "#relaxed"
+
+
+def test_legacy_tags_do_not_look_like_new_information() -> None:
+    """A re-ingest must not flag every legacy row as changed.
+
+    ``has_significant_new_information`` compares stored tags against incoming
+    ones. Both sides are canonicalized, so ``HighEnergy`` and ``#highenergy``
+    compare equal instead of triggering a merge-update on every event.
+    """
+    service = DataPipelineService()
+    start = datetime(2026, 9, 1, 20, 0, tzinfo=timezone.utc)
+    existing = Event(
+        title="Warehouse Set",
+        start_at=start,
+        source_name="19hz",
+        source_tier=2,
+        location="POINT(-122.4194 37.7749)",
+        status="scheduled",
+        categories=[],
+        tags=["HighEnergy", "Alex Ramon"],
+        created_at=start,
+    )
+    incoming = {
+        "title": "Warehouse Set",
+        "start_at": start,
+        "source_name": "19hz",
+        "source_tier": 2,
+        "location": "POINT(-122.4194 37.7749)",
+        "status": "scheduled",
+        "categories": [],
+        "tags": ["#highenergy"],
+    }
+
+    assert not service.has_significant_new_information(
+        existing_event=existing, incoming_event=incoming
+    )

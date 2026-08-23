@@ -24,12 +24,14 @@ from app.services.tags import resolve_vibe_tag
 
 # Canonicalize stored tags in SQL so mixed-form rows (``HighEnergy``,
 # ``#live-music``) count towards the tag they mean.
+# Returns one row per (event, canonical tag). Aliases are folded in Python, so
+# the counts below must be over distinct event ids -- an event tagged both
+# "#standup" and "#comedyclub" is one comedy event, not two.
 _COUNT_SQL = text(
     """
-    SELECT regexp_replace(lower(ltrim(tag, '#')), '[^a-z0-9+]', '', 'g') AS canonical,
-           count(DISTINCT id) AS events
+    SELECT DISTINCT id,
+           regexp_replace(lower(ltrim(tag, '#')), '[^a-z0-9+]', '', 'g') AS canonical
     FROM events, jsonb_array_elements_text(tags) AS tag
-    GROUP BY canonical
     """
 )
 
@@ -53,12 +55,13 @@ def main() -> int:
     with engine.connect() as conn:
         # The SQL canonicalizes form; fold aliases in Python so the report
         # reflects what the recommender actually matches.
-        counts: dict[str, int] = {}
+        matching_events: dict[str, set[int]] = {}
         for row in conn.execute(_COUNT_SQL):
             resolved = resolve_vibe_tag(row.canonical)
             if resolved is None:
                 continue
-            counts[resolved] = counts.get(resolved, 0) + row.events
+            matching_events.setdefault(resolved, set()).add(row.id)
+        counts = {tag: len(ids) for tag, ids in matching_events.items()}
         total = conn.execute(text("SELECT count(*) FROM events")).scalar_one()
 
     print(f"{total} events in corpus\n")

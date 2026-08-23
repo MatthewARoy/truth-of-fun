@@ -148,3 +148,19 @@ def canonical_vibe_tags(tags: object) -> list[str]:
         if canonical not in kept:
             kept.append(canonical)
     return kept
+
+
+def stored_forms_for(vibe_tag: str) -> list[str]:
+    """Every canonical spelling that resolves to *vibe_tag*, prefix stripped.
+
+    The recommender folds aliases in Python, but the query filter matches in
+    SQL. Without this, ``?vibe_tag=comedy`` would miss the events stored as
+    ``#standup`` that the recommender counts as comedy.
+    """
+    resolved = resolve_vibe_tag(vibe_tag)
+    if resolved is None:
+        return []
+
+    forms = {resolved}
+    forms.update(alias for alias, target in _SYNONYMS.items() if target == resolved)
+    return sorted(form.lstrip("#") for form in forms)

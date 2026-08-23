@@ -6,9 +6,14 @@
 non-matching tags. This rewrites *form only* -- ``HighEnergy`` becomes
 ``#highenergy``, ``#live-music`` becomes ``#livemusic``.
 
-It deliberately does NOT delete out-of-vocabulary tags. Performer names and
-ticket types are noise for ranking, but dropping them here would destroy the
-only record of them; ingestion stops writing new ones instead.
+It rewrites form only and deliberately does NOT delete out-of-vocabulary tags,
+so a bulk pass over the whole corpus stays reversible in meaning: nothing is
+relabelled and nothing is classified away by a script run at scale.
+
+Note that ingestion is stricter. ``DataPipelineService`` filters tags to the
+controlled vocabulary whenever it writes, so any event that receives an update
+through a normal worker cycle will have its performer names and ticket types
+dropped, whether or not this backfill has ever run.
 
 Dry run by default -- the database is shared across worktrees:
 

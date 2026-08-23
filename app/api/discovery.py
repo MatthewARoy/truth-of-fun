@@ -32,7 +32,7 @@ from app.services.itinerary import (
 )
 from app.services.recommender import RecommenderService, ScoredEvent
 from app.services.social import generate_share_token, is_valid_share_token
-from app.services.tags import canonical_tag
+from app.services.tags import stored_forms_for
 from app.services.user_profile import UserProfileService
 
 router = APIRouter(tags=["discovery"])
@@ -282,19 +282,15 @@ def _canonical_tag_filter(vibe_tag: str):
     Canonicalize both sides in SQL so the filter is correct against today's
     mixed-form rows as well as canonicalized ones.
     """
-    canonical = canonical_tag(vibe_tag)
-    if canonical is None:
+    forms = stored_forms_for(vibe_tag)
+    if not forms:
         return text("FALSE")
 
     element = func.jsonb_array_elements_text(Event.tags).column_valued("tag")
     normalized = func.regexp_replace(
         func.lower(func.ltrim(element, "#")), "[^a-z0-9+]", "", "g"
     )
-    return (
-        select(element)
-        .where(normalized == canonical.lstrip("#"))
-        .exists()
-    )
+    return select(element).where(normalized.in_(forms)).exists()
 
 
 def _apply_concierge_geography_filter(stmt: object, geography: str | None) -> object:

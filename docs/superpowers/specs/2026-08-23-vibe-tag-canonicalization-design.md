@@ -150,9 +150,13 @@ Events receiving a non-zero vibe score, live corpus of 2089 events:
 | `general_night_out` | 767 | 879 |
 | `bar_crawl` | 717 | 731 |
 
-Tag coverage: `#comedy` 107 to 266, `#livemusic` 42 to 92, and `date_night`'s
-five dead tags are no longer all zero -- but at 1-6 events each they remain
-starved. `date_night` mean vibe score rises from 0.20 to 0.56 out of 100.
+Tag coverage, counting distinct events: `#comedy` 107 to 178, `#livemusic` 42
+to 88, `#highenergy` 596 to 607. `date_night`'s five dead tags are no longer all
+zero -- but at 0-6 events each they remain starved. Its mean vibe score rises
+from 0.20 to 0.56 out of 100.
+
+The gain is real but bounded: matching can only find vibes the corpus already
+records. Closing the gap needs the re-tag.
 
 ## Known limitations
 
