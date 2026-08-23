@@ -301,6 +301,12 @@ def _score_event_for_user(
     return score, matched
 
 
+# Below this, a coordinate is treated as a city-centroid guess rather than a
+# place worth searching on. Ingestion sources must score an unresolved venue
+# under this value or its centroid fallback is returned as a real location.
+DEFAULT_MIN_LOCATION_CONFIDENCE = 0.5
+
+
 def overlaps_window(window_start: datetime, window_end: datetime):
     """SQL predicate: the event overlaps [window_start, window_end].
 
@@ -385,7 +391,7 @@ def search_events(
     lng: float | None = Query(default=None, description="Longitude for geo search"),
     radius_miles: float | None = Query(default=None, gt=0, description="Search radius miles"),
     min_location_confidence: float = Query(
-        default=0.5,
+        default=DEFAULT_MIN_LOCATION_CONFIDENCE,
         ge=0,
         le=1,
         description=(

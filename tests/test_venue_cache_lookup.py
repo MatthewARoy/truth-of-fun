@@ -63,3 +63,62 @@ def test_central_corridor_venues_are_known() -> None:
         "Japanese Tea Garden",
     ]:
         assert lookup_venue_coordinates(name) is not None, f"unresolved venue: {name}"
+
+
+# Generous box around Northern California. Catches sign flips and transposed
+# digits in hand-entered coordinates without pinning venues to exact points.
+NORCAL_BOX = (36.0, 40.0, -124.5, -119.0)
+# Tight box around San Francisco proper.
+SF_BOX = (37.70, 37.84, -122.53, -122.35)
+
+SF_VENUES = [
+    "cafe du nord",
+    "swedish american hall",
+    "the roxie",
+    "roxie theater",
+    "biscuits and blues",
+    "madrone art bar",
+    "club waziema",
+    "the midway",
+    "halcyon",
+    "the endup",
+    "the hibernia",
+    "rickshaw stop",
+    "zeitgeist",
+    "el rio",
+    "thee parkside",
+    "bissap baobab",
+    "the function",
+    "endgames improv",
+    "japanese tea garden",
+    "spreckels temple of music",
+    "robin williams meadow",
+    "skatin' place",
+    "dolores park",
+    "crissy field",
+    "union square park",
+    "house of air",
+]
+
+
+def _in_box(coords: tuple[float, float], box: tuple[float, ...]) -> bool:
+    lat, lon = coords
+    return box[0] <= lat <= box[1] and box[2] <= lon <= box[3]
+
+
+def test_every_cached_venue_sits_in_northern_california() -> None:
+    for name, coords in VENUE_COORDINATES.items():
+        assert _in_box(coords, NORCAL_BOX), f"{name} is outside NorCal: {coords}"
+
+
+def test_san_francisco_venues_sit_inside_san_francisco() -> None:
+    for name in SF_VENUES:
+        coords = VENUE_COORDINATES[name]
+        assert _in_box(coords, SF_BOX), f"{name} is outside SF: {coords}"
+
+
+def test_out_of_city_venues_are_not_placed_in_san_francisco() -> None:
+    """Mesa Maguey is in Oakland; Mersea is on Treasure Island."""
+    assert not _in_box(VENUE_COORDINATES["mesa maguey"], SF_BOX)
+    assert _in_box(VENUE_COORDINATES["mesa maguey"], (37.70, 37.90, -122.35, -122.15))
+    assert _in_box(VENUE_COORDINATES["mersea"], (37.80, 37.84, -122.39, -122.35))
