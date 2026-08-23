@@ -7,7 +7,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from geoalchemy2 import Geography
-from sqlalchemy import cast, func, text
+from sqlalchemy import and_, cast, func, text
 from sqlmodel import Session, select
 
 from app.core.database import get_session
@@ -301,6 +301,20 @@ def _score_event_for_user(
     return score, matched
 
 
+def overlaps_window(window_start: datetime, window_end: datetime):
+    """SQL predicate: the event overlaps [window_start, window_end].
+
+    Filtering on ``start_at`` alone hides anything already under way, so a
+    festival running 10:15-16:00 vanishes from an afternoon query made at
+    15:00. An event with no published ``end_at`` is treated as a point in
+    time at ``start_at``.
+    """
+    return and_(
+        func.coalesce(Event.end_at, Event.start_at) >= window_start,
+        Event.start_at <= window_end,
+    )
+
+
 def _apply_concierge_geography_filter(stmt: object, geography: str | None) -> object:
     if not geography:
         return stmt
@@ -425,7 +439,9 @@ def search_events(
         )
 
     if not include_past:
-        stmt = stmt.where(Event.start_at >= func.now())
+        # An event in progress is not a past event: filter on when it ends,
+        # falling back to the start when no end time was published.
+        stmt = stmt.where(func.coalesce(Event.end_at, Event.start_at) >= func.now())
     if status is not None:
         stmt = stmt.where(Event.status == status)
 
@@ -680,8 +696,7 @@ async def build_concierge_itinerary(
 
     def _anchor_query(*, restrict_to_intent_hours: bool):
         stmt = select(Event).where(
-            Event.start_at >= parsed.window_start,
-            Event.start_at <= parsed.window_end,
+            overlaps_window(parsed.window_start, parsed.window_end),
             Event.source_tier <= 2,
         )
         hours = anchor_hour_range(parsed.intent) if restrict_to_intent_hours else None
@@ -748,8 +763,7 @@ async def build_concierge_itinerary(
                 select(Event)
                 .where(
                     Event.id != anchor.id,
-                    Event.start_at >= parsed.window_start,
-                    Event.start_at <= parsed.window_end,
+                    overlaps_window(parsed.window_start, parsed.window_end),
                     Event.source_tier >= 3,
                     func.ST_DWithin(
                         cast(Event.location, Geography),
