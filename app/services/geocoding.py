@@ -80,6 +80,54 @@ NORCAL_BOUNDS = (36.0, 40.0, -124.5, -119.0)
 NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search"
 
 
+# Names that mean "there is no venue yet". Geocoding them is how an event
+# with no known location acquires a confident, fabricated one: observed on
+# real data, a venue of "TBA" resolved to a POI near Merced at 0.85.
+_PLACEHOLDER_VENUES = frozenset(
+    {
+        "tba",
+        "tbd",
+        "tba/tbd",
+        "to be announced",
+        "to be determined",
+        "secret location",
+        "secret",
+        "undisclosed",
+        "undisclosed location",
+        "private residence",
+        "private location",
+        "private venue",
+        "various",
+        "various locations",
+        "multiple locations",
+        "online",
+        "virtual",
+        "livestream",
+        "n/a",
+        "na",
+        "none",
+        "unknown",
+        "location tba",
+        "venue tba",
+    }
+)
+
+
+def _is_placeholder_venue(value: str | None) -> bool:
+    """Whether a venue name is a stand-in rather than a place.
+
+    Sources qualify placeholders — 19hz writes "TBA (San Jose)" — so the
+    leading segment is what gets tested, not the whole string.
+    """
+    if not value:
+        return True
+    normalized = normalize_place_text(value)
+    if not normalized:
+        return True
+    head = re.split(r"[(,\-\u2013]", normalized)[0].strip()
+    return normalized in _PLACEHOLDER_VENUES or head in _PLACEHOLDER_VENUES
+
+
 # A house number followed by a street name: "6028 College Ave".
 _STREET_ADDRESS = re.compile(r"^\d{1,6}\s+\S")
 
@@ -358,9 +406,13 @@ class VenueGeocoder:
             if candidate and candidate.strip() and candidate.strip() not in attempts:
                 attempts.append(candidate.strip())
 
+        # A placeholder is the absence of a venue. Only a real address
+        # alongside it carries any location at all.
+        name = None if _is_placeholder_venue(venue_name) else venue_name
+
         add(cls._qualify(raw_address, city))
-        add(cls._qualify(venue_name, city))
-        for source in (raw_address, venue_name):
+        add(cls._qualify(name, city))
+        for source in (raw_address, name):
             add(cls._qualify(_street_address_within(source), city))
 
         return attempts

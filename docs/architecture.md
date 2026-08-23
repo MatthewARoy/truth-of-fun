@@ -89,6 +89,10 @@ Confidence comes from the provider's own precision signal rather than a constant
 
 Two guards protect against the failure that matters more than a miss — a confident coordinate in the wrong place. The request is hard-bounded to a Northern California viewbox, and the response coordinate is re-checked against the same box.
 
+A venue name that is a placeholder — `TBA`, `Secret Location`, `Private Residence`, `Online` — is never geocoded, qualified or not (19hz writes `TBA (San Jose)`). Observed on real data: geocoding `TBA` returned a POI near Merced at `0.85`, which is an event with no known location acquiring a confident, fabricated one. Only a `raw_address` alongside the placeholder is treated as real.
+
+Known limitation: the provider is asked for a single best match, so an ambiguous chain name (`Dave & Buster's`, with several Bay Area locations) can resolve to the wrong branch. The bounding box catches the wrong *region*, not the wrong branch within it; a `raw_address` is what disambiguates, which is why it leads the query order.
+
 Everything degrades to the previous behaviour. `GEOCODING_PROVIDER` unset means the static table only; an unrecognised value logs a warning and disables geocoding rather than failing the run; and an unreachable provider, a 429, or any exception leaves the event on its city centroid and the cycle completes.
 
 Provider answers — successes *and* failures — are cached in the `geocode_cache` table. The worker re-reads every feed every six hours and Nominatim permits one request per second, so negative caching is what keeps the long tail of names that will never resolve from consuming the whole budget every cycle. Failure rows expire after `GEOCODING_FAILURE_RETRY_DAYS`.

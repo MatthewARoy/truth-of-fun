@@ -217,3 +217,41 @@ async def test_the_whole_attempt_sequence_is_cached_as_one_answer(session) -> No
 
     first_pass = len(set(provider.queries))
     assert len(provider.queries) == first_pass
+
+
+async def test_a_placeholder_venue_name_is_never_geocoded(session) -> None:
+    """Observed on real data 2026-08-23: an event whose venue is literally
+    "TBA" geocoded to a POI near Merced at 0.85 — a fabricated location,
+    shipped confidently, 100 miles from the event. A placeholder is the
+    absence of a venue, not a venue with an unusual name."""
+    provider = _CountingProvider()
+
+    for placeholder in [
+        "TBA",
+        "tbd",
+        "TBA (San Francisco)",
+        "Secret Location",
+        "Private Residence",
+        "Various Locations",
+        "Online",
+    ]:
+        result = await _geocoder(provider).resolve(
+            session=session, venue_name=placeholder, raw_address=None, city="San Francisco"
+        )
+        assert result is None, f"{placeholder!r} must not resolve"
+
+    assert provider.queries == []
+
+
+async def test_a_real_address_still_resolves_when_the_venue_is_a_placeholder(session) -> None:
+    """The placeholder is only the name. An address alongside it is real."""
+    provider = _CountingProvider()
+    result = await _geocoder(provider).resolve(
+        session=session,
+        venue_name="TBA",
+        raw_address="6028 College Ave, Oakland, CA",
+        city="Oakland",
+    )
+
+    assert result is not None
+    assert provider.queries == ["6028 College Ave, Oakland, CA"]
