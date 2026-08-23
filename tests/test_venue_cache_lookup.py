@@ -122,3 +122,12 @@ def test_out_of_city_venues_are_not_placed_in_san_francisco() -> None:
     assert not _in_box(VENUE_COORDINATES["mesa maguey"], SF_BOX)
     assert _in_box(VENUE_COORDINATES["mesa maguey"], (37.70, 37.90, -122.35, -122.15))
     assert _in_box(VENUE_COORDINATES["mersea"], (37.80, 37.84, -122.39, -122.35))
+
+
+def test_html_entities_resolve_same_as_decoded_text() -> None:
+    """Scraped venue names arrive HTML-encoded ("Bimbo&#039;s 365 Club",
+    "Brick &amp; Mortar"). Undecoded, they never match the cache."""
+    decoded = lookup_venue_coordinates("Bimbo's 365 Club")
+    assert decoded is not None
+    assert lookup_venue_coordinates("Bimbo&#039;s 365 Club") == decoded
+    assert lookup_venue_coordinates("Bimbo&#x27;s 365 Club") == decoded

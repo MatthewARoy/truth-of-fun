@@ -4,6 +4,7 @@ Used to assign accurate coordinates instead of defaulting to SF city center.
 """
 
 # Format: "venue_name_lowercase": (latitude, longitude)
+import html
 import re
 import unicodedata
 from math import asin, cos, radians, sin, sqrt
@@ -140,6 +141,30 @@ VENUE_COORDINATES: dict[str, tuple[float, float]] = {
     "house of air": (37.8026, -122.4573),
     "mersea": (37.8225, -122.3706),
     "mesa maguey": (37.8262, -122.2620),
+    # Recurring landmarks and venues that were landing on a city centroid.
+    "pier 39": (37.8087, -122.4098),
+    "fisherman's wharf": (37.8080, -122.4177),
+    "north beach": (37.8003, -122.4097),
+    "san francisco chinatown": (37.7941, -122.4078),
+    "ocean beach": (37.7594, -122.5107),
+    "salesforce park": (37.7897, -122.3972),
+    "california academy of sciences": (37.7699, -122.4661),
+    "legion of honor": (37.7845, -122.5008),
+    "muir woods": (37.8912, -122.5717),
+    "alamo drafthouse - new mission": (37.7563, -122.4189),
+    "brick & mortar music hall": (37.7702, -122.4200),
+    "monarch sf": (37.7803, -122.4090),
+    "gray area": (37.7541, -122.4186),
+    "haight street art center": (37.7722, -122.4230),
+    "jewish community center of san francisco": (37.7876, -122.4470),
+    "the battery": (37.7975, -122.4016),
+    "the redwood room": (37.7871, -122.4110),
+    "st. joseph's arts society": (37.7729, -122.4147),
+    "muttville": (37.7669, -122.4120),
+    "san francisco italian athletic club": (37.8006, -122.4090),
+    "thee stork club": (37.8118, -122.2686),
+    "chabot space & science center": (37.8188, -122.1815),
+    "marin county fairgrounds": (37.9857, -122.5194),
 }
 
 
@@ -188,7 +213,10 @@ def _normalize_venue(value: str) -> str:
     Sites render apostrophes as U+2019 ("Cobb’s") while this table stores
     ASCII ("Cobb's"), so without folding the lookup misses entirely.
     """
-    text = unicodedata.normalize("NFKC", value).translate(_PUNCTUATION_FOLD)
+    # Scraped names arrive HTML-encoded ("Bimbo&#039;s", "Brick &amp; Mortar");
+    # decode before folding so they compare equal to the stored plain text.
+    text = html.unescape(value)
+    text = unicodedata.normalize("NFKC", text).translate(_PUNCTUATION_FOLD)
     return re.sub(r"\s+", " ", text).strip().lower()
 
 
