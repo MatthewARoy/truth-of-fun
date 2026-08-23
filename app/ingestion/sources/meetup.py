@@ -89,7 +89,7 @@ class MeetupSource(InputAgentSource):
             ),
             organizer=organizer,
             category_tags=self._coerce_tags(raw_item.get("topics")),
-            vibe_tags=["Social"],
+            vibe_tags=["#social"],
         )
 
     async def _search_events(self, *, topic: str, first: int) -> list[dict[str, Any]]:

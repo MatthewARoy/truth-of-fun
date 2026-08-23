@@ -32,6 +32,7 @@ from app.services.itinerary import (
 )
 from app.services.recommender import RecommenderService, ScoredEvent
 from app.services.social import generate_share_token, is_valid_share_token
+from app.services.tags import canonical_tag
 from app.services.user_profile import UserProfileService
 
 router = APIRouter(tags=["discovery"])
@@ -273,32 +274,27 @@ def _portable_stops(
     return enriched
 
 
-def _score_event_for_user(
-    *,
-    event_tags: list[str],
-    preferred_vibes: set[str],
-    profile_scores: dict[str, float],
-) -> tuple[float, list[str]]:
-    if not event_tags:
-        return 0.0, []
+def _canonical_tag_filter(vibe_tag: str):
+    """Match *vibe_tag* against stored tags regardless of their spelling.
 
-    tag_map = {tag.lower(): tag for tag in event_tags}
-    matched_keys = sorted(set(tag_map.keys()).intersection(preferred_vibes))
-    weighted_score = sum(profile_scores.get(key, 0.0) for key in tag_map.keys())
+    ``Event.tags.contains([...])`` is exact, case-sensitive JSONB containment,
+    so filtering by ``#highenergy`` missed every event stored as ``HighEnergy``.
+    Canonicalize both sides in SQL so the filter is correct against today's
+    mixed-form rows as well as canonicalized ones.
+    """
+    canonical = canonical_tag(vibe_tag)
+    if canonical is None:
+        return text("FALSE")
 
-    if not matched_keys and weighted_score <= 0:
-        return 0.0, []
-
-    matched = [tag_map[key] for key in matched_keys]
-    profile_matched_keys = [key for key in tag_map.keys() if profile_scores.get(key, 0.0) > 0]
-    for key in profile_matched_keys:
-        original = tag_map[key]
-        if original not in matched:
-            matched.append(original)
-
-    # Explicit likes drive relevance first, then decayed behavioral profile weight.
-    score = (len(matched_keys) * 100.0) + (weighted_score * 10.0)
-    return score, matched
+    element = func.jsonb_array_elements_text(Event.tags).column_valued("tag")
+    normalized = func.regexp_replace(
+        func.lower(func.ltrim(element, "#")), "[^a-z0-9+]", "", "g"
+    )
+    return (
+        select(element)
+        .where(normalized == canonical.lstrip("#"))
+        .exists()
+    )
 
 
 def _apply_concierge_geography_filter(stmt: object, geography: str | None) -> object:
@@ -438,7 +434,7 @@ def search_events(
     if end_bound is not None:
         stmt = stmt.where(Event.start_at <= end_bound)
     if vibe_tag:
-        stmt = stmt.where(Event.tags.contains([vibe_tag]))
+        stmt = stmt.where(_canonical_tag_filter(vibe_tag))
 
     location_keyword = _location_keyword_for_preset(location_preset)
     if location_keyword:

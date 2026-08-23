@@ -113,7 +113,7 @@ class NineteenHzSource(InputAgentSource):
                 price_text=cost_text or None,
             ),
             category_tags=raw_item.get("tags", []),
-            vibe_tags=["HighEnergy"],
+            vibe_tags=["#highenergy"],
         )
 
     def _extract_rows(self, html: str) -> list[dict[str, Any]]:

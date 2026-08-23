@@ -9,6 +9,7 @@ from rapidfuzz import fuzz
 from sqlmodel import Session, select
 
 from app.models.event import Event
+from app.services.tags import canonical_vibe_tags
 from app.services.vibe_tagger import ClaudeVibeTagger, VibeTagger
 
 
@@ -49,8 +50,8 @@ class DataPipelineService:
             llm_tags = await self._vibe_tagger.generate_vibe_tags(
                 event_payload.get("description")
             )
-            event_payload["tags"] = self._merge_lists(
-                event_payload.get("tags", []), llm_tags
+            event_payload["tags"] = canonical_vibe_tags(
+                self._merge_lists(event_payload.get("tags", []), llm_tags)
             )
 
             existing = self._find_existing_event(
@@ -394,7 +395,7 @@ class DataPipelineService:
             "raw_address": self._normalize_str(event.get("raw_address")),
             "location": location.strip(),
             "categories": self._normalize_list(event.get("categories")),
-            "tags": self._normalize_list(event.get("tags")),
+            "tags": canonical_vibe_tags(self._normalize_list(event.get("tags"))),
             "price": self._coerce_decimal(event.get("price")),
             "currency": self._normalize_currency(event.get("currency")),
             "image_url": self._normalize_str(event.get("image_url")),
@@ -421,7 +422,7 @@ class DataPipelineService:
             "raw_address": event.raw_address,
             "location": event.location,
             "categories": list(event.categories),
-            "tags": list(event.tags),
+            "tags": canonical_vibe_tags(list(event.tags)),
             "price": event.price,
             "currency": event.currency,
             "image_url": event.image_url,
