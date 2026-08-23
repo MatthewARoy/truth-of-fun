@@ -16,6 +16,12 @@ Playwright-based scrapers (FuncheapSF, Luma) need browser binaries: `make instal
 | **Reddit** | Yes | Public search.json API, no auth |
 | **Eddie's List** | No | Requires IMAP credentials (mailbox integration) |
 
+## Non-source integrations
+
+| Service | Key needed | Notes |
+|---------|-----------|-------|
+| **Nominatim (OpenStreetMap)** | No | Geocodes venues missing from the static coordinate table. Off unless `GEOCODING_PROVIDER=nominatim`. Capped at 1 request/second by [their usage policy](https://operations.osmfoundation.org/policies/nominatim/), which also requires the descriptive `GEOCODING_USER_AGENT`. Unreachable or unconfigured degrades to the city-centroid fallback. Google and Mapbox would need billing accounts and are not implemented. |
+
 ## NOT_TESTABLE Sources
 
 These require credentials or external setup to run:

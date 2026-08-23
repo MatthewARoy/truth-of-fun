@@ -260,6 +260,7 @@ class VenueGeocoder:
         )
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._lookups_this_run = 0
+        self._cache_usable = True
 
     @property
     def provider(self) -> GeocodeProvider | None:
@@ -279,6 +280,9 @@ class VenueGeocoder:
 
     def reset_run_budget(self) -> None:
         self._lookups_this_run = 0
+        # A cache that failed because the migration had not been applied yet
+        # deserves a fresh try on the next cycle.
+        self._cache_usable = True
 
     async def resolve(
         self,
@@ -309,7 +313,9 @@ class VenueGeocoder:
 
         # Keyed on the first (most specific) attempt: the fallbacks are an
         # implementation detail, so a name needing two calls still costs one
-        # cache entry and is not retried next cycle.
+        # cache entry and is not retried next cycle. One venue seen both with
+        # and without a raw_address therefore keys twice — a second lookup,
+        # once, which is cheaper than normalising every input shape.
         key = normalize_place_text(attempts[0])
         cached = self._read_cache(session, key)
         if cached is not None:
@@ -369,10 +375,33 @@ class VenueGeocoder:
             return f"{text}, {city.strip()}, CA"
         return text
 
+    def _degrade_cache(self, operation: str) -> None:
+        """Give up on the cache for this run, keeping geocoding itself alive."""
+        if self._cache_usable:
+            logger.warning(
+                "geocode cache %s failed; continuing without it for this run. "
+                "Has the geocode_cache migration been applied?",
+                operation,
+                exc_info=True,
+            )
+        self._cache_usable = False
+
     def _read_cache(self, session: Session | None, key: str) -> _CacheHit | None:
-        if session is None:
+        if session is None or not self._cache_usable:
             return None
-        entry = session.get(GeocodeCacheEntry, key)
+
+        # Postgres aborts the entire transaction on a failed statement, so a
+        # broken cache table would poison the very session the pipeline is
+        # about to insert events into — losing the whole cycle, not just the
+        # caching. A SAVEPOINT contains the damage; a bare try/except would
+        # not, and session.rollback() would discard unrelated pending work.
+        try:
+            with session.begin_nested():
+                entry = session.get(GeocodeCacheEntry, key)
+        except Exception:
+            self._degrade_cache("read")
+            return None
+
         if entry is None:
             return None
 
@@ -399,17 +428,25 @@ class VenueGeocoder:
     def _write_cache(
         self, session: Session | None, *, key: str, result: GeocodeResult | None
     ) -> None:
-        if session is None:
+        if session is None or not self._cache_usable:
             return
-        entry = session.get(GeocodeCacheEntry, key) or GeocodeCacheEntry(query_key=key)
-        entry.provider = result.provider if result else getattr(self._provider, "name", "unknown")
-        entry.lat = result.lat if result else None
-        entry.lon = result.lon if result else None
-        entry.confidence = result.confidence if result else None
-        entry.precision = result.precision if result else None
-        entry.resolved = result is not None
-        entry.looked_up_at = self._clock()
-        session.add(entry)
+        try:
+            with session.begin_nested():
+                entry = session.get(GeocodeCacheEntry, key) or GeocodeCacheEntry(
+                    query_key=key
+                )
+                entry.provider = (
+                    result.provider if result else getattr(self._provider, "name", "unknown")
+                )
+                entry.lat = result.lat if result else None
+                entry.lon = result.lon if result else None
+                entry.confidence = result.confidence if result else None
+                entry.precision = result.precision if result else None
+                entry.resolved = result is not None
+                entry.looked_up_at = self._clock()
+                session.add(entry)
+        except Exception:
+            self._degrade_cache("write")
 
 
 @dataclass(frozen=True)
