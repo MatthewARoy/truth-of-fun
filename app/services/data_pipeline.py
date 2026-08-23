@@ -173,6 +173,19 @@ class DataPipelineService:
             ):
                 return True
 
+        # A venue that has since become resolvable is new information: without
+        # this, a row stored on a centroid guess keeps that guess forever and
+        # stays invisible to radius search. The margin stops float noise from
+        # rewriting rows every cycle.
+        existing_confidence = existing_payload.get("location_confidence")
+        incoming_confidence = incoming_event.get("location_confidence")
+        if (
+            isinstance(existing_confidence, (int, float))
+            and isinstance(incoming_confidence, (int, float))
+            and float(incoming_confidence) > float(existing_confidence) + 0.05
+        ):
+            return True
+
         existing_categories = set(existing_payload.get("categories") or [])
         incoming_categories = set(incoming_event.get("categories") or [])
         if incoming_categories - existing_categories:
@@ -349,10 +362,14 @@ class DataPipelineService:
             int(primary.get("attendee_count") or 0),
             int(secondary.get("attendee_count") or 0),
         )
-        merged["location_confidence"] = max(
-            float(primary.get("location_confidence") or 1.0),
-            float(secondary.get("location_confidence") or 1.0),
-        )
+        # location and location_confidence travel together: keeping one
+        # payload's coordinate while taking the other's confidence would stamp
+        # a high score onto a city-centroid guess and let it pass radius search.
+        primary_confidence = float(primary.get("location_confidence") or 1.0)
+        secondary_confidence = float(secondary.get("location_confidence") or 1.0)
+        merged["location_confidence"] = max(primary_confidence, secondary_confidence)
+        if secondary_confidence > primary_confidence and secondary.get("location"):
+            merged["location"] = secondary["location"]
         merged["is_free"] = bool(primary.get("is_free")) or bool(
             secondary.get("is_free")
         )
