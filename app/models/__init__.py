@@ -2,6 +2,7 @@
 
 from app.models.api_key import ApiKeyInventory, ApiKeyUsageSnapshot
 from app.models.event import Event
+from app.models.geocode_cache import GeocodeCacheEntry
 from app.models.itinerary import SavedItinerary
 from app.models.social import FolderInvite, FolderItem, FolderMember, FolderVote, VibeFolder
 from app.models.source_health import SourceHealthRecord
@@ -12,6 +13,7 @@ __all__ = [
     "ApiKeyInventory",
     "ApiKeyUsageSnapshot",
     "Event",
+    "GeocodeCacheEntry",
     "FolderInvite",
     "FolderItem",
     "FolderMember",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -9,7 +10,14 @@ from rapidfuzz import fuzz
 from sqlmodel import Session, select
 
 from app.models.event import Event
+from app.services.geocoding import (
+    MIN_SEARCHABLE_LOCATION_CONFIDENCE,
+    VenueGeocoder,
+    worth_writing,
+)
 from app.services.vibe_tagger import ClaudeVibeTagger, VibeTagger
+
+logger = logging.getLogger(__name__)
 
 
 class DataPipelineService:
@@ -30,8 +38,17 @@ class DataPipelineService:
     # venue score around 24.
     DEDUPE_SAME_VENUE_TOKEN_THRESHOLD = 60.0
 
-    def __init__(self, *, vibe_tagger: VibeTagger | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        vibe_tagger: VibeTagger | None = None,
+        geocoder: VenueGeocoder | None = None,
+    ) -> None:
         self._vibe_tagger = vibe_tagger or ClaudeVibeTagger()
+        # No geocoder is the default: the pipeline then behaves exactly as it
+        # did before geocoding existed. The worker supplies one when the
+        # deployment has a provider configured.
+        self._geocoder = geocoder
 
     async def process_raw_events(
         self,
@@ -39,7 +56,9 @@ class DataPipelineService:
         session: Session,
         raw_events: list[dict[str, Any]],
     ) -> dict[str, int]:
-        deduped_events = self.deduplicate_events(raw_events)
+        deduped_events = await self.enrich_locations(
+            session=session, events=self.deduplicate_events(raw_events)
+        )
 
         inserted = 0
         updated = 0
@@ -80,6 +99,62 @@ class DataPipelineService:
             "skipped": skipped,
             "deduped_count": len(deduped_events),
         }
+
+    async def enrich_locations(
+        self,
+        *,
+        session: Session | None,
+        events: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Give every centroid-bound payload one more shot at a real address.
+
+        A payload already at or above the radius-search threshold is left
+        alone: its venue came from the hand-verified table, which outranks
+        anything a provider returns, and confirming it would spend a
+        rate-limited lookup for nothing.
+
+        Enrichment happens before the upsert, so ``has_significant_new
+        _information`` sees the improved confidence and rewrites rows that
+        were stored on a centroid in an earlier cycle.
+        """
+        if self._geocoder is None:
+            return events
+
+        # The lookup ceiling bounds a single cycle. A worker process lives
+        # for weeks, so without this it would spend the budget once and stop
+        # geocoding for good.
+        self._geocoder.reset_run_budget()
+
+        for payload in events:
+            confidence = float(payload.get("location_confidence") or 0.0)
+            if confidence >= MIN_SEARCHABLE_LOCATION_CONFIDENCE:
+                continue
+
+            try:
+                result = await self._geocoder.resolve(
+                    session=session,
+                    venue_name=payload.get("venue_name"),
+                    raw_address=payload.get("raw_address"),
+                    city=payload.get("city"),
+                )
+            except Exception:
+                # Geocoding is an enhancement, never a precondition. A broken
+                # provider leaves the payload on its centroid and the cycle
+                # completes.
+                logger.warning(
+                    "geocoding failed for %r; keeping fallback location",
+                    payload.get("venue_name") or payload.get("raw_address"),
+                    exc_info=True,
+                )
+                continue
+
+            if not worth_writing(result, confidence):
+                continue
+
+            payload["location"] = f"POINT({result.lon} {result.lat})"
+            payload["location_confidence"] = result.confidence
+
+        return events
 
     def deduplicate_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         deduped: list[dict[str, Any]] = []

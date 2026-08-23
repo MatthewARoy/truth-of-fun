@@ -252,6 +252,15 @@ def _city_is_consistent(coords: tuple[float, float], city: str | None) -> bool:
     return nearest == city
 
 
+def normalize_place_text(value: str) -> str:
+    """Public form of the cache's folding rules.
+
+    The geocode cache keys on this so "Bimbo&#039;s 365 Club" and
+    "Bimbo’s 365 Club" share one provider answer instead of two.
+    """
+    return _normalize_venue(value)
+
+
 def lookup_city_coordinates(city: str | None) -> tuple[float, float] | None:
     """Look up a city centroid. Returns (lat, lon) or None when unknown."""
     if not city:
