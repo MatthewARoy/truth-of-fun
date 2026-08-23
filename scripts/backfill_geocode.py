@@ -121,8 +121,10 @@ def apply_changes(session: Session, changes: list[PlannedChange]) -> None:
     for change in changes:
         session.execute(
             text(
+                # events.location is a geometry column (see app/models/event.py);
+                # casting to geography here is a runtime DatatypeMismatch.
                 "UPDATE events"
-                " SET location = ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography,"
+                " SET location = ST_SetSRID(ST_MakePoint(:lon, :lat), 4326),"
                 "     location_confidence = :confidence"
                 " WHERE id = :event_id"
             ),
