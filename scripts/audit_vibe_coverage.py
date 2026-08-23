@@ -20,7 +20,7 @@ import sys
 from sqlalchemy import create_engine, text
 
 from app.services.concierge import _INTENT_VIBE_PROFILES
-from app.services.tags import canonical_tag
+from app.services.tags import resolve_vibe_tag
 
 # Canonicalize stored tags in SQL so mixed-form rows (``HighEnergy``,
 # ``#live-music``) count towards the tag they mean.
@@ -51,7 +51,14 @@ def main() -> int:
 
     engine = create_engine(args.database_url)
     with engine.connect() as conn:
-        counts = {row.canonical: row.events for row in conn.execute(_COUNT_SQL)}
+        # The SQL canonicalizes form; fold aliases in Python so the report
+        # reflects what the recommender actually matches.
+        counts: dict[str, int] = {}
+        for row in conn.execute(_COUNT_SQL):
+            resolved = resolve_vibe_tag(row.canonical)
+            if resolved is None:
+                continue
+            counts[resolved] = counts.get(resolved, 0) + row.events
         total = conn.execute(text("SELECT count(*) FROM events")).scalar_one()
 
     print(f"{total} events in corpus\n")
@@ -62,8 +69,8 @@ def main() -> int:
         for tag, weight in sorted(
             _INTENT_VIBE_PROFILES[intent].items(), key=lambda kv: -kv[1]
         ):
-            canonical = canonical_tag(tag) or tag
-            matched = counts.get(canonical.lstrip("#"), 0)
+            canonical = resolve_vibe_tag(tag) or tag
+            matched = counts.get(canonical, 0)
             flag = "" if matched >= args.min_events else "  <-- STARVED"
             print(f"  {canonical:<16} weight {weight:>4.1f}  {matched:>5} events{flag}")
             if matched < args.min_events:

@@ -89,10 +89,32 @@ Out-of-vocabulary output is dropped rather than stored.
 
 ### 5. Query filter
 
-`discovery.py` `Event.tags.contains([vibe_tag])` is case-sensitive JSONB
-containment: filtering by `#highenergy` matches 0 of the 606 `HighEnergy` events.
-Replaced with a canonicalizing `EXISTS` subquery so it is correct against
-today's mixed-form data and after a backfill.
+`discovery.py` `Event.tags.contains([vibe_tag])` was worse than reported. The
+`tags` column is declared as generic SQLAlchemy `JSON`, which has no containment
+operator, so the expression compiled to `events.tags LIKE '%' || ... ::JSON`
+and Postgres rejected it:
+
+    psycopg2.errors.UndefinedFunction: operator does not exist: jsonb ~~ text
+
+`GET /events?vibe_tag=...` therefore returned **HTTP 500**, not an empty list.
+No test covered it. Replaced with a canonicalizing `EXISTS` subquery, verified
+against the live database: `#highenergy`, `HighEnergy` and `high-energy` all
+return 606 events where the old expression raised.
+
+### 5a. Synonym layer
+
+Filtering writes to a closed vocabulary destroys near-misses -- `#Outdoor`
+(singular) and `#standup` are real vibes that would simply vanish. A small
+`_SYNONYMS` map folds unambiguous aliases onto their vocabulary entry:
+`#standup`/`#comedyclub` to `#comedy` (159 events), `#relaxed` to `#chill`,
+`#datenight` to `#date`, `#outdoor` to `#outdoors`.
+
+Only morphological variants and exact aliases qualify. Genuinely broader terms
+are excluded on purpose: `#liveentertainment` (114 events) is *not* mapped to
+`#livemusic`, because a circus is live entertainment and not live music.
+
+This is kept separate from `canonical_tag` as `resolve_vibe_tag`, because the
+step is semantic and the backfill must restyle tags without relabelling events.
 
 ### 6. Scripts (written, not run)
 
@@ -116,6 +138,21 @@ Deterministic, runnable by the existing suite with no live corpus:
 A live-corpus coverage assertion is deliberately *not* a CI test: the suite has
 no populated database, so such a test would silently skip — which is how this
 regressed unnoticed. Live coverage is `scripts/audit_vibe_coverage.py` instead.
+
+## Measured effect
+
+Events receiving a non-zero vibe score, live corpus of 2089 events:
+
+| intent | before | after |
+| --- | --- | --- |
+| `date_night` | 42 | 96 |
+| `out_of_town_guests` | 50 | 96 |
+| `general_night_out` | 767 | 879 |
+| `bar_crawl` | 717 | 731 |
+
+Tag coverage: `#comedy` 107 to 266, `#livemusic` 42 to 92, and `date_night`'s
+five dead tags are no longer all zero -- but at 1-6 events each they remain
+starved. `date_night` mean vibe score rises from 0.20 to 0.56 out of 100.
 
 ## Known limitations
 

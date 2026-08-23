@@ -69,7 +69,8 @@ def test_deduplicate_merges_high_similarity_within_two_hours() -> None:
     assert merged["start_at"] == base
     assert merged["description"] is not None
     assert "Bring a mat" in merged["description"]
-    assert set(merged["tags"]) == {"#Outdoor", "#Chill"}
+    # Tags are canonicalized at write: "#Outdoor" folds onto "#outdoors".
+    assert set(merged["tags"]) == {"#outdoors", "#chill"}
     assert set(merged["categories"]) == {"Wellness", "Fitness"}
 
 

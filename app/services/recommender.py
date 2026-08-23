@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.models.event import Event
 from app.models.user import User
-from app.services.tags import canonical_tag
+from app.services.tags import resolve_vibe_tag
 
 
 @dataclass
@@ -116,16 +116,16 @@ class RecommenderService:
         # ranking is correct without waiting on a backfill.
         tag_map: dict[str, str] = {}
         for tag in event_tags:
-            key = canonical_tag(tag)
+            key = resolve_vibe_tag(tag)
             if key is not None:
                 tag_map.setdefault(key, tag)
 
         preferred_keys = {
-            key for key in map(canonical_tag, preferred_vibes) if key is not None
+            key for key in map(resolve_vibe_tag, preferred_vibes) if key is not None
         }
         normalized_profile_scores: dict[str, float] = {}
         for key, score in profile_scores.items():
-            normalized_key = canonical_tag(key)
+            normalized_key = resolve_vibe_tag(key)
             if normalized_key is None:
                 continue
             normalized_profile_scores[normalized_key] = (

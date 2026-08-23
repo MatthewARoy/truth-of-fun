@@ -16,7 +16,13 @@ import pytest
 from app.services.concierge import _INTENT_VIBE_PROFILES, intent_vibe_profile
 from app.services.data_pipeline import DataPipelineService
 from app.services.recommender import RecommenderService
-from app.services.tags import VIBE_VOCABULARY, canonical_tag, canonical_vibe_tags
+from app.services.tags import (
+    _SYNONYMS,
+    VIBE_VOCABULARY,
+    canonical_tag,
+    canonical_vibe_tags,
+    resolve_vibe_tag,
+)
 
 
 @pytest.mark.parametrize("intent", sorted(_INTENT_VIBE_PROFILES))
@@ -100,3 +106,40 @@ def test_pipeline_drops_non_vibe_tags_at_write() -> None:
 
     assert payload is not None
     assert payload["tags"] == ["#highenergy"]
+
+
+def test_synonyms_resolve_to_real_vocabulary_entries() -> None:
+    unknown = sorted(set(_SYNONYMS.values()) - VIBE_VOCABULARY)
+    assert not unknown, f"synonyms point outside the vocabulary: {unknown}"
+
+
+def test_no_synonym_key_is_also_a_vocabulary_entry() -> None:
+    """Such a tag would be rewritten away and could never be stored."""
+    shadowed = sorted(set(_SYNONYMS) & VIBE_VOCABULARY)
+    assert not shadowed, f"vocabulary entries shadowed by synonyms: {shadowed}"
+
+
+def test_synonyms_are_stable_under_a_second_pass() -> None:
+    for alias in _SYNONYMS:
+        once = resolve_vibe_tag(alias)
+        assert resolve_vibe_tag(once) == once, f"{alias} does not settle"
+
+
+@pytest.mark.parametrize(
+    ("alias", "expected"),
+    [
+        ("#standup", "#comedy"),
+        ("Stand-Up Comedy", "#comedy"),
+        ("Relaxed", "#chill"),
+        ("#date-night", "#date"),
+        ("#Outdoor", "#outdoors"),
+    ],
+)
+def test_aliases_fold_onto_their_vocabulary_entry(alias: str, expected: str) -> None:
+    assert resolve_vibe_tag(alias) == expected
+
+
+def test_backfill_canonicalization_is_form_only() -> None:
+    """The backfill must not relabel events, only restyle their tags."""
+    assert canonical_tag("#standup") == "#standup"
+    assert canonical_tag("Relaxed") == "#relaxed"

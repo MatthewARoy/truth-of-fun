@@ -46,7 +46,6 @@ VIBE_VOCABULARY: frozenset[str] = frozenset(
         "#chill",
         "#highenergy",
         "#intimate",
-        "#romantic",
         "#social",
         "#quirky",
         # Occasion
@@ -82,6 +81,60 @@ VIBE_VOCABULARY: frozenset[str] = frozenset(
 )
 
 
+# Spellings that mean an existing vocabulary tag. Only unambiguous aliases and
+# morphological variants belong here -- mapping a genuinely broader term (a
+# circus is "live entertainment", not live music) would mislabel events.
+# Counts below are live-corpus matches as of 2026-08-23.
+_SYNONYMS: dict[str, str] = {
+    # Comedy (159 events)
+    "#standup": "#comedy",
+    "#standupcomedy": "#comedy",
+    "#comedyclub": "#comedy",
+    # Music
+    "#concert": "#livemusic",
+    "#smoothjazz": "#jazz",
+    # Mood -- the only existing content for date_night's "#chill"
+    "#relaxed": "#chill",
+    "#laidback": "#chill",
+    "#mellow": "#chill",
+    "#energetic": "#highenergy",
+    # Occasion. The LLM naturally emits "datenight" for "#date".
+    "#datenight": "#date",
+    "#romantic": "#date",
+    "#romance": "#date",
+    "#familyfun": "#familyfriendly",
+    "#freeevent": "#free",
+    "#nightclub": "#nightlife",
+    # Form
+    "#outdoor": "#outdoors",
+    "#arts": "#art",
+    "#theater": "#theatre",
+    "#theatershow": "#theatre",
+    "#dancing": "#dance",
+    "#cinema": "#film",
+    "#movie": "#film",
+    "#movies": "#film",
+    "#foodie": "#foodanddrink",
+    "#food": "#foodanddrink",
+    "#drinks": "#foodanddrink",
+    "#yoga": "#wellness",
+    "#meditation": "#wellness",
+    "#marketplace": "#market",
+}
+
+
+def resolve_vibe_tag(tag: str | None) -> str | None:
+    """Canonicalize *tag* and fold known aliases onto their vocabulary entry.
+
+    Kept separate from :func:`canonical_tag` because this step is semantic:
+    the backfill rewrites tag *form* only and must not relabel events.
+    """
+    canonical = canonical_tag(tag)
+    if canonical is None:
+        return None
+    return _SYNONYMS.get(canonical, canonical)
+
+
 def canonical_vibe_tags(tags: object) -> list[str]:
     """Canonicalize *tags* and keep only recognised vibes, order preserved."""
     if not isinstance(tags, list):
@@ -89,7 +142,7 @@ def canonical_vibe_tags(tags: object) -> list[str]:
 
     kept: list[str] = []
     for tag in tags:
-        canonical = canonical_tag(tag)
+        canonical = resolve_vibe_tag(tag)
         if canonical is None or canonical not in VIBE_VOCABULARY:
             continue
         if canonical not in kept:
