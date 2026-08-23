@@ -629,3 +629,79 @@ def test_estimate_does_not_overwrite_a_stored_real_time() -> None:
 
     assert merged["start_at"] == _REAL_1PM_SF
     assert merged["start_time_is_estimated"] is False
+
+
+def test_an_incoming_estimate_is_not_news_against_a_stored_real_time() -> None:
+    """Otherwise every cycle re-updates the row on a gap that can never close."""
+    service = DataPipelineService()
+    existing = Event(
+        **_event(
+            title="Tea Party at the Zoo",
+            start_at=_REAL_1PM_SF,
+            source_name="funcheap_sf",
+            source_tier=2,
+            venue_name="San Francisco Zoo",
+        )
+    )
+    incoming = _event(
+        title="Tea Party at the Zoo",
+        start_at=_ESTIMATED_7PM_SF,
+        source_name="eventbrite",
+        source_tier=1,
+        venue_name="San Francisco Zoo",
+        start_time_is_estimated=True,
+    )
+
+    assert not service.has_significant_new_information(
+        existing_event=existing, incoming_event=incoming
+    )
+
+
+def test_two_different_placeholder_hours_are_not_news_either() -> None:
+    """sfstation defaults to 19:00 and minnesotastreet to 17:00; neither is a move."""
+    service = DataPipelineService()
+    existing = Event(
+        **_event(
+            title="Open Studios",
+            start_at=_ESTIMATED_7PM_SF,
+            source_name="sfstation",
+            source_tier=2,
+            venue_name="Minnesota Street Project",
+            start_time_is_estimated=True,
+        )
+    )
+    incoming = _event(
+        title="Open Studios",
+        start_at=_ESTIMATED_7PM_SF - timedelta(hours=2),
+        source_name="minnesotastreet",
+        source_tier=2,
+        venue_name="Minnesota Street Project",
+        start_time_is_estimated=True,
+    )
+
+    assert not service.has_significant_new_information(
+        existing_event=existing, incoming_event=incoming
+    )
+
+
+def test_a_real_time_moving_is_still_news() -> None:
+    """The guard must not silence a genuine schedule change."""
+    service = DataPipelineService()
+    existing = Event(
+        **_event(
+            title="Tea Party at the Zoo",
+            start_at=_REAL_1PM_SF,
+            source_name="funcheap_sf",
+            source_tier=2,
+        )
+    )
+    incoming = _event(
+        title="Tea Party at the Zoo",
+        start_at=_REAL_1PM_SF + timedelta(hours=1),
+        source_name="dothebay",
+        source_tier=2,
+    )
+
+    assert service.has_significant_new_information(
+        existing_event=existing, incoming_event=incoming
+    )

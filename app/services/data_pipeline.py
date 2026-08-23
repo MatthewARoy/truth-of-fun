@@ -222,7 +222,19 @@ class DataPipelineService:
         ):
             return True
 
-        if existing_payload.get("start_at") and incoming_event.get("start_at"):
+        # Only meaningful between two published times. A placeholder hour sits
+        # a fabricated distance from everything, so comparing it would report a
+        # significant move on every cycle forever -- the merge rule keeps the
+        # real time, so the delta never closes.
+        both_times_are_real = not (
+            existing_payload.get("start_time_is_estimated")
+            or incoming_event.get("start_time_is_estimated")
+        )
+        if (
+            both_times_are_real
+            and existing_payload.get("start_at")
+            and incoming_event.get("start_at")
+        ):
             delta = abs(
                 (
                     incoming_event["start_at"] - existing_payload["start_at"]
