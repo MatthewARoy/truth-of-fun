@@ -4,6 +4,23 @@ Used to assign accurate coordinates instead of defaulting to SF city center.
 """
 
 # Format: "venue_name_lowercase": (latitude, longitude)
+import re
+import unicodedata
+from math import asin, cos, radians, sin, sqrt
+
+_PUNCTUATION_FOLD = str.maketrans(
+    {
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201b": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u00a0": " ",
+    }
+)
+
 VENUE_COORDINATES: dict[str, tuple[float, float]] = {
     # Major SF Venues
     "chase center": (37.7680, -122.3877),
@@ -92,6 +109,37 @@ VENUE_COORDINATES: dict[str, tuple[float, float]] = {
     "minnesota street": (37.7568, -122.3897),
     "1275 minnesota st": (37.7568, -122.3897),
     "1275 minnesota street": (37.7568, -122.3897),
+    # Central-corridor and recurring-feed venues (Mission, Castro, Divisadero,
+    # Golden Gate Park, SoMa). Coordinates are street-address level; they only
+    # need to be good enough for radius search, not survey-grade.
+    "cafe du nord": (37.7669, -122.4295),
+    "swedish american hall": (37.7669, -122.4295),
+    "the roxie": (37.7649, -122.4220),
+    "roxie theater": (37.7649, -122.4220),
+    "biscuits and blues": (37.7873, -122.4098),
+    "madrone art bar": (37.7757, -122.4376),
+    "club waziema": (37.7761, -122.4376),
+    "the midway": (37.7480, -122.3877),
+    "halcyon": (37.7712, -122.4131),
+    "the endup": (37.7776, -122.4053),
+    "the hibernia": (37.7810, -122.4130),
+    "rickshaw stop": (37.7767, -122.4200),
+    "zeitgeist": (37.7699, -122.4223),
+    "el rio": (37.7476, -122.4194),
+    "thee parkside": (37.7654, -122.3980),
+    "bissap baobab": (37.7601, -122.4188),
+    "the function": (37.7754, -122.4176),
+    "endgames improv": (37.7503, -122.4183),
+    "japanese tea garden": (37.7702, -122.4703),
+    "spreckels temple of music": (37.7702, -122.4682),
+    "robin williams meadow": (37.7700, -122.4680),
+    "skatin' place": (37.7714, -122.4640),
+    "dolores park": (37.7596, -122.4269),
+    "crissy field": (37.8038, -122.4644),
+    "union square park": (37.7880, -122.4075),
+    "house of air": (37.8026, -122.4573),
+    "mersea": (37.8225, -122.3706),
+    "mesa maguey": (37.8262, -122.2620),
 }
 
 
@@ -134,23 +182,88 @@ CITY_COORDINATES: dict[str, tuple[float, float]] = {
 }
 
 
+def _normalize_venue(value: str) -> str:
+    """Fold the punctuation variants scrapers emit into one comparable form.
+
+    Sites render apostrophes as U+2019 ("Cobb’s") while this table stores
+    ASCII ("Cobb's"), so without folding the lookup misses entirely.
+    """
+    text = unicodedata.normalize("NFKC", value).translate(_PUNCTUATION_FOLD)
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
+    lat1, lon1 = radians(a[0]), radians(a[1])
+    lat2, lon2 = radians(b[0]), radians(b[1])
+    h = sin((lat2 - lat1) / 2) ** 2 + cos(lat1) * cos(lat2) * sin((lon2 - lon1) / 2) ** 2
+    return 2 * 6371.0 * asin(sqrt(h))
+
+
+def _named_city(normalized: str) -> str | None:
+    """The most specific city named inside a venue string, if any."""
+    best: str | None = None
+    for city in CITY_COORDINATES:
+        if city in normalized and (best is None or len(city) > len(best)):
+            best = city
+    return best
+
+
+def _city_is_consistent(coords: tuple[float, float], city: str | None) -> bool:
+    """Reject a match whose coordinates sit nearer some other city's centroid.
+
+    "Punch Line Comedy Club - Sacramento" shares a name prefix with the SF
+    club; without this guard it resolves to San Francisco and a Sacramento
+    show is planted in the middle of the city at full confidence.
+    """
+    if city is None:
+        return True
+    nearest = min(
+        CITY_COORDINATES,
+        key=lambda name: _haversine_km(coords, CITY_COORDINATES[name]),
+    )
+    return nearest == city
+
+
 def lookup_city_coordinates(city: str | None) -> tuple[float, float] | None:
     """Look up a city centroid. Returns (lat, lon) or None when unknown."""
     if not city:
         return None
-    return CITY_COORDINATES.get(city.strip().lower())
+    return CITY_COORDINATES.get(_normalize_venue(city))
 
 
 def lookup_venue_coordinates(venue_name: str | None) -> tuple[float, float] | None:
-    """Look up coordinates for a known venue. Returns (lat, lon) or None."""
+    """Look up coordinates for a known venue. Returns (lat, lon) or None.
+
+    Prefers the longest matching key so a specific venue wins over a short
+    one that happens to be a substring, and refuses any match that would
+    place the event in the wrong city. Returning None is the safe failure:
+    callers fall back to a centroid with a low ``location_confidence``,
+    which the discovery radius filter then excludes.
+    """
     if not venue_name:
         return None
-    normalized = venue_name.strip().lower()
-    # Exact match first
-    if normalized in VENUE_COORDINATES:
-        return VENUE_COORDINATES[normalized]
-    # Substring match (e.g., "The Fillmore SF" matches "the fillmore")
-    for key, coords in VENUE_COORDINATES.items():
-        if key in normalized or normalized in key:
-            return coords
-    return None
+    normalized = _normalize_venue(venue_name)
+    if not normalized:
+        return None
+
+    candidates: list[tuple[int, tuple[float, float]]] = []
+    exact = VENUE_COORDINATES.get(normalized)
+    if exact is not None:
+        candidates.append((len(normalized), exact))
+    else:
+        for key, coords in VENUE_COORDINATES.items():
+            if key in normalized:
+                candidates.append((len(key), coords))
+        if not candidates:
+            for key, coords in VENUE_COORDINATES.items():
+                if normalized in key:
+                    candidates.append((len(normalized), coords))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    coords = candidates[0][1]
+    if not _city_is_consistent(coords, _named_city(normalized)):
+        return None
+    return coords
