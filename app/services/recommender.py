@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.models.event import Event
 from app.models.user import User
+from app.services.tags import resolve_vibe_tag
 
 
 @dataclass
@@ -106,29 +107,33 @@ class RecommenderService:
         preferred_vibes: set[str],
         profile_scores: dict[str, float],
     ) -> tuple[float, list[str]]:
-        """Compute vibe match score (0-100) and list of matched tags.
-
-        Mirrors the logic from ``_score_event_for_user`` in discovery.py.
-        """
+        """Compute vibe match score (0-100) and list of matched tags."""
         if not event_tags:
             return 0.0, []
 
-        def normalize_key(tag: str) -> str:
-            return f"#{tag.strip().lstrip('#').lower()}"
+        # Stored tags predate the canonical vocabulary and still arrive in mixed
+        # forms (``HighEnergy``, ``#live-music``). Canonicalizing on read means
+        # ranking is correct without waiting on a backfill.
+        tag_map: dict[str, str] = {}
+        for tag in event_tags:
+            key = resolve_vibe_tag(tag)
+            if key is not None:
+                tag_map.setdefault(key, tag)
 
-        tag_map = {normalize_key(tag): tag for tag in event_tags if tag.strip("# ")}
-        preferred_keys = {normalize_key(tag) for tag in preferred_vibes}
+        preferred_keys = {
+            key for key in map(resolve_vibe_tag, preferred_vibes) if key is not None
+        }
         normalized_profile_scores: dict[str, float] = {}
         for key, score in profile_scores.items():
-            normalized_key = normalize_key(key)
+            normalized_key = resolve_vibe_tag(key)
+            if normalized_key is None:
+                continue
             normalized_profile_scores[normalized_key] = (
                 normalized_profile_scores.get(normalized_key, 0.0) + score
             )
 
         matched_keys = sorted(set(tag_map).intersection(preferred_keys))
-        weighted_score = sum(
-            normalized_profile_scores.get(key, 0.0) for key in tag_map
-        )
+        weighted_score = sum(normalized_profile_scores.get(key, 0.0) for key in tag_map)
 
         if not matched_keys and weighted_score <= 0:
             return 0.0, []

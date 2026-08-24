@@ -9,6 +9,7 @@ from sqlmodel import Session, select
 
 from app.models.event import Event
 from app.models.user_signal import UserSignal
+from app.services.tags import canonical_tag
 
 
 class OnboardingTagExtractor(Protocol):
@@ -133,16 +134,7 @@ class UserProfileService:
     def _normalize_tags(self, tags: list[str]) -> list[str]:
         normalized: list[str] = []
         for tag in tags:
-            if not isinstance(tag, str):
-                continue
-            cleaned = tag.strip()
-            if not cleaned:
-                continue
-            if not cleaned.startswith("#"):
-                cleaned = f"#{cleaned}"
-            cleaned = "#" + re.sub(r"\s+", "", cleaned[1:])
-            if len(cleaned) <= 1:
-                continue
-            if cleaned not in normalized:
+            cleaned = canonical_tag(tag)
+            if cleaned is not None and cleaned not in normalized:
                 normalized.append(cleaned)
         return normalized

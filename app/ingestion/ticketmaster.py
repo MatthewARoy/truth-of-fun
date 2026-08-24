@@ -284,15 +284,14 @@ class TicketmasterSource(BaseSource):
         return categories
 
     def _extract_tags(self, event: dict[str, Any]) -> list[str]:
-        tags: list[str] = []
-        attractions = event.get("_embedded", {}).get("attractions", [])
-        for attraction in attractions:
-            if not isinstance(attraction, dict):
-                continue
-            name = attraction.get("name")
-            if isinstance(name, str) and name and name not in tags:
-                tags.append(name)
-        return tags
+        """Ticketmaster exposes no vibe data, so contribute none.
+
+        This previously returned attraction names, which put performer and team
+        names ("San Francisco Giants") into the vibe tag space where they
+        matched no profile and diluted ranking. Vibe tags for these events come
+        from the LLM tagger instead.
+        """
+        return []
 
     def _pick_best_image(self, images: Any) -> str | None:
         if not isinstance(images, list) or not images:
