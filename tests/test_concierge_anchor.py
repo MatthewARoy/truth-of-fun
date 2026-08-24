@@ -13,6 +13,7 @@ from sqlalchemy import create_engine, text
 from app.core.config import get_settings
 from app.core.localtime import LOCAL_TZ
 from app.main import app
+from app.models.event import Event
 
 
 def _database_reachable() -> bool:
@@ -247,3 +248,61 @@ def test_support_search_keeps_half_mile_primary_when_it_has_a_result(
     assert response.status_code == 200
     assert "support-inner-radius" in titles
     assert "support-outer-radius" not in titles
+
+
+def _sf_event(*, title: str, start_at: datetime, tags: list[str] | None = None) -> Event:
+    """A tier-2 San Francisco event, positioned so the geography filter keeps it."""
+    now = datetime.now(timezone.utc)
+    return Event(
+        title=title,
+        start_at=start_at,
+        source_name="test-anchor-candidates",
+        source_tier=2,
+        location="POINT(-122.4194 37.7749)",
+        categories=[],
+        tags=tags or [],
+        status="scheduled",
+        attendee_count=0,
+        location_confidence=1.0,
+        is_free=False,
+        venue_name="San Francisco Candidate Test",
+        raw_address="San Francisco Candidate Test, San Francisco, CA",
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_a_late_strong_vibe_match_outranks_the_earliest_candidates(
+    isolated_events_session,
+) -> None:
+    """Vibe ranking must see every candidate, not just the earliest ``limit``.
+
+    The anchor query applied the payload's ``limit`` in SQL, ordered by start
+    time, *before* ``score_events`` ran. Anything past the tenth-earliest
+    candidate could never win the anchor slot however well it matched the
+    intent — here, the only event tagged for a date night starts last.
+    """
+    session = isolated_events_session
+    for minute in range(0, 60, 5):
+        session.add(
+            _sf_event(title=f"decoy-{minute:02d}", start_at=_next_sunday_at(18, minute))
+        )
+    session.add(
+        _sf_event(
+            title="late-quiet-jazz-date",
+            start_at=_next_sunday_at(22),
+            tags=["#Date", "#Chill", "#Jazz"],
+        )
+    )
+    session.flush()
+    # Postgres computes the geometry; expire so reads return EWKB, not our WKT.
+    session.expire_all()
+
+    client = TestClient(app)
+    response = client.post(
+        "/concierge/itinerary",
+        json={"query": "date night in San Francisco Sunday", "limit": 10},
+    )
+
+    assert response.status_code == 200
+    assert _anchor_title(response.json()) == "late-quiet-jazz-date"

@@ -684,7 +684,11 @@ async def build_concierge_itinerary(
                 "hour", func.timezone(str(LOCAL_TZ), Event.start_at)
             )
             stmt = stmt.where(local_hour >= hours[0], local_hour <= hours[1])
-        stmt = stmt.order_by(Event.start_at.asc()).limit(limit)
+        # No SQL limit: only one of these rows becomes the anchor, and the
+        # choice is made by vibe ranking below. Cutting the set down to the
+        # earliest `limit` rows first (`limit` sizes the itinerary payload,
+        # not the candidate pool) hid every later event from that ranking.
+        stmt = stmt.order_by(Event.start_at.asc())
         return _apply_concierge_geography_filter(stmt, parsed.geography)
 
     # Prefer an anchor that fits the intent's time of day; fall back to the
