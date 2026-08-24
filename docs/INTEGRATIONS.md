@@ -13,7 +13,7 @@ Playwright-based scrapers (FuncheapSF, Luma) need browser binaries: `make instal
 | **DoTheBay** | Yes | Public httpx scraper |
 | **SF Station** | Yes | Public httpx scraper |
 | **Minnesota Street Project** | Yes | Public httpx scraper |
-| **Reddit** | Yes | Public search.json API, no auth |
+| **Reddit** | No | Requires `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` (script app); anonymous search.json is 403-blocked |
 | **Eddie's List** | No | Requires IMAP credentials (mailbox integration) |
 
 ## NOT_TESTABLE Sources
@@ -22,6 +22,7 @@ These require credentials or external setup to run:
 
 - **Ticketmaster**: `TICKETMASTER_API_KEY` env or the AAIM secrets store (see [architecture.md → Enabling AAIM key rotation](./architecture.md#enabling-aaim-key-rotation))
 - **Meetup**: `MEETUP_API_TOKEN` env
+- **Reddit**: `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` env (Reddit script app; anonymous search.json returns 403)
 - **Eddie's List**: IMAP mailbox credentials (`IMAP_HOST`, `IMAP_USER`, `IMAP_PASSWORD`)
 
 ## Reusable Code
