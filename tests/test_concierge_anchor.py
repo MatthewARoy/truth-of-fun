@@ -250,14 +250,24 @@ def test_support_search_keeps_half_mile_primary_when_it_has_a_result(
     assert "support-outer-radius" not in titles
 
 
-def _sf_event(*, title: str, start_at: datetime, tags: list[str] | None = None) -> Event:
-    """A tier-2 San Francisco event, positioned so the geography filter keeps it."""
+def _sf_event(
+    *,
+    title: str,
+    start_at: datetime,
+    tags: list[str] | None = None,
+    source_tier: int = 2,
+) -> Event:
+    """A San Francisco event, positioned so the geography filter keeps it.
+
+    Tier 2 by default, so it is an anchor candidate; pass ``source_tier=3``
+    for a support stop.
+    """
     now = datetime.now(timezone.utc)
     return Event(
         title=title,
         start_at=start_at,
         source_name="test-anchor-candidates",
-        source_tier=2,
+        source_tier=source_tier,
         location="POINT(-122.4194 37.7749)",
         categories=[],
         tags=tags or [],
@@ -306,3 +316,60 @@ def test_a_late_strong_vibe_match_outranks_the_earliest_candidates(
 
     assert response.status_code == 200
     assert _anchor_title(response.json()) == "late-quiet-jazz-date"
+
+
+def test_a_post_anchor_stop_survives_a_small_itinerary_limit(
+    isolated_events_session,
+) -> None:
+    """Sequencing must see support events on *both* sides of the anchor.
+
+    The support query took the earliest ``limit`` rows in SQL, but
+    ``sequence_itinerary`` brackets the anchor — the last stop before it and
+    the first one after. Given more pre-anchor candidates than ``limit``,
+    every post-anchor one was cut before sequencing ever ran, and the night
+    silently ended at the main event.
+    """
+    session = isolated_events_session
+    session.add(
+        _sf_event(
+            title="anchor-quiet-jazz-date",
+            start_at=_next_sunday_at(20),
+            tags=["#Date", "#Chill", "#Jazz"],
+        )
+    )
+    for hour, minute in ((17, 0), (17, 30), (18, 0)):
+        session.add(
+            _sf_event(
+                title=f"support-before-{hour}{minute:02d}",
+                start_at=_next_sunday_at(hour, minute),
+                source_tier=3,
+            )
+        )
+    session.add(
+        _sf_event(
+            title="support-after-2200",
+            start_at=_next_sunday_at(22),
+            source_tier=3,
+        )
+    )
+    session.flush()
+    # Postgres computes the geometry; expire so reads return EWKB, not our WKT.
+    session.expire_all()
+
+    client = TestClient(app)
+    response = client.post(
+        "/concierge/itinerary",
+        # The old code clamped `limit` to a floor of 3 and applied it in
+        # SQL; the three pre-anchor stops above are exactly enough to fill
+        # that quota and starve the post-anchor one.
+        json={"query": "date night in San Francisco Sunday", "limit": 3},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [stop["kind"] for stop in payload["itinerary"]] == [
+        "pre_event_drink",
+        "main_event",
+        "late_night_snack",
+    ]
+    assert payload["itinerary"][-1]["title"] == "support-after-2200"

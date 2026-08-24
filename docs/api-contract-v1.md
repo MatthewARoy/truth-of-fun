@@ -217,12 +217,14 @@ Response:
 
 Auth: none. Parses a natural-language query into an intent/time window, picks an anchor event (source tier ≤ 2), and sequences nearby support events (tier ≥ 3, within 0.5 mi) into an itinerary. `itinerary` is empty (and `anchor_event_id` null) when no anchor matches.
 
+`limit` is accepted but has no effect. An itinerary is at most three stops by construction, so the field never sized the response; it only ever truncated the candidate pools, which decided the anchor and the post-anchor stop by start time before ranking and sequencing ran.
+
 Request:
 
 ```json
 {
   "query": "string",
-  "limit": "int (default 25, clamped to 3–100)"
+  "limit": "int (accepted for compatibility; ignored — see below)"
 }
 ```
 

@@ -94,9 +94,9 @@ If the LLM call fails or no API key is configured, the request falls back to a d
 
 Given a parsed intent, the concierge:
 
-1. Selects an **anchor event** — Tier 1/2 only, within the timeframe window, optionally geo-filtered. First match wins (deterministic).
-2. Finds **support events** within a 0.5-mile radius of the anchor (PostGIS `ST_DWithin`).
-3. Picks one pre-event (latest available before `anchor.start_at - 30min`) and one post-event (earliest after `anchor.start_at + 30min`).
+1. Selects an **anchor event** — Tier 1/2 only, within the timeframe window, optionally geo-filtered, and (for evening intents) starting in that intent's local hour range — falling back to the whole window when that range turns up nothing, rather than returning an empty night. Every candidate is then ranked by the intent's vibe profile plus the caller's own profile, and the top-scoring one anchors the night.
+2. Finds **support events** within a 0.5-mile radius of the anchor (PostGIS `ST_DWithin`), widening to 1 mile only if that comes back empty.
+3. Picks one pre-event (latest available before `anchor.start_at - 30min`) and one post-event (earliest after `anchor.start_at + 30min`). Both queries above are bounded by the window and the radius alone — never by a row limit, which would decide the night by start time before ranking and bracketing ever ran.
 4. Inserts 30-minute travel buffers between stops.
 
 The output is a `[pre_event_drink → main_event → late_night_snack]` sequence with explicit travel buffers.
