@@ -28,6 +28,34 @@ class FuncheapSFSource(BaseSource):
     source_tier = 2
     base_url = "https://funcheapsf.com"
     events_url = "https://funcheapsf.com/events/"
+    day_index_url_template = "https://sf.funcheap.com/%Y/%m/%d/"
+
+    # Section and nav slugs that share the single-segment shape of event URLs.
+    _NAV_SLUGS = frozenset(
+        {
+            "events",
+            "free-events",
+            "today",
+            "weekend",
+            "win",
+            "subscribe",
+            "submit-form",
+            "about",
+            "privacy-policy",
+            "terms-service",
+            "dmca-requests",
+            "contact",
+            "advertise",
+            "newsletter",
+            "free-museum-days",
+            "add-event",
+            "category",
+            "venue",
+            "region",
+            "city-guide",
+            "feed",
+        }
+    )
 
     def __init__(
         self,
@@ -56,6 +84,39 @@ class FuncheapSFSource(BaseSource):
             self._playwright = None
         await super().close()
 
+    def _day_index_urls(
+        self,
+        *,
+        horizon_days: int,
+        today: date | None = None,
+    ) -> list[str]:
+        """Per-day index URLs covering ``horizon_days`` from ``today`` (SF-local).
+
+        The homepage only promotes the next day or two, so crawling it alone
+        silently caps coverage well short of the weekend people are planning
+        for. The dated index pages are the complete listing for each day.
+        """
+        start = today or datetime.now(SF_TZ).date()
+        return [
+            (start + timedelta(days=offset)).strftime(self.day_index_url_template)
+            for offset in range(horizon_days)
+        ]
+
+    def _is_event_url(self, url: str) -> bool:
+        """True for single-segment event detail pages on sf.funcheap.com.
+
+        Day indexes (``/2026/08/02/``) are crawl entry points rather than
+        events, and the section/nav slugs below never carry a single-event
+        date, so they would be dropped downstream anyway.
+        """
+        match = re.match(r"^https?://sf\.funcheap\.com/([^/?#]+)/?$", url)
+        if not match:
+            return False
+        slug = match.group(1)
+        if slug.isdigit() or slug.startswith("wp-"):
+            return False
+        return slug not in self._NAV_SLUGS
+
     @staticmethod
     async def _wait_for_content(page: Any, selector: str, *, timeout: int) -> None:
         """Wait for real content to appear without depending on a quiet network.
@@ -74,10 +135,15 @@ class FuncheapSFSource(BaseSource):
     async def fetch_events(
         self,
         *,
-        max_events: int = 50,
-        max_detail_pages: int = 30,
+        max_events: int = 400,
+        max_detail_pages: int = 400,
+        horizon_days: int = 10,
     ) -> list[dict[str, Any]]:
-        """Navigate homepage/events, extract event details, return canonical Event payloads."""
+        """Crawl per-day index pages over the horizon, return canonical Event payloads.
+
+        ``horizon_days`` defaults to 10 so the crawl always spans the next two
+        weekends; the caps scale with it rather than the old homepage-sized 30.
+        """
         self._playwright = await async_playwright().start()
 
         proxy_config = None
@@ -101,47 +167,49 @@ class FuncheapSFSource(BaseSource):
 
         try:
             event_links: list[str] = []
-            try:
-                await page.goto(
-                    self.events_url, wait_until="domcontentloaded", timeout=30000
-                )
-                # FuncheapSF runs ads/trackers/long-polling that never let the network go
-                # idle, so we wait for the actual content to appear instead of
-                # "networkidle" and treat any settle timeout as best-effort (proceed,
-                # never abort). The events URL redirects to sf.funcheap.com.
-                await self._wait_for_content(
-                    page, "a[href*='funcheap.com']", timeout=15000
-                )
+            seen_links: set[str] = set()
 
-                # Single-segment slugs that are site navigation, not event pages; skip
-                # them so the detail-page budget is spent on real events (they would all
-                # be dropped anyway for having no single-event date).
-                nav_slug_re = (
-                    "/(events|free-events|today|weekend|win|subscribe|submit-form|about|"
-                    "privacy-policy|terms-service|dmca-requests|contact|advertise|"
-                    "newsletter|free-museum-days|add-event)/?$"
-                )
-                links = await page.locator(
-                    "a[href*='sf.funcheap.com'][href*='/']"
-                ).evaluate_all(
-                    """(els, navSlug) => els
-                        .map(a => a.href)
-                        .filter(h => /sf\\.funcheap\\.com\\/[^/]+\\/?$/.test(h) && !h.includes('/category/') && !h.includes('/venue/') && !h.includes('/region/') && !h.includes('/city-guide/') && !h.includes('/wp-') && !h.includes('/2026/') && !h.includes('/feed') && !new RegExp(navSlug).test(h))
-                        .filter((v, i, a) => a.indexOf(v) === i)
-                        .slice(0, 50)
-                    """,
-                    nav_slug_re,
-                )
-            except PlaywrightTimeoutError as exc:
-                # Hard navigation failure (e.g. an anti-bot challenge stealth can't pass).
-                # Fail gracefully rather than raising: no fabricated events.
+            for index_url in self._day_index_urls(horizon_days=horizon_days):
+                try:
+                    await page.goto(
+                        index_url, wait_until="domcontentloaded", timeout=30000
+                    )
+                    # FuncheapSF runs ads/trackers/long-polling that never let the
+                    # network go idle, so we wait for the actual content to appear
+                    # instead of "networkidle" and treat any settle timeout as
+                    # best-effort (proceed, never abort).
+                    await self._wait_for_content(
+                        page, "a[href*='funcheap.com']", timeout=15000
+                    )
+                    hrefs = await page.locator(
+                        "a[href*='sf.funcheap.com']"
+                    ).evaluate_all("els => els.map(a => a.href)")
+                except PlaywrightTimeoutError as exc:
+                    # One bad day page (anti-bot challenge, transient failure) must
+                    # not sink the whole horizon. Skip it; never fabricate events.
+                    logger.warning(
+                        "funcheap_sf: could not load %s (%s); skipping that day.",
+                        index_url,
+                        exc,
+                    )
+                    continue
+
+                for href in hrefs:
+                    if href in seen_links or not self._is_event_url(href):
+                        continue
+                    seen_links.add(href)
+                    event_links.append(href)
+
+                if len(event_links) >= max_detail_pages:
+                    break
+
+            if not event_links:
                 logger.warning(
-                    "funcheap_sf: could not load %s (%s); returning no events.",
-                    self.events_url,
-                    exc,
+                    "funcheap_sf: no event links found across %s day pages.",
+                    horizon_days,
                 )
                 return []
-            event_links = links[:max_detail_pages]
+            event_links = event_links[:max_detail_pages]
 
             canonical: list[dict[str, Any]] = []
             seen_urls: set[str] = set()
@@ -209,7 +277,7 @@ class FuncheapSFSource(BaseSource):
         if start_at is None:
             return None
 
-        price, currency = self._parse_cost(cost_text or detail_text)
+        cost_fields = self._cost_fields(cost_text, detail_text)
 
         source_event_id = url.rstrip("/").split("/")[-1] or url
 
@@ -228,11 +296,15 @@ class FuncheapSFSource(BaseSource):
             "venue_name": venue_name,
             "raw_address": raw_address,
             "location": f"POINT({lon} {lat})",
-            "location_confidence": 0.9 if coords else (0.5 if venue_name else 0.3),
+            # Knowing the venue's name doesn't locate it: without a cache hit
+            # this is still the SF centroid, so it must stay below the radius
+            # search threshold rather than claiming 0.5.
+            "location_confidence": 0.9 if coords else 0.4,
             "categories": [],
             "tags": [],
-            "price": price,
-            "currency": currency,
+            "price": cost_fields["price"],
+            "currency": cost_fields["currency"],
+            "is_free": cost_fields["is_free"],
             "image_url": None,
             "status": "scheduled",
         }
@@ -320,7 +392,13 @@ class FuncheapSFSource(BaseSource):
                     hour = 0
 
         start_dt = datetime(
-            base_date.year, base_date.month, base_date.day, hour, minute, 0, tzinfo=SF_TZ
+            base_date.year,
+            base_date.month,
+            base_date.day,
+            hour,
+            minute,
+            0,
+            tzinfo=SF_TZ,
         )
         start_utc = start_dt.astimezone(timezone.utc)
 
@@ -331,7 +409,7 @@ class FuncheapSFSource(BaseSource):
         if time_match:
             end_match = re.search(
                 r"(?:to|until|[-–])\s*(?:(\d{1,2}):(\d{2})\s*(am|pm)?|(\d{1,2})\s*(am|pm))",
-                full_text[time_match.end():],
+                full_text[time_match.end() :],
                 re.IGNORECASE,
             )
         if end_match:
@@ -350,7 +428,13 @@ class FuncheapSFSource(BaseSource):
                     eh = 0
             try:
                 end_dt = datetime(
-                    base_date.year, base_date.month, base_date.day, eh, em, 0, tzinfo=SF_TZ
+                    base_date.year,
+                    base_date.month,
+                    base_date.day,
+                    eh,
+                    em,
+                    0,
+                    tzinfo=SF_TZ,
                 )
                 if end_dt <= start_dt:
                     end_dt += timedelta(days=1)
@@ -368,8 +452,18 @@ class FuncheapSFSource(BaseSource):
             r"(\d{4})-(\d{2})-(\d{2})",
         ]
         months = {
-            "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-            "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+            "jan": 1,
+            "feb": 2,
+            "mar": 3,
+            "apr": 4,
+            "may": 5,
+            "jun": 6,
+            "jul": 7,
+            "aug": 8,
+            "sep": 9,
+            "oct": 10,
+            "nov": 11,
+            "dec": 12,
         }
         for pat in patterns:
             m = re.search(pat, text, re.IGNORECASE)
@@ -389,6 +483,47 @@ class FuncheapSFSource(BaseSource):
                     except (ValueError, KeyError, IndexError):
                         continue
         return None
+
+    _NO_COST: dict[str, Any] = {"price": None, "currency": None, "is_free": False}
+
+    def _cost_fields(self, *texts: str) -> dict[str, Any]:
+        """Extract price/currency/is_free from the first informative text.
+
+        Candidates are tried in order because the site splits the label from
+        the value: the ``.cost`` element is frequently just ``" | Cost:"``
+        while the real figure sits in the detail block, so a plain
+        ``cost_text or detail_text`` picks the useless one.
+
+        Within a candidate, scope to the ``Cost:`` label when present. The
+        detail block also carries date, venue and address, so a bare "is there
+        a ``$`` anywhere" test misreads free events that merely mention a price
+        nearby ("Cost: FREE | $1 Beer after").
+        """
+        for text in texts:
+            if not text:
+                continue
+            fields = self._cost_fields_from(text)
+            if fields != self._NO_COST:
+                return fields
+        return dict(self._NO_COST)
+
+    def _cost_fields_from(self, text: str) -> dict[str, Any]:
+        label = re.search(r"cost:\s*([^|\n]*)", text, flags=re.IGNORECASE)
+        scope = label.group(1) if label else text
+
+        # "FREE*" is the site's free-with-conditions marker; still free.
+        if re.search(r"\bfree\b", scope, flags=re.IGNORECASE) and "$" not in scope:
+            return {"price": 0.0, "currency": "USD", "is_free": True}
+
+        amount = re.search(r"\$\s*(\d+(?:\.\d{2})?)", scope)
+        if amount:
+            try:
+                value = float(amount.group(1))
+            except ValueError:
+                return dict(self._NO_COST)
+            return {"price": value, "currency": "USD", "is_free": value == 0.0}
+
+        return dict(self._NO_COST)
 
     def _parse_cost(self, text: str) -> tuple[float | None, str | None]:
         """Extract numeric price and currency from cost text."""

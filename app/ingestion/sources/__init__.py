@@ -10,6 +10,7 @@ from app.ingestion.sources.eddies_list import EddiesListSource
 from app.ingestion.sources.luma import LumaSource
 from app.ingestion.sources.minnesotastreet import MinnesotaStreetSource
 from app.ingestion.sources.sfstation import SFStationSource
+from app.ingestion.sources.sterngrove import SternGroveSource
 
 __all__ = [
     "DoTheBaySource",
@@ -22,4 +23,5 @@ __all__ = [
     "NineteenHzSource",
     "RedditSource",
     "SFStationSource",
+    "SternGroveSource",
 ]

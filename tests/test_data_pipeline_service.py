@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
+from app.models.event import Event
 from app.services.data_pipeline import DataPipelineService
 
 
@@ -14,6 +15,8 @@ def _event(
     location: str = "POINT(-122.4194 37.7749)",
     tags: list[str] | None = None,
     categories: list[str] | None = None,
+    venue_name: str | None = None,
+    external_url: str | None = None,
 ) -> dict:
     return {
         "title": title,
@@ -23,8 +26,8 @@ def _event(
         "source_name": source_name,
         "source_tier": source_tier,
         "source_event_id": None,
-        "external_url": None,
-        "venue_name": None,
+        "external_url": external_url,
+        "venue_name": venue_name,
         "raw_address": None,
         "location": location,
         "categories": categories or [],
@@ -66,7 +69,8 @@ def test_deduplicate_merges_high_similarity_within_two_hours() -> None:
     assert merged["start_at"] == base
     assert merged["description"] is not None
     assert "Bring a mat" in merged["description"]
-    assert set(merged["tags"]) == {"#Outdoor", "#Chill"}
+    # Tags are canonicalized at write: "#Outdoor" folds onto "#outdoors".
+    assert set(merged["tags"]) == {"#outdoors", "#chill"}
     assert set(merged["categories"]) == {"Wellness", "Fitness"}
 
 
@@ -245,3 +249,176 @@ def test_merge_keeps_best_signals() -> None:
     # The sparse record omitted confidence (treated as trusted 1.0); merge keeps the max.
     assert merged["location_confidence"] == 1.0
     assert merged["is_free"] is True
+
+
+# Real duplicate pairs observed in the feed for Sunday 2026-08-02 (see #18).
+# Whole-title Levenshtein scored these 62.9, 72.4 and 80.6 — all under the
+# 85.0 threshold — so the same show appeared two and three times.
+
+def test_deduplicate_merges_rotating_lineup_titles_at_one_venue() -> None:
+    """Headliner order rotates between sources; it is still one show."""
+    service = DataPipelineService()
+    start = datetime(2026, 8, 2, 19, 30, tzinfo=timezone.utc)
+    events = [
+        _event(
+            title="Bird and Byron W/ ZG Smith, Hero Magnus Live At Brick & Mortar (San FR",
+            start_at=start,
+            venue_name="Brick & Mortar Music Hall",
+        ),
+        _event(
+            title="Hero Magnus W/ Bird and Byron Live At Brick & Mortar (San Francisco, C",
+            start_at=start,
+            venue_name="Brick & Mortar Music Hall",
+        ),
+    ]
+
+    assert len(service.deduplicate_events(events)) == 1
+
+
+def test_deduplicate_merges_when_support_acts_are_appended() -> None:
+    """One source lists five artists, another eight — same party at The Stud."""
+    service = DataPipelineService()
+    start = datetime(2026, 8, 2, 21, 0, tzinfo=timezone.utc)
+    events = [
+        _event(
+            title="Sweet Tooth Fest: Paydayloan, Bootyjuice, Buku FM, DJ Black Woman, Uni Yasmin",
+            start_at=start,
+            venue_name="The Stud (San Francisco) afrobeats, house",
+        ),
+        _event(
+            title=(
+                "Sweet Tooth Festival: Padayl0an, Booty Juice, BUKU FM, DJ Black Woman, "
+                "Uni Yasmin, After Thought, Alien Mac Kitty, LBXX"
+            ),
+            start_at=start,
+            venue_name="The Stud (San Francisco) hip-hop, r&b, house",
+        ),
+    ]
+
+    assert len(service.deduplicate_events(events)) == 1
+
+
+def test_deduplicate_merges_on_identical_external_url() -> None:
+    """The same ticketing URL is the same event, whatever the titles say."""
+    service = DataPipelineService()
+    url = "https://www.ticketweb.com/event/bird-and-byron-w-zg-brick-and-mortar-tickets/14860143"
+    events = [
+        _event(
+            title="Bird and Byron W/ ZG Smith Live At Brick & Mortar (San Francisco, Ca)",
+            start_at=datetime(2026, 8, 2, 20, 0, tzinfo=timezone.utc),
+            external_url=url,
+        ),
+        _event(
+            title="Bird and Byron W/ ZG Smith, Hero Magnus Live At Brick & Mortar (San FR",
+            start_at=datetime(2026, 8, 2, 19, 30, tzinfo=timezone.utc),
+            external_url=url,
+        ),
+    ]
+
+    assert len(service.deduplicate_events(events)) == 1
+
+
+def test_deduplicate_keeps_different_shows_at_the_same_venue() -> None:
+    """Sharing a venue and a night is not enough — distinct bills stay distinct."""
+    service = DataPipelineService()
+    events = [
+        _event(
+            title="Sweet Tooth Fest: Paydayloan, Bootyjuice",
+            start_at=datetime(2026, 8, 2, 21, 0, tzinfo=timezone.utc),
+            venue_name="The Stud (San Francisco)",
+        ),
+        _event(
+            title="Sindustry Sundays: Ming, Jeff Straw",
+            start_at=datetime(2026, 8, 2, 22, 0, tzinfo=timezone.utc),
+            venue_name="The Stud (San Francisco)",
+        ),
+    ]
+
+    assert len(service.deduplicate_events(events)) == 2
+
+
+def test_find_existing_event_matches_a_stored_rotating_lineup(monkeypatch) -> None:
+    """The DB path must use the same rule as in-batch dedupe (see #18).
+
+    Otherwise a duplicate that survives one ingestion cycle is re-inserted on
+    the next one, because the stored title never scores 85 against the
+    incoming variant.
+    """
+    service = DataPipelineService()
+    start = datetime(2026, 8, 2, 19, 30, tzinfo=timezone.utc)
+    stored = Event(
+        title="Bird and Byron W/ ZG Smith, Hero Magnus Live At Brick & Mortar (San FR",
+        start_at=start,
+        source_name="ticketmaster",
+        source_tier=1,
+        venue_name="Brick & Mortar Music Hall",
+        location="POINT(-122.4194 37.7749)",
+    )
+
+    class _FakeSession:
+        def exec(self, _stmt):
+            class _Result:
+                def all(self_inner):
+                    return [stored]
+
+            return _Result()
+
+    incoming = _event(
+        title="Hero Magnus W/ Bird and Byron Live At Brick & Mortar (San Francisco, C",
+        start_at=start,
+        venue_name="Brick & Mortar Music Hall",
+    )
+
+    assert service._find_existing_event(session=_FakeSession(), incoming_event=incoming) is stored
+
+
+# Codex review of PR #22 found the two rules below were over-broad.
+
+def test_shared_listing_url_does_not_merge_events_on_different_nights() -> None:
+    """A venue calendar URL is not an event identity (review P1).
+
+    Sources fall back to a listing/profile URL when a row has no event-specific
+    link: 8 Kips Berkeley events across 8 different nights all carry
+    https://www.instagram.com/kipsberkeley/. Matching on URL alone, before the
+    time window, collapsed all of them into one.
+    """
+    service = DataPipelineService()
+    url = "https://www.instagram.com/kipsberkeley/"
+    events = [
+        _event(
+            title="College Thursday",
+            start_at=datetime(2026, 7, 30, 22, 0, tzinfo=timezone.utc),
+            external_url=url,
+        ),
+        _event(
+            title="Friday Party",
+            start_at=datetime(2026, 7, 31, 22, 0, tzinfo=timezone.utc),
+            external_url=url,
+        ),
+    ]
+
+    assert len(service.deduplicate_events(events)) == 2
+
+
+def test_token_subset_titles_at_different_venues_are_not_merged() -> None:
+    """token_set_ratio returns 100 for a subset, which is not identity (review P1).
+
+    "Comedy Night" scores 100 against "Free Sunday Comedy Night in Downtown SF".
+    Without venue or URL corroboration that merged unrelated events an hour
+    apart and silently dropped one.
+    """
+    service = DataPipelineService()
+    events = [
+        _event(
+            title="Comedy Night",
+            start_at=datetime(2026, 8, 2, 19, 0, tzinfo=timezone.utc),
+            venue_name="The Punch Line",
+        ),
+        _event(
+            title="Free Sunday Comedy Night in Downtown SF",
+            start_at=datetime(2026, 8, 2, 20, 0, tzinfo=timezone.utc),
+            venue_name="The Function",
+        ),
+    ]
+
+    assert len(service.deduplicate_events(events)) == 2

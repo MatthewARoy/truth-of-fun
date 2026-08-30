@@ -19,7 +19,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -41,6 +41,9 @@ services:
     restart: unless-stopped
     logging: *default-logging
     environment:
+      # Compose is the local development stack. The image itself defaults to
+      # production and refuses the checked-in development JWT secret.
+      APP_ENV: development
       DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/truth_of_fun
       # Structured logs in containers: one JSON object per line, so
       # `make logs-errors` and any aggregator can filter on fields rather
@@ -54,7 +57,7 @@ services:
       db:
         condition: service_healthy
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')\""]
       interval: 10s
@@ -74,6 +77,7 @@ services:
     logging: *default-logging
     command: ["python", "-m", "app.worker"]
     environment:
+      APP_ENV: development
       DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/truth_of_fun
       LOG_FORMAT: json
     depends_on:
@@ -96,7 +100,7 @@ services:
     restart: unless-stopped
     logging: *default-logging
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

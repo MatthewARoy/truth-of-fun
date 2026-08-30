@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from geoalchemy2 import Geography
 from sqlalchemy import cast, func, text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -12,12 +13,28 @@ from sqlmodel import Session, select
 
 from app.core.database import get_session
 from app.core.localtime import LOCAL_TZ
+from app.core.ratelimit import llm_rate_limit, share_rate_limit
 from app.core.security import get_current_user, get_optional_user
 from app.models.event import Event
+from app.models.itinerary import SavedItinerary
 from app.models.user import User
 from app.models.user_signal import UserSignal
-from app.services.concierge import parse_intent_async, sequence_itinerary
+from app.services.categories import canonical_category
+from app.services.concierge import (
+    anchor_hour_range,
+    intent_vibe_profile,
+    parse_intent_async,
+    sequence_itinerary,
+)
+from app.services.itinerary import (
+    StopLocation,
+    build_stop_links,
+    itinerary_title,
+    render_itinerary_text,
+)
 from app.services.recommender import RecommenderService, ScoredEvent
+from app.services.social import generate_share_token, is_valid_share_token
+from app.services.tags import stored_forms_for
 from app.services.user_profile import UserProfileService
 
 router = APIRouter(tags=["discovery"])
@@ -71,8 +88,20 @@ class EventDetailResponse(EventResponse):
 
 
 class ConciergeRequest(BaseModel):
-    query: str
-    limit: int = 25
+    query: str = Field(min_length=1, max_length=2000)
+    limit: int = Field(default=25, ge=3, le=100)
+
+
+class StopLinksResponse(BaseModel):
+    """Tap targets for one stop. Any of these is null when the stop has no
+    resolvable location (no coordinates, address, or venue name)."""
+
+    tickets_url: str | None = None
+    map_url: str | None = None
+    directions_url: str | None = None
+    food_url: str | None = None
+    drinks_url: str | None = None
+    parking_url: str | None = None
 
 
 class ItineraryStopResponse(BaseModel):
@@ -84,20 +113,65 @@ class ItineraryStopResponse(BaseModel):
     venue_name: str | None
     external_url: str | None
     travel_buffer_minutes_before: int
+    address: str | None = None
+    lat: float | None = None
+    lng: float | None = None
+    links: StopLinksResponse = StopLinksResponse()
 
 
 class ConciergeResponse(BaseModel):
     intent: str
     timeframe: str
     geography: str | None
+    category_focus: str | None = None
     anchor_event_id: int | None
     itinerary: list[ItineraryStopResponse]
+    title: str = ""
+    text: str = ""
+
+
+class ShareItineraryStopRequest(BaseModel):
+    """A stop the client is asking to freeze.
+
+    Only the identity and ordering of a stop come from the client; every
+    display fact is re-read from the database when the snapshot is written, so
+    a shared page can never be made to show text the caller supplied.
+    """
+
+    kind: str = Field(max_length=50)
+    event_id: int
+    travel_buffer_minutes_before: int = Field(default=0, ge=0, le=24 * 60)
+
+
+class ShareItineraryRequest(BaseModel):
+    # Bounded because this endpoint writes a row for an unauthenticated caller:
+    # a real night out is a handful of stops, and the prompt is a sentence.
+    query: str = Field(default="", max_length=2000)
+    intent: str = Field(default="general_night_out", max_length=100)
+    timeframe: str = Field(default="upcoming_week", max_length=100)
+    geography: str | None = Field(default=None, max_length=255)
+    anchor_event_id: int | None = None
+    stops: list[ShareItineraryStopRequest] = Field(min_length=1, max_length=20)
+
+
+class PortableItineraryResponse(BaseModel):
+    share_token: str
+    share_url: str
+    title: str
+    query: str
+    intent: str
+    timeframe: str
+    geography: str | None
+    anchor_event_id: int | None
+    created_at: datetime
+    itinerary: list[ItineraryStopResponse]
+    text: str
 
 
 class InterestRequest(BaseModel):
     action: Literal["save", "like", "click", "external_ticket_click"]
     event_id: int | None = None
-    vibe_tag: str | None = None
+    vibe_tag: str | None = Field(default=None, max_length=100)
 
 
 class InterestResponse(BaseModel):
@@ -107,7 +181,7 @@ class InterestResponse(BaseModel):
 
 
 class OnboardingRequest(BaseModel):
-    perfect_saturday: str
+    perfect_saturday: str = Field(min_length=1, max_length=2000)
 
 
 class OnboardingResponse(BaseModel):
@@ -171,32 +245,71 @@ def _serialize_event(event: Event, *, people_interested: int = 0) -> EventRespon
     )
 
 
-def _score_event_for_user(
-    *,
-    event_tags: list[str],
-    preferred_vibes: set[str],
-    profile_scores: dict[str, float],
-) -> tuple[float, list[str]]:
-    if not event_tags:
-        return 0.0, []
+def _event_location(event: Event | None) -> StopLocation:
+    """Map-addressable location for an event, or an empty one if it's gone."""
+    if event is None:
+        return StopLocation()
+    lat, lng = _extract_lat_lng(event)
+    return StopLocation(
+        venue_name=event.venue_name,
+        address=event.raw_address,
+        lat=lat,
+        lng=lng,
+        location_confidence=(
+            event.location_confidence if event.location_confidence is not None else 1.0
+        ),
+    )
 
-    tag_map = {tag.lower(): tag for tag in event_tags}
-    matched_keys = sorted(set(tag_map.keys()).intersection(preferred_vibes))
-    weighted_score = sum(profile_scores.get(key, 0.0) for key in tag_map.keys())
 
-    if not matched_keys and weighted_score <= 0:
-        return 0.0, []
+def _portable_stops(
+    raw_stops: list[tuple[ItineraryStopResponse, StopLocation]],
+) -> list[ItineraryStopResponse]:
+    """Attach maps links to each stop, routing each one from the previous stop.
 
-    matched = [tag_map[key] for key in matched_keys]
-    profile_matched_keys = [key for key in tag_map.keys() if profile_scores.get(key, 0.0) > 0]
-    for key in profile_matched_keys:
-        original = tag_map[key]
-        if original not in matched:
-            matched.append(original)
+    A stop we can't locate is left linkless and does not become the origin for
+    the next leg — otherwise one venue-less entry would break directions for
+    the rest of the night.
+    """
+    enriched: list[ItineraryStopResponse] = []
+    previous: StopLocation | None = None
+    for stop, location in raw_stops:
+        links = build_stop_links(
+            location=location,
+            previous_location=previous,
+            tickets_url=stop.external_url,
+        )
+        enriched.append(
+            stop.model_copy(
+                update={
+                    "address": location.address,
+                    "lat": location.lat,
+                    "lng": location.lng,
+                    "links": StopLinksResponse(**asdict(links)),
+                }
+            )
+        )
+        if location.is_locatable:
+            previous = location
+    return enriched
 
-    # Explicit likes drive relevance first, then decayed behavioral profile weight.
-    score = (len(matched_keys) * 100.0) + (weighted_score * 10.0)
-    return score, matched
+
+def _canonical_tag_filter(vibe_tag: str):
+    """Match *vibe_tag* against stored tags regardless of their spelling.
+
+    ``Event.tags.contains([...])`` is exact, case-sensitive JSONB containment,
+    so filtering by ``#highenergy`` missed every event stored as ``HighEnergy``.
+    Canonicalize both sides in SQL so the filter is correct against today's
+    mixed-form rows as well as canonicalized ones.
+    """
+    forms = stored_forms_for(vibe_tag)
+    if not forms:
+        return text("FALSE")
+
+    element = func.jsonb_array_elements_text(Event.tags).column_valued("tag")
+    normalized = func.regexp_replace(
+        func.lower(func.ltrim(element, "#")), "[^a-z0-9+]", "", "g"
+    )
+    return select(element).where(normalized.in_(forms)).exists()
 
 
 def _apply_concierge_geography_filter(stmt: object, geography: str | None) -> object:
@@ -208,6 +321,25 @@ def _apply_concierge_geography_filter(stmt: object, geography: str | None) -> ob
         | Event.raw_address.ilike(geography_like)
         | Event.title.ilike(geography_like)
     )
+
+
+def _category_filter(category: str):
+    """Exact containment against ``events.categories``.
+
+    ``categories`` is a plain JSON column, and SQLAlchemy renders ``.contains()``
+    on JSON as a SQL ``LIKE`` — which Postgres rejects outright with
+    "operator does not exist: json ~~ text", 500ing every category-filtered
+    query. It passes on SQLite, which is what the hermetic test suite runs on,
+    so only Postgres sees it. Cast to JSONB so containment uses the ``@>``
+    operator it was meant to.
+    """
+    return cast(Event.categories, JSONB).contains([category])
+
+
+def _apply_concierge_category_filter(stmt: object, category: str | None) -> object:
+    if not category:
+        return stmt
+    return stmt.where(_category_filter(category))
 
 
 def _people_interested_counts(*, session: Session, event_ids: list[int]) -> dict[int, int]:
@@ -270,11 +402,26 @@ def search_events(
     *,
     response: Response,
     session: Session = Depends(get_session),
-    q: str | None = Query(default=None, description="Full-text search query"),
-    lat: float | None = Query(default=None, description="Latitude for geo search"),
-    lng: float | None = Query(default=None, description="Longitude for geo search"),
-    radius_miles: float | None = Query(default=None, gt=0, description="Search radius miles"),
-    vibe_tag: str | None = Query(default=None, description="Filter by vibe tag"),
+    q: str | None = Query(default=None, max_length=200, description="Full-text search query"),
+    lat: float | None = Query(default=None, ge=-90, le=90, description="Latitude for geo search"),
+    lng: float | None = Query(default=None, ge=-180, le=180, description="Longitude for geo search"),
+    radius_miles: float | None = Query(default=None, gt=0, le=500, description="Search radius miles"),
+    min_location_confidence: float = Query(
+        default=0.5,
+        ge=0,
+        le=1,
+        description=(
+            "Minimum location_confidence for radius search. Defaults to 0.5 so "
+            "city-centroid fallbacks are excluded; pass 0 to include them."
+        ),
+    ),
+    vibe_tag: str | None = Query(default=None, max_length=100, description="Filter by vibe tag"),
+    category: str | None = Query(
+        default=None,
+        max_length=100,
+        description="Filter by activity category (e.g. 'Fitness', 'Music', or a "
+        "synonym like 'gym'/'workout')",
+    ),
     time_preset: Literal["tonight", "this_weekend"] | None = Query(
         default=None,
         description="Friendly time filter for quick UI controls",
@@ -289,7 +436,7 @@ def search_events(
     sort_by: Literal["date", "distance"] = Query(
         "date", description="Sort order: 'date' (default) or 'distance' (requires lat/lng)"
     ),
-    status: str | None = Query(None, description="Filter by event status"),
+    status: str | None = Query(None, max_length=50, description="Filter by event status"),
     limit: int = Query(default=25, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[EventResponse]:
@@ -333,11 +480,12 @@ def search_events(
     if end_bound is not None:
         stmt = stmt.where(Event.start_at <= end_bound)
     if vibe_tag:
-        # events.tags is a plain JSON column, and SQLAlchemy renders
-        # `.contains()` on JSON as a SQL LIKE — which Postgres rejects with
-        # "operator does not exist: json ~~ text", 500ing every tagged query.
-        # Cast to JSONB so containment uses the @> operator it was meant to.
-        stmt = stmt.where(cast(Event.tags, JSONB).contains([vibe_tag]))
+        stmt = stmt.where(_canonical_tag_filter(vibe_tag))
+    if category:
+        # Resolve synonyms ("gym"/"workout" -> "Fitness"); fall back to the raw
+        # term so callers can still filter by finer-grained labels (e.g. a genre).
+        resolved_category = canonical_category(category) or category.strip()
+        stmt = stmt.where(_category_filter(resolved_category))
 
     location_keyword = _location_keyword_for_preset(location_preset)
     if location_keyword:
@@ -357,6 +505,10 @@ def search_events(
                 radius_meters,
             )
         )
+        # Sources fall back to a city centroid when a venue can't be resolved,
+        # which otherwise puts out-of-town events inside every SF radius
+        # search. Exclude those guesses unless the caller opts back in.
+        stmt = stmt.where(Event.location_confidence >= min_location_confidence)
 
     # Sort order: distance (when geo available) or date (default / fallback).
     if sort_by == "distance" and has_geo:
@@ -511,6 +663,7 @@ def update_me_interests(
     response_model=OnboardingResponse,
     operation_id="submitOnboarding",
     summary="Extract vibe tags from a free-text onboarding answer",
+    dependencies=[Depends(llm_rate_limit)],
 )
 async def set_onboarding_profile(
     *,
@@ -618,38 +771,76 @@ def get_recommendations(
     response_model=ConciergeResponse,
     operation_id="buildItinerary",
     summary="Turn a natural-language request into a sequenced itinerary",
+    dependencies=[Depends(llm_rate_limit)],
 )
 async def build_concierge_itinerary(
     *,
     payload: ConciergeRequest,
     session: Session = Depends(get_session),
+    user: User | None = Depends(get_optional_user),
 ) -> ConciergeResponse:
     parsed = await parse_intent_async(payload.query)
-    limit = max(3, min(int(payload.limit), 100))
+    limit = payload.limit
 
-    anchor_stmt = (
-        select(Event)
-        .where(
+    def _anchor_query(*, restrict_to_intent_hours: bool):
+        stmt = select(Event).where(
             Event.start_at >= parsed.window_start,
             Event.start_at <= parsed.window_end,
             Event.source_tier <= 2,
         )
-        .order_by(Event.start_at.asc())
-        .limit(limit)
-    )
-    anchor_stmt = _apply_concierge_geography_filter(anchor_stmt, parsed.geography)
-    anchor_events = session.exec(anchor_stmt).all()
-    anchor = anchor_events[0] if anchor_events else None
+        hours = anchor_hour_range(parsed.intent) if restrict_to_intent_hours else None
+        if hours is not None:
+            # Compare in SF local time: the stored timestamps are UTC, so a
+            # naive hour filter would drift by the offset.
+            local_hour = func.extract(
+                "hour", func.timezone(str(LOCAL_TZ), Event.start_at)
+            )
+            stmt = stmt.where(local_hour >= hours[0], local_hour <= hours[1])
+        stmt = stmt.order_by(Event.start_at.asc()).limit(limit)
+        stmt = _apply_concierge_geography_filter(stmt, parsed.geography)
+        return _apply_concierge_category_filter(stmt, parsed.category_focus)
+
+    # Prefer an anchor that fits the intent's time of day; fall back to the
+    # whole window rather than returning nothing when the day is thin.
+    anchor_events = session.exec(_anchor_query(restrict_to_intent_hours=True)).all()
+    if not anchor_events:
+        anchor_events = session.exec(_anchor_query(restrict_to_intent_hours=False)).all()
+    if anchor_events:
+        vibe_scores = intent_vibe_profile(parsed.intent)
+        if user is not None and user.id is not None:
+            user_scores = _user_profile_service.compute_vibe_scores_for_user(
+                session=session,
+                user_id=int(user.id),
+                now=datetime.now(timezone.utc),
+            )
+            for tag, score in user_scores.items():
+                vibe_scores[tag] = vibe_scores.get(tag, 0.0) + score
+
+        popularity_counts = _people_interested_counts(
+            session=session,
+            event_ids=[
+                int(event.id) for event in anchor_events if event.id is not None
+            ],
+        )
+        ranked_anchors = _recommender_service.score_events(
+            events=list(anchor_events),
+            user=user,
+            user_vibe_scores=vibe_scores,
+            popularity_counts=popularity_counts,
+        )
+        anchor = ranked_anchors[0].event if ranked_anchors else None
+    else:
+        anchor = None
     if anchor is None:
         return ConciergeResponse(
             intent=parsed.intent,
             timeframe=parsed.timeframe_label,
             geography=parsed.geography,
+            category_focus=parsed.category_focus,
             anchor_event_id=None,
             itinerary=[],
         )
 
-    radius_meters = 0.5 * 1609.34
     anchor_lat, anchor_lng = _extract_lat_lng(anchor)
     if anchor_lat is None or anchor_lng is None:
         support_events = []
@@ -657,42 +848,225 @@ async def build_concierge_itinerary(
         anchor_point = func.ST_SetSRID(
             func.ST_MakePoint(anchor_lng, anchor_lat), 4326
         )
-        support_stmt = (
-            select(Event)
-            .where(
-                Event.id != anchor.id,
-                Event.start_at >= parsed.window_start,
-                Event.start_at <= parsed.window_end,
-                Event.source_tier >= 3,
-                func.ST_DWithin(
-                    cast(Event.location, Geography),
-                    cast(anchor_point, Geography),
-                    radius_meters,
-                ),
+
+        def _support_query(*, radius_miles: float):
+            return (
+                select(Event)
+                .where(
+                    Event.id != anchor.id,
+                    Event.start_at >= parsed.window_start,
+                    Event.start_at <= parsed.window_end,
+                    Event.source_tier >= 3,
+                    func.ST_DWithin(
+                        cast(Event.location, Geography),
+                        cast(anchor_point, Geography),
+                        radius_miles * 1609.34,
+                    ),
+                )
+                .order_by(Event.start_at.asc())
+                .limit(limit)
             )
-            .order_by(Event.start_at.asc())
-            .limit(limit)
-        )
-        support_events = session.exec(support_stmt).all()
+
+        support_events = session.exec(_support_query(radius_miles=0.5)).all()
+        if not support_events:
+            support_events = session.exec(_support_query(radius_miles=1.0)).all()
     sequenced = sequence_itinerary(anchor=anchor, support_events=support_events)
 
-    itinerary = [
-        ItineraryStopResponse(
-            kind=item.kind,
-            event_id=item.event_id,
-            title=item.title,
-            start_at=item.start_at,
-            end_at=item.end_at,
-            venue_name=item.venue_name,
-            external_url=item.external_url,
-            travel_buffer_minutes_before=item.travel_buffer_minutes_before,
-        )
-        for item in sequenced
-    ]
+    # The anchor and its support events are already loaded, so locations come
+    # from memory rather than a second round of queries.
+    events_by_id = {
+        int(event.id): event
+        for event in [anchor, *support_events]
+        if event.id is not None
+    }
+    itinerary = _portable_stops(
+        [
+            (
+                ItineraryStopResponse(
+                    kind=item.kind,
+                    event_id=item.event_id,
+                    title=item.title,
+                    start_at=item.start_at,
+                    end_at=item.end_at,
+                    venue_name=item.venue_name,
+                    external_url=item.external_url,
+                    travel_buffer_minutes_before=item.travel_buffer_minutes_before,
+                ),
+                _event_location(events_by_id.get(item.event_id)),
+            )
+            for item in sequenced
+        ]
+    )
+    title = itinerary_title(
+        intent=parsed.intent,
+        geography=parsed.geography,
+        starts_at=itinerary[0].start_at if itinerary else None,
+    )
     return ConciergeResponse(
         intent=parsed.intent,
         timeframe=parsed.timeframe_label,
         geography=parsed.geography,
+        category_focus=parsed.category_focus,
         anchor_event_id=int(anchor.id or 0),
         itinerary=itinerary,
+        title=title,
+        text=render_itinerary_text(title=title, stops=itinerary),
     )
+
+
+def _share_url_for(token: str) -> str:
+    return f"/itinerary/{token}"
+
+
+def _portable_response(itinerary: SavedItinerary) -> PortableItineraryResponse:
+    """Rehydrate a stored snapshot, recomputing links from the stored facts.
+
+    Links are derived rather than stored so that improvements to how we build
+    map URLs reach itineraries that were shared before the change.
+    """
+    stops = _portable_stops(
+        [
+            (
+                ItineraryStopResponse(
+                    kind=str(stop.get("kind") or "stop"),
+                    event_id=int(stop.get("event_id") or 0),
+                    title=str(stop.get("title") or "Untitled"),
+                    start_at=datetime.fromisoformat(stop["start_at"]),
+                    end_at=(
+                        datetime.fromisoformat(stop["end_at"])
+                        if stop.get("end_at")
+                        else None
+                    ),
+                    venue_name=stop.get("venue_name"),
+                    external_url=stop.get("external_url"),
+                    travel_buffer_minutes_before=int(
+                        stop.get("travel_buffer_minutes_before") or 0
+                    ),
+                ),
+                StopLocation(
+                    venue_name=stop.get("venue_name"),
+                    address=stop.get("address"),
+                    lat=stop.get("lat"),
+                    lng=stop.get("lng"),
+                    location_confidence=float(
+                        stop.get("location_confidence") or 1.0
+                    ),
+                ),
+            )
+            for stop in (itinerary.stops or [])
+        ]
+    )
+    share_url = _share_url_for(itinerary.share_token)
+    return PortableItineraryResponse(
+        share_token=itinerary.share_token,
+        share_url=share_url,
+        title=itinerary.title,
+        query=itinerary.query,
+        intent=itinerary.intent,
+        timeframe=itinerary.timeframe,
+        geography=itinerary.geography,
+        anchor_event_id=itinerary.anchor_event_id,
+        created_at=itinerary.created_at,
+        itinerary=stops,
+        text=render_itinerary_text(
+            title=itinerary.title, stops=stops, share_url=share_url
+        ),
+    )
+
+
+@router.post(
+    "/concierge/itinerary/share",
+    response_model=PortableItineraryResponse,
+    dependencies=[Depends(share_rate_limit)],
+)
+def share_concierge_itinerary(
+    *,
+    payload: ShareItineraryRequest,
+    session: Session = Depends(get_session),
+    user: User | None = Depends(get_optional_user),
+) -> PortableItineraryResponse:
+    """Freeze an itinerary and hand back a link you can send to someone.
+
+    Takes the stops the caller is looking at rather than re-running the
+    concierge: re-planning here would quietly hand back a different night than
+    the one on screen. Titles, venues, and coordinates are re-read from the
+    database so the public page only ever renders our own data.
+    """
+    requested_ids = [stop.event_id for stop in payload.stops]
+    events_by_id = {
+        int(event.id): event
+        for event in session.exec(select(Event).where(Event.id.in_(requested_ids))).all()
+        if event.id is not None
+    }
+    missing = [event_id for event_id in requested_ids if event_id not in events_by_id]
+    if missing:
+        raise HTTPException(
+            status_code=404, detail=f"Unknown event ids: {sorted(set(missing))}"
+        )
+
+    snapshot: list[dict] = []
+    for stop in payload.stops:
+        event = events_by_id[stop.event_id]
+        lat, lng = _extract_lat_lng(event)
+        snapshot.append(
+            {
+                "kind": stop.kind,
+                "event_id": int(event.id or 0),
+                "title": event.title,
+                "start_at": event.start_at.isoformat(),
+                "end_at": event.end_at.isoformat() if event.end_at else None,
+                "venue_name": event.venue_name,
+                "address": event.raw_address,
+                "lat": lat,
+                "lng": lng,
+                "location_confidence": (
+                    event.location_confidence
+                    if event.location_confidence is not None
+                    else 1.0
+                ),
+                "external_url": event.external_url,
+                "travel_buffer_minutes_before": max(
+                    0, int(stop.travel_buffer_minutes_before)
+                ),
+            }
+        )
+
+    first_start = min(
+        events_by_id[stop.event_id].start_at for stop in payload.stops
+    )
+    saved = SavedItinerary(
+        share_token=generate_share_token(),
+        user_id=int(user.id) if user is not None and user.id is not None else None,
+        title=itinerary_title(
+            intent=payload.intent,
+            geography=payload.geography,
+            starts_at=first_start,
+        ),
+        query=payload.query,
+        intent=payload.intent,
+        timeframe=payload.timeframe,
+        geography=payload.geography,
+        anchor_event_id=payload.anchor_event_id,
+        stops=snapshot,
+    )
+    session.add(saved)
+    session.commit()
+    session.refresh(saved)
+    return _portable_response(saved)
+
+
+@router.get("/shared/itineraries/{token}", response_model=PortableItineraryResponse)
+def get_shared_itinerary(
+    *,
+    token: str,
+    session: Session = Depends(get_session),
+) -> PortableItineraryResponse:
+    """Public read of a shared itinerary — no auth, so the link just works."""
+    if not is_valid_share_token(token):
+        raise HTTPException(status_code=404, detail="Itinerary not found")
+    saved = session.exec(
+        select(SavedItinerary).where(SavedItinerary.share_token == token)
+    ).first()
+    if saved is None:
+        raise HTTPException(status_code=404, detail="Itinerary not found")
+    return _portable_response(saved)

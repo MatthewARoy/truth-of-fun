@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.models.event import Event
 from app.models.user import User
+from app.services.tags import resolve_vibe_tag
 
 
 @dataclass
@@ -41,7 +42,7 @@ class RecommenderService:
         self,
         *,
         events: list[Event],
-        user: User,
+        user: User | None,
         user_vibe_scores: dict[str, float],
         popularity_counts: dict[int, int],
     ) -> list[ScoredEvent]:
@@ -50,9 +51,11 @@ class RecommenderService:
         Returns a list of ``ScoredEvent`` sorted by total score descending,
         with diversity penalties applied during the final ranking pass.
         """
-        preferred_vibes = set(
-            v.lower() for v in (user.preferred_vibes or []) if isinstance(v, str)
-        )
+        preferred_vibes = {
+            vibe.lower()
+            for vibe in ((user.preferred_vibes if user is not None else None) or [])
+            if isinstance(vibe, str)
+        }
         now = datetime.now(timezone.utc)
 
         # Phase 1: compute per-event raw scores (no diversity yet).
@@ -104,23 +107,40 @@ class RecommenderService:
         preferred_vibes: set[str],
         profile_scores: dict[str, float],
     ) -> tuple[float, list[str]]:
-        """Compute vibe match score (0-100) and list of matched tags.
-
-        Mirrors the logic from ``_score_event_for_user`` in discovery.py.
-        """
+        """Compute vibe match score (0-100) and list of matched tags."""
         if not event_tags:
             return 0.0, []
 
-        tag_map = {tag.lower(): tag for tag in event_tags}
-        matched_keys = sorted(set(tag_map.keys()).intersection(preferred_vibes))
-        weighted_score = sum(profile_scores.get(key, 0.0) for key in tag_map.keys())
+        # Stored tags predate the canonical vocabulary and still arrive in mixed
+        # forms (``HighEnergy``, ``#live-music``). Canonicalizing on read means
+        # ranking is correct without waiting on a backfill.
+        tag_map: dict[str, str] = {}
+        for tag in event_tags:
+            key = resolve_vibe_tag(tag)
+            if key is not None:
+                tag_map.setdefault(key, tag)
+
+        preferred_keys = {
+            key for key in map(resolve_vibe_tag, preferred_vibes) if key is not None
+        }
+        normalized_profile_scores: dict[str, float] = {}
+        for key, score in profile_scores.items():
+            normalized_key = resolve_vibe_tag(key)
+            if normalized_key is None:
+                continue
+            normalized_profile_scores[normalized_key] = (
+                normalized_profile_scores.get(normalized_key, 0.0) + score
+            )
+
+        matched_keys = sorted(set(tag_map).intersection(preferred_keys))
+        weighted_score = sum(normalized_profile_scores.get(key, 0.0) for key in tag_map)
 
         if not matched_keys and weighted_score <= 0:
             return 0.0, []
 
         matched = [tag_map[key] for key in matched_keys]
         for key in tag_map:
-            if profile_scores.get(key, 0.0) > 0:
+            if normalized_profile_scores.get(key, 0.0) > 0:
                 original = tag_map[key]
                 if original not in matched:
                     matched.append(original)

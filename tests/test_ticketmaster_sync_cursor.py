@@ -104,8 +104,8 @@ async def test_partial_failure_preserves_a_previous_cursor(sync_state, monkeypat
     assert tm_module._load_last_sync_timestamp() == "2026-07-01T00:00:00Z"
 
 
-async def test_partial_failure_error_text_is_redacted(sync_state, monkeypatch) -> None:
-    """The recorded reason reaches GET /health/sources — it must carry no key."""
+async def test_recorded_failure_reason_carries_no_credential(sync_state, monkeypatch) -> None:
+    """The reason is meant to be surfaceable, so it must never quote the request."""
     source = TicketmasterSource(api_key="test-key")
 
     async def _fetch_page(params: dict[str, Any]) -> dict[str, Any]:
@@ -120,8 +120,7 @@ async def test_partial_failure_error_text_is_redacted(sync_state, monkeypatch) -
 
     assert source.last_fetch_error is not None
     assert "SUPERSECRETVALUE1234" not in source.last_fetch_error
-
-
+    assert "RuntimeError" in source.last_fetch_error
 async def test_worker_reports_a_partial_fetch_as_failing() -> None:
     """A half-read window must not look like a healthy small result."""
     from sqlalchemy.pool import StaticPool

@@ -1,6 +1,6 @@
 # API Contract v1
 
-This contract documents the current web/mobile-facing HTTP API: **20 endpoints** across five routers (`app/api/`). The live OpenAPI schema (`GET /openapi.json`) is the machine-readable source of truth; this document mirrors it.
+This contract documents the current web/mobile-facing HTTP API: **22 endpoints** across five routers (`app/api/`). The live OpenAPI schema (`GET /openapi.json`) is the machine-readable source of truth; this document mirrors it.
 
 In the JSON shapes below, values are field types (`int`, `float`, `string`, `bool`, `datetime` = ISO 8601 string), with `| null` marking nullable fields.
 
@@ -8,11 +8,21 @@ In the JSON shapes below, values are field types (`int`, `float`, `string`, `boo
 
 | Tier | How | Applies to |
 |---|---|---|
-| None | — | `/health*`, `/auth/*`, `GET /events`, `POST /concierge/itinerary`, `GET /shared/folders/{token}` |
+| None | — | `/health*`, `/auth/*`, `GET /events`, `POST /concierge/itinerary`, `POST /concierge/itinerary/share`, `GET /shared/folders/{token}`, `GET /shared/itineraries/{token}` |
 | User bearer JWT | `Authorization: Bearer <token>` from `/auth/register` or `/auth/login` (HS256, expires per `JWT_EXPIRE_MINUTES`) | `/users/me/*`, `/recommendations`, all `/folders*` except the public share view |
 | Internal AAIM JWT | Scoped service JWT (HS256 shared secret or OIDC/JWKS, per `AAIM_JWT_*` / `AAIM_OIDC_*` settings) | `/internal/secrets/*` |
 
 The entire `/internal/secrets/*` tree returns **404** unless `AAIM_ENABLED=true`. When enabled, each endpoint additionally requires the scope listed below (`403` if the token lacks it).
+
+## Rate limits
+
+Abuse-prone endpoints enforce per-client sliding windows and return **429** with a `Retry-After` header (seconds) when exceeded. Limits are tunable via env (`0` disables — see `.env.example`).
+
+| Window | Default | Applies to |
+|---|---|---|
+| LLM | 30 / hour | `POST /concierge/itinerary`, `POST /users/me/onboarding` |
+| Share | 60 / hour | `POST /concierge/itinerary/share` |
+| Auth | 20 / 15 min | `POST /auth/login`, `POST /auth/register` (shared window) |
 
 ## Endpoint index
 
@@ -26,6 +36,8 @@ The entire `/internal/secrets/*` tree returns **404** unless `AAIM_ENABLED=true`
 | POST | `/users/me/onboarding` | user JWT |
 | POST | `/users/me/interests` | user JWT |
 | POST | `/concierge/itinerary` | none |
+| POST | `/concierge/itinerary/share` | optional |
+| GET | `/shared/itineraries/{token}` | none |
 | GET | `/folders` | user JWT |
 | POST | `/folders` | user JWT |
 | GET | `/folders/{folder_id}` | user JWT (owner or member) |
@@ -54,7 +66,7 @@ Request:
 ```json
 {
   "email": "string (email)",
-  "password": "string",
+  "password": "at least 12 characters; at most 72 UTF-8 bytes",
   "full_name": "string | null (optional)"
 }
 ```
@@ -130,6 +142,7 @@ Query parameters:
 | `lng` | float | Longitude for geo search |
 | `radius_miles` | float (> 0) | `lat`, `lng`, `radius_miles` must be provided together (`400` otherwise) |
 | `vibe_tag` | string | Filter by vibe tag |
+| `category` | string | Filter by activity category (e.g. `Fitness`, `Music`). Synonyms like `gym`/`workout`/`yoga` resolve to `Fitness` |
 | `time_preset` | `"tonight"` \| `"this_weekend"` | Friendly time window (computed in SF local time) |
 | `location_preset` | `"sf"` \| `"oakland"` \| `"san_jose"` | Friendly location filter |
 | `start_at` | datetime | Start-time lower bound (overrides preset start) |
@@ -236,6 +249,8 @@ Response:
 
 Auth: none. Parses a natural-language query into an intent/time window, picks an anchor event (source tier ≤ 2), and sequences nearby support events (tier ≥ 3, within 0.5 mi) into an itinerary. `itinerary` is empty (and `anchor_event_id` null) when no anchor matches.
 
+`intent` is one of `date_night`, `out_of_town_guests`, `bar_crawl`, `active_day`, `general_night_out`. An `active_day` request (gyms, workout classes, climbing, yoga, run clubs, etc.) sets `category_focus: "Fitness"` and restricts anchor selection to that category.
+
 Request:
 
 ```json
@@ -252,19 +267,94 @@ Response:
   "intent": "string",
   "timeframe": "string",
   "geography": "string | null",
+  "category_focus": "string | null",
   "anchor_event_id": "int | null",
-  "itinerary": [
+  "title": "string",
+  "text": "string",
+  "itinerary": ["ItineraryStop"]
+}
+```
+
+`title` is a subject-line summary (`"Date night in Mission — Sat, Aug 8"`); `text` is the whole plan rendered as pasteable plain text, with times in venue-local time.
+
+`ItineraryStop`:
+
+```json
+{
+  "kind": "string",
+  "event_id": "int",
+  "title": "string",
+  "start_at": "datetime",
+  "end_at": "datetime | null",
+  "venue_name": "string | null",
+  "address": "string | null",
+  "lat": "float | null",
+  "lng": "float | null",
+  "external_url": "string | null",
+  "travel_buffer_minutes_before": "int",
+  "links": {
+    "tickets_url": "string | null",
+    "map_url": "string | null",
+    "directions_url": "string | null",
+    "food_url": "string | null",
+    "drinks_url": "string | null",
+    "parking_url": "string | null"
+  }
+}
+```
+
+`links` are Google Maps URLs built from the stop's stored location — no API key and no third-party call. `directions_url` routes from the previous stop, or omits `origin` on the first stop so the map starts from the reader's current location. `food_url` / `drinks_url` / `parking_url` are Maps searches centered on the venue rather than curated picks: the event corpus holds no restaurant, bar, or parking data. Every link is `null` when a stop has no resolvable location. Coordinates below `location_confidence` 0.7 are city-centroid fallbacks and are not used for navigation — those stops route to the venue/address text instead.
+
+### POST /concierge/itinerary/share
+
+Auth: optional (associates the itinerary with the caller when a JWT is present). Freezes an itinerary and returns a public link.
+
+Callers send the stops they are looking at rather than the original query — re-planning server-side could return a different night than the one being shared. Only `kind`, `event_id`, and ordering are taken from the request; every display field is re-read from `events` when the snapshot is written, so a shared page can never render caller-supplied text. `422` if `stops` is empty or longer than 20, `404` if any `event_id` is unknown.
+
+Request:
+
+```json
+{
+  "query": "string",
+  "intent": "string (default \"general_night_out\")",
+  "timeframe": "string (default \"upcoming_week\")",
+  "geography": "string | null",
+  "anchor_event_id": "int | null",
+  "stops": [
     {
       "kind": "string",
       "event_id": "int",
-      "title": "string",
-      "start_at": "datetime",
-      "end_at": "datetime | null",
-      "venue_name": "string | null",
-      "external_url": "string | null",
-      "travel_buffer_minutes_before": "int"
+      "travel_buffer_minutes_before": "int (default 0)"
     }
   ]
+}
+```
+
+`stops` holds 1–20 entries. Unauthenticated callers may share, so `query` is capped at 2000 characters.
+
+Response: `PortableItinerary` (below).
+
+### GET /shared/itineraries/{token}
+
+Auth: none — the link is the credential. `404` for an unknown or malformed token.
+
+The stored stops are a snapshot, so the page keeps rendering after the underlying events are re-deduped, repriced, or dropped from the feed. Links are recomputed from the snapshot on every read rather than stored, so improvements to URL building reach itineraries shared before the change.
+
+`PortableItinerary`:
+
+```json
+{
+  "share_token": "string",
+  "share_url": "string (relative, e.g. \"/itinerary/<token>\")",
+  "title": "string",
+  "query": "string",
+  "intent": "string",
+  "timeframe": "string",
+  "geography": "string | null",
+  "anchor_event_id": "int | null",
+  "created_at": "datetime",
+  "itinerary": ["ItineraryStop"],
+  "text": "string"
 }
 ```
 

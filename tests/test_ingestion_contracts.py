@@ -18,6 +18,7 @@ def test_registry_includes_all_prd_sources() -> None:
         "luma",
         "dothebay",
         "sfstation",
+        "sterngrove",
         "minnesotastreet",
         "reddit",
         "eddies_list",

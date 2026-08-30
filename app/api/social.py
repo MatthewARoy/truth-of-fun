@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlmodel import Session, select
 
@@ -26,7 +26,7 @@ router = APIRouter(tags=["social"])
 
 
 class CreateFolderRequest(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=255)
 
 
 class AddFolderItemRequest(BaseModel):
@@ -40,7 +40,7 @@ class VoteRequest(BaseModel):
 
 class CreateInviteRequest(BaseModel):
     # Days until the invite expires. 0 or null creates a non-expiring invite.
-    expires_in_days: int | None = DEFAULT_INVITE_TTL_DAYS
+    expires_in_days: int | None = Field(default=DEFAULT_INVITE_TTL_DAYS, ge=0, le=365)
 
 
 class FolderResponse(BaseModel):

@@ -43,6 +43,9 @@ def test_luma_extracts_events_from_embedded_next_data() -> None:
     assert demo.start_time == datetime(2026, 6, 12, 1, 30, tzinfo=timezone.utc)
     assert demo.social_signals.attendee_count == 371
     assert str(demo.source.source_url) == "https://luma.com/sf-demo-night"
+    # The listing payload carries no cost text, so unknown is correct.
+    assert demo.offers.price_min is None
+    assert demo.offers.currency is None
 
 
 def test_luma_embedded_json_slug_urls_are_absolutized() -> None:

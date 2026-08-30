@@ -32,7 +32,7 @@ The hard parts aren't the scrapers. They're:
 | **Pipeline** | Schema.org/Event canonical model with PostGIS geometry. Levenshtein title fuzzy match (≥ 85%) inside a 2-hour window. Tier-based source preference. Richer-value merge (longest description, earliest start, latest end, lowest price). Status-severity escalation (`scheduled` → `postponed` → `cancelled` → `past`). |
 | **Intelligence** | Anthropic Claude generates vibe tags from unstructured event descriptions. LLM-driven concierge intent parser (with deterministic keyword fallback) extracts intent + geography + timeframe from natural-language requests like *"date night in the Mission Saturday"*. |
 | **Ranking** | Multi-signal scoring: vibe match (50%) + popularity (25%) + freshness (15%) + diversity (10%). 30-day half-life decay on user behavioral signals. Consecutive-category penalty for spread. |
-| **Concierge** | Anchor + pre/post sequencing within a 0.5-mile radius of the main event. Inserts 30-minute travel buffers between stops. |
+| **Concierge** | Anchor + pre/post sequencing within a 0.5-mile radius of the main event. Inserts 30-minute travel buffers between stops. Plans export as a **portable itinerary** — a public mobile-first link plus a pasteable plain-text version, each stop carrying driving directions from the stop before it, parking, and food/drink searches around the venue. |
 | **Social** | Shared shortlist folders with invite-based membership, soft-RSVP votes, public share tokens, interest counts on event cards. |
 | **Frontend** | Next.js 15 / React 19 / Tailwind. Typed API client (`packages/api-client`) consumable by any client (web today, mobile later). |
 | **Agent access** | MCP server (`packages/mcp-server`) exposing 10 tools — search, event detail, itinerary building, recommendations, saves, folders, platform health — to Claude Desktop/Code over stdio. Wraps the HTTP API, so auth and rate limits are enforced in one place. |
@@ -113,7 +113,8 @@ To pull real data, set `TICKETMASTER_API_KEY` (and optionally `ANTHROPIC_API_KEY
 ```
 app/                  FastAPI backend (~7,400 LoC Python)
   api/                Routers: auth, discovery, social, health, internal_secrets
-  services/           recommender, concierge (LLM), data_pipeline (dedupe), vibe_tagger
+  services/           recommender, concierge (LLM), itinerary (portable export),
+                      data_pipeline (dedupe), vibe_tagger
   ingestion/          Source connectors, base classes, canary metrics
   models/             SQLModel ORM
   core/               config (with prod guard), database, security
@@ -138,6 +139,9 @@ All runtime config is read from environment variables — see [`.env.example`](.
 | `ANTHROPIC_API_KEY` | optional | Disables LLM vibe tagging and falls the concierge back to keyword intent parsing if blank |
 | `REDIS_URL` | optional | Required only if `AAIM_ENABLED=true` — see [Enabling AAIM key rotation](./docs/architecture.md#enabling-aaim-key-rotation) |
 | `PROXY_URL` / `PROXY_ROTATION` | optional | For scrapers behind aggressive bot protection |
+| `RATE_LIMIT_LLM_PER_HOUR` etc. | optional | Per-client inbound rate limits on the LLM-backed, share, and auth endpoints (defaults 30/60/20; `0` disables). Behind a reverse proxy, run uvicorn with `--proxy-headers` so limits key on the real client IP. |
+| `MAX_REQUEST_BODY_BYTES` | optional | Maximum API request body size (default 1 MB, including chunked bodies; `0` disables). |
+| `FORWARDED_ALLOW_IPS` | production proxy deployments | IP/CIDR allowlist for proxies whose forwarded-client headers Uvicorn may trust. Defaults to loopback; never use `*` on a directly reachable API port. |
 
 ## Documentation
 

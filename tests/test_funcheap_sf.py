@@ -2,7 +2,7 @@
 
 from datetime import date, datetime, timezone
 
-from app.ingestion.sources.funcheap_sf import FuncheapSFSource
+from app.ingestion.sources.funcheap_sf import SF_TZ, FuncheapSFSource
 
 
 def test_parse_absolute_date_to_iso8601_utc() -> None:
@@ -139,3 +139,113 @@ def test_extract_address_none_when_no_street() -> None:
     source = FuncheapSFSource(proxy=None)
     assert source._extract_address("Monday, June 15, 2026 - 7:00 pm | Cost: FREE") is None
     assert source._extract_address("") is None
+
+
+def test_day_index_urls_cover_the_horizon_including_the_coming_sunday() -> None:
+    """The crawl reaches per-day index pages, not just whatever the homepage promotes.
+
+    Regression for #16: from Thursday Jul 30 2026 the connector must reach
+    Sunday Aug 2 2026, whose free events were previously never ingested.
+    """
+    source = FuncheapSFSource(proxy=None)
+    urls = source._day_index_urls(horizon_days=4, today=date(2026, 7, 30))
+
+    assert urls == [
+        "https://sf.funcheap.com/2026/07/30/",
+        "https://sf.funcheap.com/2026/07/31/",
+        "https://sf.funcheap.com/2026/08/01/",
+        "https://sf.funcheap.com/2026/08/02/",
+    ]
+
+
+def test_day_index_urls_default_to_today_in_sf_time() -> None:
+    """Horizon starts from the current SF-local date when no date is supplied."""
+    source = FuncheapSFSource(proxy=None)
+    urls = source._day_index_urls(horizon_days=2)
+
+    today = datetime.now(SF_TZ).date()
+    assert urls[0] == today.strftime("https://sf.funcheap.com/%Y/%m/%d/")
+    assert len(urls) == 2
+
+
+def test_is_event_url_accepts_single_segment_event_slugs() -> None:
+    """Real event detail pages are single-segment slugs on sf.funcheap.com."""
+    source = FuncheapSFSource(proxy=None)
+    assert source._is_event_url(
+        "https://sf.funcheap.com/sfs-snowboard-ski-trick-workshop-house-of-air-88/"
+    )
+    assert source._is_event_url("https://sf.funcheap.com/castro-art-mart-2026/")
+
+
+def test_is_event_url_rejects_day_index_and_nav_pages() -> None:
+    """Day indexes are crawl entry points, not events; nav pages are never events."""
+    source = FuncheapSFSource(proxy=None)
+    for url in [
+        "https://sf.funcheap.com/2026/08/02/",
+        "https://sf.funcheap.com/events/",
+        "https://sf.funcheap.com/weekend/",
+        "https://sf.funcheap.com/about/",
+        "https://sf.funcheap.com/category/music/",
+        "https://sf.funcheap.com/venue/the-stud/",
+        "https://sf.funcheap.com/city-guide/august-street-fairs/",
+        "https://sf.funcheap.com/feed/",
+        "https://example.com/some-event/",
+    ]:
+        assert not source._is_event_url(url), url
+
+
+def test_cost_fields_marks_free_events_as_free() -> None:
+    """A free event must set is_free, not just price 0 (regression for #19)."""
+    source = FuncheapSFSource(proxy=None)
+    fields = source._cost_fields("Sunday, August 2, 2026 - 11:00 am to 5:00 pm | Cost: FREE")
+    assert fields == {"price": 0.0, "currency": "USD", "is_free": True}
+
+
+def test_cost_fields_free_despite_dollar_amounts_elsewhere_in_block() -> None:
+    """The detail block carries more than the cost; a nearby $ must not mask FREE.
+
+    'Manny's Neighborhood Trash Cleanup w/ $1 Beer' is a real Aug 2 event whose
+    admission is free — the old whole-string check returned $1 as the price.
+    """
+    source = FuncheapSFSource(proxy=None)
+    fields = source._cost_fields(
+        "Sunday, August 2, 2026 - 10:00 am | Cost: FREE | Manny's, $1 Beer after"
+    )
+    assert fields["is_free"] is True
+    assert fields["price"] == 0.0
+
+
+def test_cost_fields_reads_the_priced_cost_label() -> None:
+    """A priced event takes its price from the Cost: label, not a stray amount."""
+    source = FuncheapSFSource(proxy=None)
+    fields = source._cost_fields("Saturday, March 14, 2026 - 7pm | Cost: $10 | 21+")
+    assert fields == {"price": 10.0, "currency": "USD", "is_free": False}
+
+
+def test_cost_fields_unknown_cost_stays_null() -> None:
+    """No cost information means null, never a fabricated zero."""
+    source = FuncheapSFSource(proxy=None)
+    fields = source._cost_fields("Sunday, August 2, 2026 - 1:00 pm")
+    assert fields == {"price": None, "currency": None, "is_free": False}
+
+
+def test_cost_fields_falls_through_an_empty_cost_element_to_the_detail_block() -> None:
+    """An empty '.cost' element must not shadow the detail block (regression for #19).
+
+    funcheap renders the label and the value in different places: the .cost
+    element is often just ' | Cost:' while the real value sits in the detail
+    block, so `cost_text or detail_text` picked the useless one.
+    """
+    source = FuncheapSFSource(proxy=None)
+    fields = source._cost_fields(
+        " | Cost:",
+        "Sunday, August 2, 2026 - 10:00 am to 5:00 pm | Cost: FREE* Asian Art Museum",
+    )
+    assert fields["is_free"] is True
+    assert fields["price"] == 0.0
+
+
+def test_cost_fields_reads_free_with_a_footnote_asterisk() -> None:
+    """'FREE*' is how the site marks free-with-conditions; still free."""
+    source = FuncheapSFSource(proxy=None)
+    assert source._cost_fields("Cost: FREE*")["is_free"] is True

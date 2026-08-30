@@ -59,7 +59,8 @@ def test_ticketmaster_mapping_to_canonical_event_payload() -> None:
     assert mapped["title"] == "Bay Lights Festival"
     assert mapped["location"] == "POINT(-122.3872 37.7577)"
     assert "Music" in mapped["categories"]
-    assert "Headliner Artist" in mapped["tags"]
+    # Performer names are not vibes; they must not pollute the tag space.
+    assert mapped["tags"] == []
     assert mapped["status"] == "scheduled"
 
 

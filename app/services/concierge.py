@@ -11,6 +11,7 @@ import anthropic
 
 from app.core.config import get_settings
 from app.core.localtime import LOCAL_TZ
+from app.services.categories import FITNESS, query_targets_fitness
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,9 @@ class ParsedIntent:
     timeframe_label: str
     window_start: datetime
     window_end: datetime
+    # Canonical category to bias results toward (e.g. "Fitness" for a
+    # gym/workout request). None means no category preference.
+    category_focus: str | None = None
 
 
 @dataclass
@@ -59,7 +63,11 @@ def parse_intent_prompt(prompt: str, *, now: datetime | None = None) -> ParsedIn
         )
 
     intent = "general_night_out"
-    if "date night" in text:
+    category_focus: str | None = None
+    if query_targets_fitness(text):
+        intent = "active_day"
+        category_focus = FITNESS
+    elif "date night" in text:
         intent = "date_night"
     elif "out-of-town" in text or "visiting" in text or "guests" in text:
         intent = "out_of_town_guests"
@@ -74,6 +82,7 @@ def parse_intent_prompt(prompt: str, *, now: datetime | None = None) -> ParsedIn
         timeframe_label=timeframe_label,
         window_start=window_start,
         window_end=window_end,
+        category_focus=category_focus,
     )
 
 
@@ -99,17 +108,31 @@ def sequence_itinerary(
 
     stops: list[SequencedStop] = []
     if pre_event is not None:
-        stops.append(_build_stop(kind="pre_event_drink", event=pre_event, travel_buffer_minutes_before=0))
+        stops.append(
+            _build_stop(
+                kind="pre_event_drink", event=pre_event, travel_buffer_minutes_before=0
+            )
+        )
 
-    stops.append(_build_stop(kind="main_event", event=anchor, travel_buffer_minutes_before=30))
+    stops.append(
+        _build_stop(kind="main_event", event=anchor, travel_buffer_minutes_before=30)
+    )
 
     if post_event is not None:
-        stops.append(_build_stop(kind="late_night_snack", event=post_event, travel_buffer_minutes_before=30))
+        stops.append(
+            _build_stop(
+                kind="late_night_snack",
+                event=post_event,
+                travel_buffer_minutes_before=30,
+            )
+        )
 
     return stops
 
 
-def _build_stop(*, kind: str, event: EventLike, travel_buffer_minutes_before: int) -> SequencedStop:
+def _build_stop(
+    *, kind: str, event: EventLike, travel_buffer_minutes_before: int
+) -> SequencedStop:
     return SequencedStop(
         kind=kind,
         event_id=int(event.id or 0),
@@ -122,21 +145,49 @@ def _build_stop(*, kind: str, event: EventLike, travel_buffer_minutes_before: in
     )
 
 
+_GEOGRAPHIES = [
+    "noe valley",
+    "hayes valley",
+    "financial district",
+    "north beach",
+    "russian hill",
+    "nob hill",
+    "potrero hill",
+    "south bay",
+    "san francisco",
+    "san jose",
+    "oakland",
+    "berkeley",
+    "mission",
+    "castro",
+    "marina",
+    "richmond",
+    "sunset",
+    "dogpatch",
+    "tenderloin",
+    "downtown",
+    "fidi",
+    "soma",
+    "noe",
+    "sf",
+]
+
+
 def _extract_geography(text: str) -> str | None:
-    geographies = [
-        "oakland",
-        "san francisco",
-        "sf",
-        "berkeley",
-        "mission",
-        "soma",
-        "south bay",
-        "san jose",
-    ]
-    for geography in geographies:
-        if geography in text:
-            return geography
-    return None
+    # Pick the neighborhood that appears earliest in the request (so "noe
+    # downtown" resolves to the more specific "noe"), tie-broken toward the
+    # longer phrase ("noe valley" over "noe" at the same position).
+    best_key: tuple[int, int] | None = None
+    best_geo: str | None = None
+    for geography in _GEOGRAPHIES:
+        idx = text.find(geography)
+        if idx == -1:
+            continue
+        key = (idx, -len(geography))
+        if best_key is None or key < best_key:
+            best_key = key
+            best_geo = geography
+    return best_geo
 
 
 def _extract_timeframe(
@@ -144,12 +195,25 @@ def _extract_timeframe(
     *,
     now: datetime,
 ) -> tuple[str, datetime, datetime]:
+    # A named weekday is more specific than "this weekend" and is checked
+    # first: "date night this weekend on Sunday" means Sunday, and the LLM is
+    # already instructed to prefer the weekday. Matches a bare weekday too
+    # ("date night Sunday"), not just "this X".
+    named_weekday = next(
+        (
+            weekday_label
+            for weekday_label in _WEEKDAY_LABELS
+            if weekday_label.removeprefix("this_") in text
+        ),
+        None,
+    )
+
     if "tonight" in text:
         label = "tonight"
     elif "tomorrow" in text:
         label = "tomorrow"
-    elif "this saturday" in text:
-        label = "this_saturday"
+    elif named_weekday is not None:
+        label = named_weekday
     elif "this weekend" in text:
         label = "this_weekend"
     else:
@@ -167,15 +231,28 @@ _KNOWN_INTENTS = {
     "date_night",
     "out_of_town_guests",
     "bar_crawl",
+    "active_day",
     "general_night_out",
+}
+
+# Every weekday, not just Saturday: "Sunday" used to degrade to the whole
+# weekend, which then anchored on Saturday's earliest event.
+_WEEKDAY_LABELS = {
+    "this_monday": 0,
+    "this_tuesday": 1,
+    "this_wednesday": 2,
+    "this_thursday": 3,
+    "this_friday": 4,
+    "this_saturday": 5,
+    "this_sunday": 6,
 }
 
 _KNOWN_TIMEFRAMES = {
     "tonight",
     "tomorrow",
-    "this_saturday",
     "this_weekend",
     "upcoming_week",
+    *_WEEKDAY_LABELS,
 }
 
 
@@ -189,17 +266,24 @@ class ClaudeIntentParser:
 
     _SYSTEM = (
         "Extract structured intent from a user's event-planning request. "
-        "Return ONLY valid JSON matching this schema:\n"
-        '{"intent": one of ["date_night","out_of_town_guests","bar_crawl","general_night_out"],\n'
+        "Use intent 'active_day' when the user is asking about gyms, workout "
+        "classes, fitness, climbing, yoga, run clubs, or similar active/"
+        "participatory offers. Return ONLY valid JSON matching this schema:\n"
+        '{"intent": one of ["date_night","out_of_town_guests","bar_crawl","active_day","general_night_out"],\n'
         ' "geography": neighborhood/city string in lowercase or null,\n'
-        ' "timeframe": one of ["tonight","tomorrow","this_saturday","this_weekend","upcoming_week"]}'
+        ' "timeframe": one of ["tonight","tomorrow","this_monday","this_tuesday",'
+        '"this_wednesday","this_thursday","this_friday","this_saturday","this_sunday",'
+        '"this_weekend","upcoming_week"]}\n'
+        "Prefer a specific weekday over this_weekend when the request names one."
     )
 
     def __init__(self, *, api_key: str | None = None, model: str | None = None) -> None:
         settings = get_settings()
         self._api_key = api_key or settings.anthropic_api_key
         self._model = model or settings.anthropic_model
-        self._client = anthropic.AsyncAnthropic(api_key=self._api_key) if self._api_key else None
+        self._client = (
+            anthropic.AsyncAnthropic(api_key=self._api_key) if self._api_key else None
+        )
 
     async def parse(self, prompt: str, *, now: datetime) -> ParsedIntent | None:
         if self._client is None or not prompt or not prompt.strip():
@@ -212,7 +296,10 @@ class ClaudeIntentParser:
                 messages=[{"role": "user", "content": prompt.strip()}],
             )
         except Exception:
-            logger.warning("Claude intent parse failed; falling back to keyword parser.", exc_info=True)
+            logger.warning(
+                "Claude intent parse failed; falling back to keyword parser.",
+                exc_info=True,
+            )
             return None
 
         content = response.content[0].text if response.content else ""
@@ -223,13 +310,21 @@ class ClaudeIntentParser:
         intent = payload.get("intent")
         if intent not in _KNOWN_INTENTS:
             intent = "general_night_out"
+        # Deterministic safety net: an unmistakably fitness-oriented request
+        # maps to active_day even if the model classified it otherwise.
+        if query_targets_fitness(prompt):
+            intent = "active_day"
 
         timeframe = payload.get("timeframe")
         if timeframe not in _KNOWN_TIMEFRAMES:
             timeframe = "upcoming_week"
 
         geography_raw = payload.get("geography")
-        geography = geography_raw.strip().lower() if isinstance(geography_raw, str) and geography_raw.strip() else None
+        geography = (
+            geography_raw.strip().lower()
+            if isinstance(geography_raw, str) and geography_raw.strip()
+            else None
+        )
 
         window_start, window_end = _resolve_timeframe_window(timeframe, now=now)
         return ParsedIntent(
@@ -238,6 +333,7 @@ class ClaudeIntentParser:
             timeframe_label=timeframe,
             window_start=window_start,
             window_end=window_end,
+            category_focus=FITNESS if intent == "active_day" else None,
         )
 
     @staticmethod
@@ -253,7 +349,67 @@ class ClaudeIntentParser:
         return value if isinstance(value, dict) else None
 
 
-def _resolve_timeframe_window(label: str, *, now: datetime) -> tuple[datetime, datetime]:
+# Local hour ranges an anchor event may start in, per intent. A date night
+# doesn't begin with a 10am trampoline workshop; showing guests around does
+# want the whole day.
+_INTENT_ANCHOR_HOURS: dict[str, tuple[int, int]] = {
+    "date_night": (17, 23),
+    "bar_crawl": (17, 23),
+    "general_night_out": (17, 23),
+    "out_of_town_guests": (9, 23),
+}
+
+# Anonymous concierge callers still need content-level intent. These weights
+# use the same normalized vibe vocabulary as event tags and the recommender's
+# behavioral profile; authenticated profile scores are added to this baseline.
+_INTENT_VIBE_PROFILES: dict[str, dict[str, float]] = {
+    "date_night": {
+        "#date": 5.0,
+        "#chill": 3.0,
+        "#jazz": 2.0,
+        "#film": 2.0,
+        "#art": 2.0,
+        "#livemusic": 1.0,
+    },
+    "general_night_out": {
+        "#nightout": 5.0,
+        "#highenergy": 4.0,
+        "#social": 3.0,
+        "#nightlife": 3.0,
+        "#comedy": 2.0,
+        "#livemusic": 1.0,
+    },
+    "bar_crawl": {
+        "#nightlife": 5.0,
+        "#latenight": 4.0,
+        "#highenergy": 3.0,
+        "#social": 3.0,
+        "#foodanddrink": 2.0,
+    },
+    "out_of_town_guests": {
+        "#outdoors": 4.0,
+        "#art": 3.0,
+        "#livemusic": 2.0,
+        "#social": 2.0,
+        "#intellectual": 2.0,
+        "#festival": 1.0,
+    },
+}
+
+
+def anchor_hour_range(intent: str) -> tuple[int, int] | None:
+    """Preferred local start-hour range for an intent's anchor event."""
+    return _INTENT_ANCHOR_HOURS.get(intent)
+
+
+def intent_vibe_profile(intent: str) -> dict[str, float]:
+    """Return an isolated static vibe-score baseline for an intent."""
+    return dict(_INTENT_VIBE_PROFILES.get(intent, {}))
+
+
+def _resolve_timeframe_window(
+    label: str, *, now: datetime
+) -> tuple[datetime, datetime]:
     """Resolve a timeframe label to a UTC window computed in SF local time.
 
     Day windows run into the small hours of the next local morning so that
@@ -262,22 +418,30 @@ def _resolve_timeframe_window(label: str, *, now: datetime) -> tuple[datetime, d
     local_now = now.astimezone(LOCAL_TZ)
     day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    def _to_utc(start_local: datetime, end_local: datetime) -> tuple[datetime, datetime]:
+    def _to_utc(
+        start_local: datetime, end_local: datetime
+    ) -> tuple[datetime, datetime]:
         return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
 
     if label == "tonight":
-        return _to_utc(day_start.replace(hour=18), day_start + timedelta(days=1, hours=3))
+        return _to_utc(
+            day_start.replace(hour=18), day_start + timedelta(days=1, hours=3)
+        )
     if label == "tomorrow":
         tomorrow = day_start + timedelta(days=1)
         return _to_utc(tomorrow.replace(hour=10), tomorrow + timedelta(days=1, hours=2))
-    if label == "this_saturday":
-        days_until_sat = (5 - day_start.weekday()) % 7
-        saturday = day_start + timedelta(days=days_until_sat)
-        return _to_utc(saturday.replace(hour=10), saturday + timedelta(days=1, hours=2))
+    weekday = _WEEKDAY_LABELS.get(label)
+    if weekday is not None:
+        days_until = (weekday - day_start.weekday()) % 7
+        target = day_start + timedelta(days=days_until)
+        return _to_utc(target.replace(hour=10), target + timedelta(days=1, hours=2))
     if label == "this_weekend":
         days_until_sat = (5 - day_start.weekday()) % 7
         saturday = day_start + timedelta(days=days_until_sat)
-        return _to_utc(saturday.replace(hour=10), saturday + timedelta(days=1, hours=23, minutes=59))
+        return _to_utc(
+            saturday.replace(hour=10),
+            saturday + timedelta(days=1, hours=23, minutes=59),
+        )
     return now, now + timedelta(days=7)
 
 

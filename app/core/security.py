@@ -50,7 +50,7 @@ def _verify_hs256_token(token: str, settings: Settings) -> dict[str, Any]:
     return jwt.decode(
         token,
         settings.aaim_jwt_shared_secret,
-        algorithms=settings.aaim_jwt_algorithms,
+        algorithms=["HS256"],
         audience=settings.aaim_oidc_audience,
         issuer=settings.aaim_oidc_issuer,
         options=options,
@@ -63,12 +63,22 @@ def _verify_jwks_token(token: str, settings: Settings) -> dict[str, Any]:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="AAIM JWKS URL is not configured.",
         )
+    asymmetric_algorithms = [
+        algorithm
+        for algorithm in settings.aaim_jwt_algorithms
+        if algorithm.upper() != "HS256"
+    ]
+    if not asymmetric_algorithms:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No asymmetric AAIM JWT algorithm is configured.",
+        )
     signing_key = _get_jwk_client(settings.aaim_oidc_jwks_url).get_signing_key_from_jwt(token)
     options = {"verify_aud": settings.aaim_oidc_audience is not None}
     return jwt.decode(
         token,
         signing_key.key,
-        algorithms=settings.aaim_jwt_algorithms,
+        algorithms=asymmetric_algorithms,
         audience=settings.aaim_oidc_audience,
         issuer=settings.aaim_oidc_issuer,
         options=options,
@@ -83,7 +93,7 @@ def _decode_token(token: str, settings: Settings) -> dict[str, Any]:
     except jwt.PyJWTError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Token verification failed: {exc}",
+            detail="Token verification failed.",
         ) from exc
 
 

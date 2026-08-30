@@ -8,7 +8,6 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from app.core.config import get_settings
-from app.core.redaction import redact_secrets
 from app.ingestion.base import BaseSource
 from app.services.secrets_store import get_secrets_store
 
@@ -49,6 +48,11 @@ class TicketmasterSource(BaseSource):
     source_name = "ticketmaster"
     source_tier = 1
     base_url = "https://app.ticketmaster.com/discovery/v2"
+
+    # Set by fetch_events when a page failed and the window was only partially
+    # read. Class-level default so a caller can read it on a source that has
+    # not run yet.
+    last_fetch_error: str | None = None
 
     def __init__(
         self,
@@ -156,9 +160,9 @@ class TicketmasterSource(BaseSource):
         tm_page_cap = 1000 // min(size, _MAX_PAGE_SIZE)
         page_limit = min(_MAX_PAGES, tm_page_cap)
 
-        # A failed page means the window was only partially read. Recorded so
-        # the cursor is not advanced past events we never saw, and so the
-        # worker can report the source as failing rather than healthy.
+        # A failed page means the window was only partially read. Recorded so the
+        # cursor is not advanced past events we never saw, and so a caller can
+        # tell a half-read window from a legitimately small result.
         self.last_fetch_error = None
 
         while current_page < total_pages and current_page < page_limit:
@@ -166,10 +170,10 @@ class TicketmasterSource(BaseSource):
             try:
                 payload = await self._fetch_page(params)
             except Exception as exc:
-                self.last_fetch_error = (
-                    f"{type(exc).__name__} on page {current_page}: "
-                    f"{redact_secrets(str(exc))}"
-                )
+                # Type and page only: this string is meant to be surfaceable, and
+                # the message can carry the `?apikey=` from the failing request.
+                # The full exception goes to the log via exc_info.
+                self.last_fetch_error = f"{type(exc).__name__} on page {current_page}"
                 logger.warning(
                     "Ticketmaster page %d failed, stopping pagination.",
                     current_page,
@@ -222,7 +226,6 @@ class TicketmasterSource(BaseSource):
                 "re-read this window so no events are skipped.",
                 self.last_fetch_error,
             )
-
         logger.info(
             "Ticketmaster fetch complete: %d canonical events from %d pages",
             len(canonical_events),
@@ -310,15 +313,14 @@ class TicketmasterSource(BaseSource):
         return categories
 
     def _extract_tags(self, event: dict[str, Any]) -> list[str]:
-        tags: list[str] = []
-        attractions = event.get("_embedded", {}).get("attractions", [])
-        for attraction in attractions:
-            if not isinstance(attraction, dict):
-                continue
-            name = attraction.get("name")
-            if isinstance(name, str) and name and name not in tags:
-                tags.append(name)
-        return tags
+        """Ticketmaster exposes no vibe data, so contribute none.
+
+        This previously returned attraction names, which put performer and team
+        names ("San Francisco Giants") into the vibe tag space where they
+        matched no profile and diluted ranking. Vibe tags for these events come
+        from the LLM tagger instead.
+        """
+        return []
 
     def _pick_best_image(self, images: Any) -> str | None:
         if not isinstance(images, list) or not images:

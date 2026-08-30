@@ -153,3 +153,25 @@ def test_normalize_enforces_metadata_only_compliance() -> None:
     assert canonical.source.capture_mode == "email_ingest"
     assert canonical.description is not None
     assert len(canonical.description) <= 300
+
+
+def test_parsed_price_keeps_its_currency() -> None:
+    """Dropping OffersModel's USD default must not strip currency from real prices.
+
+    Eddie's List built OffersModel(price_min=..., is_free=...) without a
+    currency, so it relied on the removed default (review P2).
+    """
+    source = _make_source()
+    canonical = source.normalize_raw(
+        {
+            "title": "Jazz at the Chapel",
+            "source_url": "https://eddieslist.example.com/p/this-week#jazz",
+            "blurb": "Friday, June 12 @ 8pm — The Chapel. Tickets $25.",
+            "issue_date": datetime(2026, 6, 10, 16, 0, tzinfo=timezone.utc),
+            "issue_subject": "Eddie's List — This Week in SF",
+        }
+    )
+
+    assert canonical is not None
+    assert canonical.offers.price_min == 25.0
+    assert canonical.offers.currency == "USD"

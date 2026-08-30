@@ -82,7 +82,9 @@ class EventbriteSource(InputAgentSource):
                 lon=lon,
                 location_confidence=confidence,
             ),
-            offers=OffersModel(currency="USD"),
+            # The listing cards carry no price, so no currency either — a bare
+            # currency is metadata for a value that doesn't exist.
+            offers=OffersModel(),
             compliance=ComplianceModel(
                 retention_policy="metadata_only",
                 tos_risk="medium",

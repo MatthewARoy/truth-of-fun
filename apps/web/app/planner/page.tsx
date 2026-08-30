@@ -1,7 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import type { ConciergeResponse } from "@truth-of-fun/api-client";
+import type {
+  ConciergeResponse,
+  PortableItineraryResponse,
+} from "@truth-of-fun/api-client";
 import { apiClient } from "@/lib/api/client";
 import { useAuth } from "@/lib/auth-context";
 import { Button } from "@/components/ui/button";
@@ -9,6 +12,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { InlineNotice } from "@/components/ui/inline-notice";
+import { CopyButton } from "@/components/copy-button";
+import { ItinerarySteps } from "@/components/itinerary-steps";
 
 const EXAMPLE_PROMPTS = [
   "I want to plan a date in the Mission for midday Saturday, followed by some activity, with an easy extension into an evening.",
@@ -24,14 +29,23 @@ export default function PlannerPage() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ConciergeResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [shared, setShared] = useState<PortableItineraryResponse | null>(null);
+  const [sharing, setSharing] = useState(false);
+  const [shareError, setShareError] = useState<string | null>(null);
+
+  function resetResults() {
+    setResult(null);
+    setShared(null);
+    setError(null);
+    setShareError(null);
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!query.trim()) return;
 
     setLoading(true);
-    setError(null);
-    setResult(null);
+    resetResults();
     try {
       const response = await apiClient.buildItinerary({ query: query.trim() });
       setResult(response);
@@ -42,11 +56,42 @@ export default function PlannerPage() {
     }
   }
 
+  async function handleShare() {
+    if (!result) return;
+    setSharing(true);
+    setShareError(null);
+    try {
+      // Send the stops on screen rather than the prompt: re-planning server
+      // side could hand back a different night than the one being shared.
+      const response = await apiClient.shareItinerary({
+        query: query.trim(),
+        intent: result.intent,
+        timeframe: result.timeframe,
+        geography: result.geography,
+        anchor_event_id: result.anchor_event_id,
+        stops: result.itinerary.map((stop) => ({
+          kind: stop.kind,
+          event_id: stop.event_id,
+          travel_buffer_minutes_before: stop.travel_buffer_minutes_before,
+        })),
+      });
+      setShared(response);
+    } catch (err) {
+      setShareError(err instanceof Error ? err.message : "Failed to create share link");
+    } finally {
+      setSharing(false);
+    }
+  }
+
   function applyExamplePrompt(prompt: string) {
     setQuery(prompt);
-    setResult(null);
-    setError(null);
+    resetResults();
   }
+
+  const shareLink =
+    shared && typeof window !== "undefined"
+      ? `${window.location.origin}${shared.share_url}`
+      : shared?.share_url ?? "";
 
   return (
     <div className="mx-auto max-w-2xl space-y-6">
@@ -98,7 +143,7 @@ export default function PlannerPage() {
       {result && (
         <div className="space-y-4">
           <Card className="space-y-3">
-            <h3 className="text-lg font-semibold">Your Plan</h3>
+            <h3 className="text-lg font-semibold">{result.title || "Your Plan"}</h3>
             <div className="flex flex-wrap gap-2">
               {result.intent && <Badge active>{result.intent.replace(/_/g, " ")}</Badge>}
               {result.timeframe && <Badge>{result.timeframe}</Badge>}
@@ -111,65 +156,45 @@ export default function PlannerPage() {
               No events found matching your plan. Try broadening the area or timeframe.
             </InlineNotice>
           ) : (
-            <div className="relative space-y-0">
-              {result.itinerary.map((stop, idx) => (
-                <div key={idx} className="relative flex gap-4 pb-6">
-                  {/* Timeline line */}
-                  <div className="flex flex-col items-center">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-brand-500 text-sm font-bold text-white">
-                      {idx + 1}
-                    </div>
-                    {idx < result.itinerary.length - 1 && (
-                      <div className="w-px flex-1 bg-slate-700" />
-                    )}
-                  </div>
+            <>
+              <ItinerarySteps stops={result.itinerary} />
 
-                  {/* Stop card */}
-                  <Card className="flex-1 space-y-2">
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <h4 className="font-semibold">{stop.title}</h4>
-                        <p className="text-sm text-slate-400">
-                          {stop.venue_name || "Venue TBD"}
-                        </p>
-                      </div>
-                      <Badge active>{stop.kind.replace(/_/g, " ")}</Badge>
-                    </div>
-
-                    <p className="text-sm text-slate-300">
-                      {new Date(stop.start_at).toLocaleString(undefined, {
-                        weekday: "short",
-                        month: "short",
-                        day: "numeric",
-                        hour: "numeric",
-                        minute: "2-digit",
-                      })}
-                      {stop.end_at && (
-                        <> &mdash; {new Date(stop.end_at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</>
-                      )}
-                    </p>
-
-                    {stop.travel_buffer_minutes_before > 0 && (
-                      <p className="text-xs text-slate-500">
-                        {stop.travel_buffer_minutes_before} min travel time before
-                      </p>
-                    )}
-
-                    {stop.external_url && (
-                      <a
-                        href={stop.external_url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-block rounded-ui bg-emerald-800 px-3 py-1.5 text-xs text-emerald-100 transition hover:bg-emerald-700"
-                      >
-                        View / Get tickets
-                      </a>
-                    )}
-                  </Card>
+              {/* Take it with you */}
+              <Card className="space-y-3">
+                <div>
+                  <h3 className="font-semibold">Take it with you</h3>
+                  <p className="text-sm text-slate-400">
+                    A link that opens on any phone, or the whole plan as text you can
+                    paste into a message.
+                  </p>
                 </div>
-              ))}
-            </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <Button type="button" onClick={handleShare} disabled={sharing}>
+                    {sharing ? "Creating link..." : shared ? "Link created" : "Get shareable link"}
+                  </Button>
+                  <CopyButton value={result.text} label="Copy as text" />
+                </div>
+
+                {shareError && <InlineNotice tone="error">{shareError}</InlineNotice>}
+
+                {shared && (
+                  <div className="space-y-2">
+                    <a
+                      href={shared.share_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="block break-all rounded-ui border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs text-brand-200"
+                    >
+                      {shareLink}
+                    </a>
+                    <CopyButton value={shareLink} label="Copy link" />
+                  </div>
+                )}
+              </Card>
+            </>
           )}
+
         </div>
       )}
     </div>

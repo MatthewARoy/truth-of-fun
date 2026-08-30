@@ -22,10 +22,12 @@ dependencies = [
   "playwright-stealth",
   "anthropic",
   "python-Levenshtein",
+  "rapidfuzz",
   "pyjwt[crypto]",
   "redis",
   "bcrypt",
   "email-validator",
+  "tzdata",
 ]
 
 [tool.pytest.ini_options]

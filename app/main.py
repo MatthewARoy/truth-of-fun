@@ -13,6 +13,7 @@ from app.api.middleware import RequestContextMiddleware
 from app.api.social import router as social_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.core.request_limits import RequestBodyLimitMiddleware
 
 settings = get_settings()
 
@@ -58,9 +59,11 @@ app = FastAPI(
     ),
 )
 
-# Order matters: the request-context middleware is added last so it runs
-# outermost, and therefore sees the final status code of every request
-# (including CORS preflights and anything a later middleware rejects).
+# Order matters: add_middleware prepends, so the request-context middleware is
+# added last to run outermost and therefore see the final status code of every
+# request — including CORS preflights, and anything the body-size guard or a
+# later middleware rejects.
+app.add_middleware(RequestBodyLimitMiddleware, max_bytes=settings.max_request_body_bytes)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_allowed_origins,

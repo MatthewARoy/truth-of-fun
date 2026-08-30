@@ -95,7 +95,7 @@ class SFStationSource(InputAgentSource):
                 is_free=is_free,
                 price_min=price_min,
                 price_max=price_min,
-                currency="USD",
+                currency="USD" if price_min is not None else None,
                 price_text=price_text,
             ),
             category_tags=raw_item.get("category_tags", []),

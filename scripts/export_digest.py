@@ -53,8 +53,9 @@ def _format_price(*, is_free: bool, price: Decimal | None) -> str:
 def _format_when(start_at: datetime) -> str:
     """Render "<Ddd Mon D h:mma>" in local (SF) wall-clock time."""
     local = start_at.astimezone(LOCAL_TZ)
-    date_part = local.strftime("%a %b %-d")
-    time_part = local.strftime("%-I:%M%p").lower()
+    # No-pad flags (%-d, %-I) are glibc-only; build the unpadded parts by hand.
+    date_part = f"{local.strftime('%a %b')} {local.day}"
+    time_part = local.strftime("%I:%M%p").lstrip("0").lower()
     return f"{date_part} {time_part}"
 
 

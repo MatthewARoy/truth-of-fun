@@ -15,7 +15,9 @@ import type {
   InviteResponse,
   OnboardingRequest,
   OnboardingResponse,
+  PortableItineraryResponse,
   RecommendationResponse,
+  ShareItineraryRequest,
   SourceHealthEntry,
 } from "./types.js";
 
@@ -190,6 +192,19 @@ export class TruthOfFunApiClient {
       method: "POST",
       body: JSON.stringify(payload),
     });
+  }
+
+  async shareItinerary(
+    payload: ShareItineraryRequest
+  ): Promise<PortableItineraryResponse> {
+    return this.request<PortableItineraryResponse>("/concierge/itinerary/share", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async getSharedItinerary(token: string): Promise<PortableItineraryResponse> {
+    return this.request<PortableItineraryResponse>(`/shared/itineraries/${token}`);
   }
 
   // Health

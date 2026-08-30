@@ -15,10 +15,5 @@
     "api-client:build": "npm run build --workspace @truth-of-fun/api-client",
     "mcp-server:build": "npm run build --workspace @truth-of-fun/mcp-server",
     "mcp-server:typecheck": "npm run typecheck --workspace @truth-of-fun/mcp-server"
-  },
-  "overrides": {
-    "next@15.5.15": {
-      "postcss": "8.5.14"
-    }
   }
 }

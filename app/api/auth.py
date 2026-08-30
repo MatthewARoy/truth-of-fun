@@ -5,11 +5,12 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlmodel import Session, select
 
 from app.core.config import Settings, get_settings
 from app.core.database import get_session
+from app.core.ratelimit import auth_rate_limit
 from app.models.user import User
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -17,13 +18,27 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 class RegisterRequest(BaseModel):
     email: EmailStr
-    password: str
-    full_name: str | None = None
+    password: str = Field(min_length=12)
+    full_name: str | None = Field(default=None, max_length=255)
+
+    @field_validator("password")
+    @classmethod
+    def password_fits_bcrypt(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("Password must be at most 72 UTF-8 bytes.")
+        return value
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(min_length=1)
+
+    @field_validator("password")
+    @classmethod
+    def password_fits_bcrypt(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("Password must be at most 72 UTF-8 bytes.")
+        return value
 
 
 class AuthResponse(BaseModel):
@@ -39,6 +54,13 @@ def _hash_password(password: str) -> str:
 
 def _verify_password(plain_password: str, hashed_password: str) -> bool:
     return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
+
+
+# Keep unknown-user and wrong-password login paths close in cost so the API
+# does not become a high-signal account-enumeration timing oracle.
+_DUMMY_PASSWORD_HASH = bcrypt.hashpw(b"not-a-real-user-password", bcrypt.gensalt()).decode(
+    "utf-8"
+)
 
 
 def _create_access_token(*, user: User, settings: Settings) -> str:
@@ -59,6 +81,7 @@ def _create_access_token(*, user: User, settings: Settings) -> str:
     status_code=status.HTTP_201_CREATED,
     operation_id="register",
     summary="Create an account and return a JWT",
+    dependencies=[Depends(auth_rate_limit)],
 )
 def register(
     *,
@@ -97,6 +120,7 @@ def register(
     response_model=AuthResponse,
     operation_id="login",
     summary="Exchange credentials for a JWT",
+    dependencies=[Depends(auth_rate_limit)],
 )
 def login(
     *,
@@ -105,12 +129,13 @@ def login(
     settings: Settings = Depends(get_settings),
 ) -> AuthResponse:
     user = session.exec(select(User).where(User.email == payload.email)).first()
-    if user is None or not user.hashed_password:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password.",
-        )
-    if not _verify_password(payload.password, user.hashed_password):
+    password_hash = (
+        user.hashed_password
+        if user is not None and user.hashed_password
+        else _DUMMY_PASSWORD_HASH
+    )
+    password_valid = _verify_password(payload.password, password_hash)
+    if user is None or not user.hashed_password or not password_valid:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password.",

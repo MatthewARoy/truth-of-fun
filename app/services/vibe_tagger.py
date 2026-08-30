@@ -6,6 +6,7 @@ from typing import Protocol
 import anthropic
 
 from app.core.config import get_settings
+from app.services.tags import VIBE_VOCABULARY, canonical_vibe_tags
 
 
 class VibeTagger(Protocol):
@@ -26,9 +27,16 @@ class ClaudeVibeTagger:
         if self._client is None or not description or not description.strip():
             return []
 
+        # An unconstrained prompt free-associates and the vocabulary explodes:
+        # tags that appear once carry no ranking signal, and the profiles in
+        # ``_INTENT_VIBE_PROFILES`` never match anything. Offer a closed menu.
+        vocabulary = ", ".join(sorted(VIBE_VOCABULARY))
         prompt = (
-            "Generate 3 to 5 short vibe tags for the event description below. "
-            "Return only comma-separated tags, each beginning with # and no explanations.\n\n"
+            "Choose 3 to 5 vibe tags for the event description below.\n"
+            "You MUST choose only from this list, copied exactly:\n"
+            f"{vocabulary}\n\n"
+            "Return only comma-separated tags and no explanations. If fewer than "
+            "three fit, return only the ones that fit.\n\n"
             f"Description:\n{description.strip()}"
         )
 
@@ -49,25 +57,12 @@ class ClaudeVibeTagger:
         if not raw_content:
             return []
 
-        # Accept comma/newline-delimited output and normalize into hashtag tokens.
+        # Accept comma/newline-delimited output, then keep only recognised
+        # vocabulary -- the model can still invent tags despite the prompt.
         chunks = re.split(r"[,|\n]+", raw_content)
-        normalized: list[str] = []
-        for chunk in chunks:
-            cleaned = chunk.strip()
-            if not cleaned:
-                continue
-            cleaned = re.sub(r"^[\-\d\.\)\s]+", "", cleaned).strip()
-            if not cleaned:
-                continue
-
-            if not cleaned.startswith("#"):
-                cleaned = "#" + re.sub(r"\s+", "", cleaned)
-            else:
-                cleaned = "#" + re.sub(r"\s+", "", cleaned[1:])
-
-            if len(cleaned) <= 1:
-                continue
-            if cleaned not in normalized:
-                normalized.append(cleaned)
-
-        return normalized[:5]
+        candidates = [
+            re.sub(r"^[\-\d\.\)\s]+", "", chunk).strip()
+            for chunk in chunks
+            if chunk.strip()
+        ]
+        return canonical_vibe_tags(candidates)[:5]
