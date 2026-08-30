@@ -4,20 +4,28 @@ on:
   push:
     paths:
       - "app/**"
+      - "scripts/**"
       - "tests/**"
       - "alembic/**"
       - "alembic.ini"
       - "pyproject.toml"
       - "uv.lock"
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - ".env.example"
       - ".github/workflows/backend-ci.yml"
   pull_request:
     paths:
       - "app/**"
+      - "scripts/**"
       - "tests/**"
       - "alembic/**"
       - "alembic.ini"
       - "pyproject.toml"
       - "uv.lock"
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - ".env.example"
       - ".github/workflows/backend-ci.yml"
 
 jobs:
@@ -49,7 +57,11 @@ jobs:
         with:
           enable-cache: true
       - name: Install Python dependencies
-        run: uv sync
+        run: uv sync --frozen
+      - name: Audit locked Python dependencies
+        run: |
+          uv export --frozen --no-dev --no-emit-project --no-hashes --format requirements-txt --output-file /tmp/requirements.txt
+          uvx --python 3.11 --from pip-audit pip-audit -r /tmp/requirements.txt
       - name: Apply database migrations
         run: .venv/bin/alembic upgrade head
       - name: Run backend tests

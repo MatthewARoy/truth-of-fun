@@ -62,7 +62,7 @@ Request:
 ```json
 {
   "email": "string (email)",
-  "password": "string",
+  "password": "at least 12 characters; at most 72 UTF-8 bytes",
   "full_name": "string | null (optional)"
 }
 ```

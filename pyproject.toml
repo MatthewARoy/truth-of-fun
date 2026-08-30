@@ -27,6 +27,7 @@ dependencies = [
   "redis",
   "bcrypt",
   "email-validator",
+  "tzdata",
 ]
 
 [tool.pytest.ini_options]

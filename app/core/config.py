@@ -77,8 +77,11 @@ class Settings(BaseSettings):
         description="Optional HS256 secret for local/dev token verification.",
     )
     aaim_jwt_algorithms: list[str] = Field(
-        default=["RS256", "HS256"],
-        description="Allowed JWT signing algorithms for internal bot tokens.",
+        default=["RS256"],
+        description=(
+            "Allowed asymmetric JWT algorithms for OIDC/JWKS internal bot tokens. "
+            "HS256 is selected only by configuring AAIM_JWT_SHARED_SECRET."
+        ),
     )
     jwt_secret_key: str = Field(
         default="dev-only-insecure-secret-do-not-use-in-production",
@@ -90,11 +93,18 @@ class Settings(BaseSettings):
     )
     jwt_expire_minutes: int = Field(
         default=60 * 24 * 7,
+        ge=1,
         description="JWT expiration in minutes (default 7 days)",
+    )
+    max_request_body_bytes: int = Field(
+        default=1_000_000,
+        ge=0,
+        description="Maximum inbound HTTP request body size. 0 disables the guard.",
     )
 
     rate_limit_llm_per_hour: int = Field(
         default=30,
+        ge=0,
         description=(
             "Per-client hourly cap on endpoints that call the LLM per request "
             "(concierge itinerary builds, onboarding tag extraction). 0 disables."
@@ -102,6 +112,7 @@ class Settings(BaseSettings):
     )
     rate_limit_share_per_hour: int = Field(
         default=60,
+        ge=0,
         description=(
             "Per-client hourly cap on itinerary share creation (each share "
             "persists a public snapshot row). 0 disables."
@@ -109,6 +120,7 @@ class Settings(BaseSettings):
     )
     rate_limit_auth_per_quarter_hour: int = Field(
         default=20,
+        ge=0,
         description=(
             "Per-client cap on login/register attempts per 15 minutes "
             "(credential-stuffing and signup-abuse guard). 0 disables."
@@ -185,9 +197,35 @@ DEV_JWT_SECRET = "dev-only-insecure-secret-do-not-use-in-production"
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     settings = Settings()
-    if settings.app_env != "development" and settings.jwt_secret_key == DEV_JWT_SECRET:
+    if settings.app_env != "development" and (
+        settings.jwt_secret_key == DEV_JWT_SECRET
+        or len(settings.jwt_secret_key.encode("utf-8")) < 32
+    ):
         raise RuntimeError(
-            "JWT_SECRET_KEY must be set when APP_ENV is not 'development'. "
+            "JWT_SECRET_KEY must be at least 32 bytes and must not use the development default "
+            "when APP_ENV is not 'development'. "
             "Generate one with: python -c 'import secrets; print(secrets.token_urlsafe(48))'"
         )
+    if (
+        settings.app_env != "development"
+        and settings.cors_allow_credentials
+        and "*" in settings.cors_allowed_origins
+    ):
+        raise RuntimeError(
+            "CORS_ALLOWED_ORIGINS cannot contain '*' when credentials are enabled in production."
+        )
+    if settings.aaim_enabled and settings.app_env != "development":
+        if not settings.aaim_oidc_issuer or not settings.aaim_oidc_audience:
+            raise RuntimeError(
+                "AAIM_OIDC_ISSUER and AAIM_OIDC_AUDIENCE are required when AAIM is enabled "
+                "outside development."
+            )
+        if not settings.aaim_jwt_shared_secret and not settings.aaim_oidc_jwks_url:
+            raise RuntimeError(
+                "Configure AAIM_OIDC_JWKS_URL or AAIM_JWT_SHARED_SECRET when AAIM is enabled."
+            )
+        if settings.aaim_jwt_shared_secret and len(
+            settings.aaim_jwt_shared_secret.encode("utf-8")
+        ) < 32:
+            raise RuntimeError("AAIM_JWT_SHARED_SECRET must be at least 32 bytes.")
     return settings

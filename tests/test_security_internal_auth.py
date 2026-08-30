@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import jwt
 import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 
+from app.core import security
 from app.core.config import Settings
 from app.core.security import get_internal_principal, require_internal_scope
 
@@ -59,6 +61,30 @@ def test_get_internal_principal_rejects_invalid_audience() -> None:
         get_internal_principal(credentials=credentials, settings=settings)
 
     assert exc.value.status_code == 401
+    assert exc.value.detail == "Token verification failed."
+
+
+def test_jwks_mode_never_accepts_hmac_even_if_legacy_allowlist_contains_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_settings(
+        aaim_jwt_shared_secret=None,
+        aaim_oidc_jwks_url="https://issuer.local/.well-known/jwks.json",
+        aaim_jwt_algorithms=["RS256", "HS256"],
+    )
+    attacker_key = "attacker-controlled-hmac-key-123456"
+    token = _encode_token(attacker_key)
+    credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+    fake_client = SimpleNamespace(
+        get_signing_key_from_jwt=lambda _token: SimpleNamespace(key=attacker_key)
+    )
+    monkeypatch.setattr(security, "_get_jwk_client", lambda _url: fake_client)
+
+    with pytest.raises(HTTPException) as exc:
+        get_internal_principal(credentials=credentials, settings=settings)
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "Token verification failed."
 
 
 def test_require_internal_scope_raises_for_missing_scope() -> None:
