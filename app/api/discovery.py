@@ -300,12 +300,16 @@ def _canonical_tag_filter(vibe_tag: str):
     so filtering by ``#highenergy`` missed every event stored as ``HighEnergy``.
     Canonicalize both sides in SQL so the filter is correct against today's
     mixed-form rows as well as canonicalized ones.
+
+    The cast is load-bearing: ``events.tags`` is a plain ``JSON`` column and
+    Postgres has no ``jsonb_array_elements_text(json)`` overload, so without it
+    every tag-filtered query dies with "function ... does not exist".
     """
     forms = stored_forms_for(vibe_tag)
     if not forms:
         return text("FALSE")
 
-    element = func.jsonb_array_elements_text(Event.tags).column_valued("tag")
+    element = func.jsonb_array_elements_text(cast(Event.tags, JSONB)).column_valued("tag")
     normalized = func.regexp_replace(
         func.lower(func.ltrim(element, "#")), "[^a-z0-9+]", "", "g"
     )
