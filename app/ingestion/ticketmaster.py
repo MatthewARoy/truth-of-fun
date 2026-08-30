@@ -49,6 +49,11 @@ class TicketmasterSource(BaseSource):
     source_tier = 1
     base_url = "https://app.ticketmaster.com/discovery/v2"
 
+    # Set by fetch_events when a page failed and the window was only partially
+    # read. Class-level default so a caller can read it on a source that has
+    # not run yet.
+    last_fetch_error: str | None = None
+
     def __init__(
         self,
         *,
@@ -155,12 +160,25 @@ class TicketmasterSource(BaseSource):
         tm_page_cap = 1000 // min(size, _MAX_PAGE_SIZE)
         page_limit = min(_MAX_PAGES, tm_page_cap)
 
+        # A failed page means the window was only partially read. Recorded so the
+        # cursor is not advanced past events we never saw, and so a caller can
+        # tell a half-read window from a legitimately small result.
+        self.last_fetch_error = None
+
         while current_page < total_pages and current_page < page_limit:
             params["page"] = current_page
             try:
                 payload = await self._fetch_page(params)
-            except Exception:
-                logger.warning("Ticketmaster page %d failed, stopping pagination.", current_page)
+            except Exception as exc:
+                # Type and page only: this string is meant to be surfaceable, and
+                # the message can carry the `?apikey=` from the failing request.
+                # The full exception goes to the log via exc_info.
+                self.last_fetch_error = f"{type(exc).__name__} on page {current_page}"
+                logger.warning(
+                    "Ticketmaster page %d failed, stopping pagination.",
+                    current_page,
+                    exc_info=True,
+                )
                 break
 
             # Extract pagination metadata
@@ -195,8 +213,19 @@ class TicketmasterSource(BaseSource):
 
             current_page += 1
 
-        # Persist sync timestamp on success
-        _save_last_sync_timestamp(sync_started_at)
+        # Only advance the incremental cursor when the whole window was read.
+        # Saving it after a partial fetch means the next run filters on
+        # modifiedDate >= this timestamp, so every event on a page we never
+        # reached is skipped permanently — silent data loss on the highest-tier
+        # source. Re-fetching a window is cheap; losing it is not.
+        if self.last_fetch_error is None:
+            _save_last_sync_timestamp(sync_started_at)
+        else:
+            logger.warning(
+                "Ticketmaster sync cursor NOT advanced (%s) — the next run will "
+                "re-read this window so no events are skipped.",
+                self.last_fetch_error,
+            )
         logger.info(
             "Ticketmaster fetch complete: %d canonical events from %d pages",
             len(canonical_events),
