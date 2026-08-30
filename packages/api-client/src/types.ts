@@ -84,6 +84,7 @@ export type ConciergeResponse = {
   intent: string;
   timeframe: string;
   geography: string | null;
+  category_focus?: string | null;
   anchor_event_id: number | null;
   itinerary: ItineraryStopResponse[];
   /** Subject-line summary, e.g. "Date night in Mission — Sat, Aug 8". */
@@ -161,6 +162,7 @@ export type EventsQuery = {
    * fallbacks; pass 0 to include them. */
   min_location_confidence?: number;
   vibe_tag?: string;
+  category?: string;
   time_preset?: "tonight" | "this_weekend";
   location_preset?: "sf" | "oakland" | "san_jose";
   sort_by?: "date" | "distance";
