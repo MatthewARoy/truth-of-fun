@@ -20,3 +20,16 @@ class SourceHealthRecord(SQLModel, table=True):
     last_run_at: datetime | None = Field(
         default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
     )
+    # A source that raises and a source that legitimately returns nothing both
+    # record 0 events. Persisting the exception text distinguishes "the scraper
+    # broke" from "there was nothing on this weekend" without reading worker
+    # logs, and surfaces it through GET /health/sources.
+    last_error: str | None = Field(
+        default=None, sa_column=Column(String(length=1000), nullable=True)
+    )
+    last_error_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    last_success_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )

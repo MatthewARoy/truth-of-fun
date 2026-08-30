@@ -17,6 +17,13 @@ class BaseSource(ABC):
     MAX_RETRIES = 2
     BACKOFF_BASE_SECONDS = 1.0
 
+    #: Set by a source that recovered from a partial failure rather than
+    #: raising — e.g. paginated fetches that return the pages they did get.
+    #: The worker reads this after ``fetch_events`` so a partial fetch is
+    #: reported as failing instead of looking like a healthy small result.
+    #: Sources that raise on failure can leave it None.
+    last_fetch_error: str | None = None
+
     def __init__(
         self,
         *,
@@ -24,6 +31,7 @@ class BaseSource(ABC):
         timeout_seconds: float = 15.0,
         max_requests_per_second: int = 5,
     ) -> None:
+        self.last_fetch_error = None
         self._client = client
         self._owns_client = client is None
         self._timeout_seconds = timeout_seconds

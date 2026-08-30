@@ -79,6 +79,8 @@ def _create_access_token(*, user: User, settings: Settings) -> str:
     "/register",
     response_model=AuthResponse,
     status_code=status.HTTP_201_CREATED,
+    operation_id="register",
+    summary="Create an account and return a JWT",
     dependencies=[Depends(auth_rate_limit)],
 )
 def register(
@@ -113,7 +115,13 @@ def register(
     )
 
 
-@router.post("/login", response_model=AuthResponse, dependencies=[Depends(auth_rate_limit)])
+@router.post(
+    "/login",
+    response_model=AuthResponse,
+    operation_id="login",
+    summary="Exchange credentials for a JWT",
+    dependencies=[Depends(auth_rate_limit)],
+)
 def login(
     *,
     payload: LoginRequest,

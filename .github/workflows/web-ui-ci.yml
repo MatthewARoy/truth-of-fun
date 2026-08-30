@@ -5,6 +5,7 @@ on:
     paths:
       - "apps/web/**"
       - "packages/api-client/**"
+      - "packages/mcp-server/**"
       - ".github/workflows/web-ui-ci.yml"
       - "package.json"
       - "package-lock.json"
@@ -12,6 +13,7 @@ on:
     paths:
       - "apps/web/**"
       - "packages/api-client/**"
+      - "packages/mcp-server/**"
       - ".github/workflows/web-ui-ci.yml"
       - "package.json"
       - "package-lock.json"
@@ -31,6 +33,11 @@ jobs:
         run: npm audit --audit-level=high
       - name: Build shared api client
         run: npm run api-client:build
+      - name: Build MCP server
+        # Nothing else compiles this package, so without a step here a broken
+        # MCP server ships green. It imports the api-client's dist, so it has
+        # to run after that build.
+        run: npm run mcp-server:build
       - name: Lint web app
         run: npm run web:lint
       - name: Typecheck web app

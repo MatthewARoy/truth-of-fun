@@ -121,3 +121,59 @@ async def test_recorded_failure_reason_carries_no_credential(sync_state, monkeyp
     assert source.last_fetch_error is not None
     assert "SUPERSECRETVALUE1234" not in source.last_fetch_error
     assert "RuntimeError" in source.last_fetch_error
+async def test_worker_reports_a_partial_fetch_as_failing() -> None:
+    """A half-read window must not look like a healthy small result."""
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import Session, SQLModel, create_engine, select
+
+    from app.models.source_health import SourceHealthRecord
+    from app.worker import IngestionWorker, _source_health_state
+
+    _source_health_state.clear()
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine, tables=[SourceHealthRecord.__table__])
+
+    class _PartiallyFailingSource:
+        source_name = "ticketmaster"
+        last_fetch_error = "TimeoutError on page 2: upstream timed out"
+
+        async def fetch_events(self, **kwargs: Any) -> list[dict[str, Any]]:
+            return [{"title": "one event we did get"}]
+
+        async def close(self) -> None:
+            return None
+
+    class _Registry:
+        def list_sources(self) -> list[str]:
+            return ["ticketmaster"]
+
+        def create(self, name: str) -> Any:
+            return _PartiallyFailingSource()
+
+    class _Pipeline:
+        async def process_raw_events(
+            self, *, session: object, raw_events: list[dict[str, Any]]
+        ) -> dict[str, int]:
+            return {"inserted": len(raw_events), "updated": 0, "skipped": 0}
+
+    worker = IngestionWorker(
+        source_registry=_Registry(),
+        pipeline_service=_Pipeline(),
+        session_factory=lambda: Session(engine),
+        run_interval_seconds=1,
+    )
+
+    await worker.run_once()
+
+    with Session(engine) as session:
+        record = session.exec(select(SourceHealthRecord)).one()
+
+    assert record.status == "failing"
+    assert record.last_error is not None
+    assert "TimeoutError" in record.last_error
+    # The events it did return still counted.
+    assert record.last_event_count == 1

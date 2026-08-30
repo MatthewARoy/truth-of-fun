@@ -26,14 +26,29 @@ class _FakeSource:
         self._events = events
 
 
+class _FailingSource:
+    """A source whose fetch raises — distinct from one that returns nothing."""
+
+    def __init__(self, *, source_name: str, error: Exception) -> None:
+        self.source_name = source_name
+        self._error = error
+        self.closed = False
+
+    async def fetch_events(self, **kwargs: Any) -> list[dict[str, Any]]:
+        raise self._error
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 class _FakeRegistry:
-    def __init__(self, sources: dict[str, _FakeSource]) -> None:
+    def __init__(self, sources: dict[str, Any]) -> None:
         self._sources = sources
 
     def list_sources(self) -> list[str]:
         return sorted(self._sources.keys())
 
-    def create(self, name: str) -> _FakeSource:
+    def create(self, name: str) -> Any:
         return self._sources[name]
 
 
@@ -220,5 +235,91 @@ async def test_worker_persists_source_health_to_database() -> None:
         records = {r.source_name: r for r in session.exec(select(SourceHealthRecord)).all()}
     assert records["alpha"].status == "healthy"
     assert records["alpha"].last_event_count == 1
+    assert records["alpha"].last_error is None
+    assert records["alpha"].last_success_at is not None
     assert records["beta"].status == "degraded"
     assert records["beta"].consecutive_zeros == 1
+
+
+async def test_worker_persists_the_exception_text_when_a_source_raises() -> None:
+    """A broken scraper must be diagnosable from /health/sources, not just logs."""
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import Session, SQLModel, create_engine, select
+
+    from app.models.source_health import SourceHealthRecord
+    from app.worker import _source_health_state
+
+    # _source_health_state is module-level and accumulates across the suite;
+    # without this the persist step writes other tests' sources too.
+    _source_health_state.clear()
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine, tables=[SourceHealthRecord.__table__])
+
+    broken = _FailingSource(
+        source_name="funcheap_sf", error=TimeoutError("page.goto exceeded 30000ms")
+    )
+    worker = IngestionWorker(
+        source_registry=_FakeRegistry({"funcheap_sf": broken}),
+        pipeline_service=_FakePipeline(),
+        session_factory=lambda: Session(engine),
+        run_interval_seconds=1,
+    )
+
+    await worker.run_once()
+
+    with Session(engine) as session:
+        record = session.exec(select(SourceHealthRecord)).one()
+
+    # A raised exception is a harder signal than a zero count: fail immediately
+    # rather than climbing the consecutive-zero ladder first.
+    assert record.status == "failing"
+    assert record.last_error is not None
+    assert "TimeoutError" in record.last_error
+    assert "page.goto exceeded" in record.last_error
+    assert record.last_error_at is not None
+    assert record.last_success_at is None
+    assert broken.closed is True
+
+
+async def test_worker_clears_the_error_once_a_source_recovers() -> None:
+    """A recovered source must not keep displaying a stale failure."""
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import Session, SQLModel, create_engine, select
+
+    from app.models.source_health import SourceHealthRecord
+    from app.worker import _source_health_state
+
+    _source_health_state.clear()
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine, tables=[SourceHealthRecord.__table__])
+
+    sources: dict[str, Any] = {
+        "alpha": _FailingSource(source_name="alpha", error=RuntimeError("boom"))
+    }
+    worker = IngestionWorker(
+        source_registry=_FakeRegistry(sources),
+        pipeline_service=_FakePipeline(),
+        session_factory=lambda: Session(engine),
+        run_interval_seconds=1,
+    )
+    await worker.run_once()
+
+    sources["alpha"] = _FakeSource(source_name="alpha", events=[_event("a1")])
+    await worker.run_once()
+
+    with Session(engine) as session:
+        record = session.exec(select(SourceHealthRecord)).one()
+
+    assert record.status == "healthy"
+    assert record.last_error is None
+    assert record.last_success_at is not None
+    # The failure timestamp is retained as history even though the text cleared.
+    assert record.last_error_at is not None
