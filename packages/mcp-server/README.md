@@ -48,6 +48,7 @@ The API must be running (`make api`). Verify with `make status`.
 | `TOF_API_URL` | no | Defaults to `http://127.0.0.1:8000` |
 | `TOF_TOKEN` | no | A JWT from `POST /auth/login`. Enables the authenticated tools. |
 | `TOF_EMAIL` / `TOF_PASSWORD` | no | Alternative to `TOF_TOKEN`: exchanged for a JWT once at startup. |
+| `TOF_OPS_TOKEN` | no | Operator token for `get_platform_status`. Without it that one tool reports that the endpoint is gated; every other tool is unaffected. |
 
 Without credentials the read tools still work — the events API is
 unauthenticated. Personalization and anything that writes will return a clear

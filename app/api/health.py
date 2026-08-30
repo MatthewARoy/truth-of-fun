@@ -9,6 +9,7 @@ from sqlmodel import Session, select
 from app.core.config import get_settings
 from app.core.database import get_session
 from app.core.redaction import describe_exception, redact_secrets
+from app.core.security import require_ops_token
 from app.models.event import Event
 from app.models.source_health import SourceHealthRecord
 
@@ -64,7 +65,14 @@ def readiness(response: Response, session: Session = Depends(get_session)) -> di
     return {"status": "ready", "database": "connected"}
 
 
-@router.get("/sources", operation_id="getSourceHealth", summary="Per-source ingestion health")
+@router.get(
+    "/sources",
+    operation_id="getSourceHealth",
+    summary="Per-source ingestion health",
+    # Operator-only: this enumerates which scrapers are broken. /health,
+    # /health/live and /health/ready stay public for probes and load balancers.
+    dependencies=[Depends(require_ops_token)],
+)
 def source_health(session: Session = Depends(get_session)) -> dict[str, Any]:
     """Per-source health status showing last run, event counts, and tier.
 
@@ -81,6 +89,7 @@ def source_health(session: Session = Depends(get_session)) -> dict[str, Any]:
     "/summary",
     operation_id="getHealthSummary",
     summary="Single-call operational status: is anything broken right now?",
+    dependencies=[Depends(require_ops_token)],
 )
 def health_summary(session: Session = Depends(get_session)) -> dict[str, Any]:
     """Aggregate every health signal into one verdict plus a list of problems.

@@ -87,6 +87,16 @@ class Settings(BaseSettings):
         default=None,
         description="List of proxy URLs for rotation; used when proxy_rotation is set",
     )
+    ops_token: str = Field(
+        default="",
+        description=(
+            "Shared secret gating the operator health endpoints "
+            "(/health/sources, /health/summary) and the /admin pages that read "
+            "them. Sent as the X-Ops-Token header. Unset in development leaves "
+            "them open; unset anywhere else locks them shut."
+        ),
+    )
+
     aaim_enabled: bool = Field(
         default=False,
         description="Enable AAIM internal auth and secrets features.",
@@ -248,6 +258,15 @@ def get_settings() -> Settings:
     ):
         raise RuntimeError(
             "CORS_ALLOWED_ORIGINS cannot contain '*' when credentials are enabled in production."
+        )
+    if (
+        settings.app_env != "development"
+        and settings.ops_token
+        and len(settings.ops_token.encode("utf-8")) < 32
+    ):
+        raise RuntimeError(
+            "OPS_TOKEN must be at least 32 bytes when APP_ENV is not 'development'. "
+            "Generate one with: python -c 'import secrets; print(secrets.token_urlsafe(48))'"
         )
     if settings.aaim_enabled and settings.app_env != "development":
         if not settings.aaim_oidc_issuer or not settings.aaim_oidc_audience:

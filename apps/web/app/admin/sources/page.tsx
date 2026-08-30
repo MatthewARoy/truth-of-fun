@@ -1,11 +1,16 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { ApiClientError } from "@truth-of-fun/api-client";
 import type { HealthSummary, SourceHealthEntry } from "@truth-of-fun/api-client";
 import { apiClient } from "@/lib/api/client";
 import { Card } from "@/components/ui/card";
 import { InlineNotice } from "@/components/ui/inline-notice";
 import { cn } from "@/lib/cn";
+
+// sessionStorage, not localStorage: an operator secret should not outlive the
+// tab, and it never goes in the URL, where it would land in logs and history.
+const OPS_TOKEN_STORAGE_KEY = "tof.opsToken";
 
 const STATUS_CLASSES: Record<SourceHealthEntry["status"], string> = {
   healthy: "border-emerald-500/40 bg-emerald-500/10 text-emerald-200",
@@ -56,6 +61,10 @@ export default function AdminSourcesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshedAt, setRefreshedAt] = useState<Date | null>(null);
+  // These endpoints are gated by OPS_TOKEN, so a 403 is the expected state
+  // before an operator supplies one — not an error to shout about.
+  const [locked, setLocked] = useState(false);
+  const [tokenInput, setTokenInput] = useState("");
 
   async function load() {
     setLoading(true);
@@ -70,14 +79,38 @@ export default function AdminSourcesPage() {
       setSources(health.sources);
       setSummary(healthSummary);
       setRefreshedAt(new Date());
+      setLocked(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+      if (err instanceof ApiClientError && err.status === 403) {
+        setLocked(true);
+        setError(null);
+      } else {
+        setError(err instanceof Error ? err.message : "Unknown error");
+      }
     } finally {
       setLoading(false);
     }
   }
 
+  function applyToken(token: string) {
+    apiClient.setOpsToken(token);
+    try {
+      sessionStorage.setItem(OPS_TOKEN_STORAGE_KEY, token);
+    } catch {
+      // Private-mode browsers can refuse sessionStorage. The token still works
+      // for this page load; it just will not survive a refresh.
+    }
+  }
+
   useEffect(() => {
+    try {
+      const stored = sessionStorage.getItem(OPS_TOKEN_STORAGE_KEY);
+      if (stored) {
+        apiClient.setOpsToken(stored);
+      }
+    } catch {
+      // Ignore: load() reports the endpoints as locked and offers the form.
+    }
     void load();
     const interval = setInterval(() => void load(), 30_000);
     return () => clearInterval(interval);
@@ -108,6 +141,52 @@ export default function AdminSourcesPage() {
         </p>
       </div>
 
+      {locked ? (
+        <Card className="space-y-3">
+          <h3 className="font-medium">This page needs an operator token</h3>
+          <p className="text-sm text-slate-400">
+            <code className="rounded bg-slate-900 px-1">/health/sources</code> and{" "}
+            <code className="rounded bg-slate-900 px-1">/health/summary</code> report which
+            scrapers are failing, so they are gated behind{" "}
+            <code className="rounded bg-slate-900 px-1">OPS_TOKEN</code>. Paste the value the API
+            was started with; it is kept for this tab only.
+          </p>
+          <form
+            className="flex flex-col gap-2 sm:flex-row"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const value = tokenInput.trim();
+              if (!value) return;
+              applyToken(value);
+              setTokenInput("");
+              void load();
+            }}
+          >
+            <input
+              type="password"
+              value={tokenInput}
+              onChange={(event) => setTokenInput(event.target.value)}
+              placeholder="OPS_TOKEN"
+              aria-label="Operator token"
+              autoComplete="off"
+              className="flex-1 rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+            />
+            <button
+              type="submit"
+              disabled={!tokenInput.trim()}
+              className="rounded bg-slate-100 px-4 py-2 text-sm font-medium text-slate-900 disabled:opacity-50"
+            >
+              Unlock
+            </button>
+          </form>
+          <p className="text-xs text-slate-500">
+            No <code>OPS_TOKEN</code> set on the API? Outside development these endpoints stay
+            shut until one is configured &mdash; deliberately, so an unconfigured deployment does
+            not publish its ingestion state.
+          </p>
+        </Card>
+      ) : (
+        <>
       {workerStalled ? (
         <InlineNotice tone="error">
           <span className="font-medium">The ingestion worker looks stopped.</span> No source has
@@ -259,6 +338,8 @@ export default function AdminSourcesPage() {
         Auto-refreshes every 30 seconds.
         {refreshedAt ? ` Last fetched ${refreshedAt.toLocaleTimeString()}.` : null}
       </p>
+      </>
+      )}
     </section>
   );
 }
