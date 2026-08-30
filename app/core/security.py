@@ -263,7 +263,12 @@ def require_ops_token(
                 "Set it to enable operator access."
             ),
         )
-    if ops_token is None or not secrets.compare_digest(ops_token, settings.ops_token):
+    # Compare bytes, not str: Starlette decodes header values as latin-1, so a
+    # client can hand us a non-ASCII str, and compare_digest raises TypeError on
+    # those — turning a garbage token into a 500 instead of a 403.
+    if ops_token is None or not secrets.compare_digest(
+        ops_token.encode("utf-8"), settings.ops_token.encode("utf-8")
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"A valid {OPS_TOKEN_HEADER} header is required.",

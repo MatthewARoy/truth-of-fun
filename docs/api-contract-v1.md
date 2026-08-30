@@ -49,8 +49,8 @@ Abuse-prone endpoints enforce per-client sliding windows and return **429** with
 | GET | `/health` | none |
 | GET | `/health/live` | none |
 | GET | `/health/ready` | none |
-| GET | `/health/sources` | none |
-| GET | `/health/summary` | none |
+| GET | `/health/sources` | `X-Ops-Token` |
+| GET | `/health/summary` | `X-Ops-Token` |
 | GET | `/internal/secrets/{provider}/active-key` | AAIM JWT (`internal:secrets:read`) |
 | POST | `/internal/secrets/{provider}/usage` | AAIM JWT (`internal:secrets:write`) |
 | GET | `/internal/secrets/{provider}/health` | AAIM JWT (`internal:secrets:read`) |
@@ -509,7 +509,7 @@ Auth: none. Readiness probe. Returns `200` when the database answers, and
 
 ### GET /health/sources
 
-Auth: none. Per-source ingestion health, backed by the database (`source_health` records persisted by the worker), merged with in-process worker state (when fresher) and the source registry. Registered sources that have never run appear with `status: "unknown"`.
+Auth: `X-Ops-Token` header matching `OPS_TOKEN`. Per-source ingestion health, backed by the database (`source_health` records persisted by the worker), merged with in-process worker state (when fresher) and the source registry. Registered sources that have never run appear with `status: "unknown"`.
 
 Response:
 
@@ -537,7 +537,8 @@ zero count.
 
 ### GET /health/summary
 
-Auth: none. Every health signal rolled into one verdict plus an actionable
+Auth: `X-Ops-Token` header matching `OPS_TOKEN`. Every health signal rolled
+into one verdict plus an actionable
 problem list — the endpoint to poll when the question is "is anything broken?".
 See [the operations runbook](./operations.md).
 

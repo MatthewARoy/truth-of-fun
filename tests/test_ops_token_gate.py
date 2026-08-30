@@ -60,6 +60,24 @@ def test_operator_endpoints_are_refused_with_the_wrong_token(
 
 
 @pytest.mark.parametrize("path", GATED_PATHS)
+def test_a_non_ascii_token_is_refused_not_crashed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """Starlette decodes header values as latin-1, so this is reachable.
+
+    `secrets.compare_digest` raises TypeError on non-ASCII `str`, which turned
+    a garbage token into a 500 and an unhandled-exception traceback in the logs
+    of a security endpoint. Bytes are passed to it now. Sent pre-encoded
+    because httpx refuses to encode a non-ASCII header value itself.
+    """
+    _production(monkeypatch)
+    monkeypatch.setenv("OPS_TOKEN", OPS_TOKEN)
+
+    response = client.get(path, headers={b"X-Ops-Token": b"caf\xe9"})
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize("path", GATED_PATHS)
 def test_operator_endpoints_open_with_the_right_token(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str
 ) -> None:
