@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import secrets
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Callable
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlmodel import Session, select
 
@@ -228,3 +229,42 @@ def require_internal_scope(scope: str) -> Callable[[InternalPrincipal], Internal
         return principal
 
     return _dependency
+
+
+OPS_TOKEN_HEADER = "X-Ops-Token"
+
+
+def require_ops_token(
+    ops_token: str | None = Header(default=None, alias=OPS_TOKEN_HEADER),
+    settings: Settings = Depends(get_settings),
+) -> None:
+    """Gate the operator-only health surface behind a shared secret.
+
+    A separate header rather than ``Authorization`` on purpose: the API client
+    already puts the *user's* JWT there, so an operator who is also signed in
+    would otherwise have to choose between the two.
+
+    Three states, and the third is the one that matters:
+
+    - development with no token configured: open, so ``make demo`` and the
+      local admin page work with no setup.
+    - any environment with a token configured: the header must match it.
+    - anything other than development with no token configured: refused. An
+      unconfigured deployment fails closed rather than publishing which
+      scrapers are broken to anyone who guesses the path.
+    """
+    if not settings.ops_token:
+        if settings.app_env == "development":
+            return
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "This endpoint is disabled because OPS_TOKEN is not configured. "
+                "Set it to enable operator access."
+            ),
+        )
+    if ops_token is None or not secrets.compare_digest(ops_token, settings.ops_token):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"A valid {OPS_TOKEN_HEADER} header is required.",
+        )

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -49,9 +50,14 @@ def _dim(text: str) -> str:
     return f"{_DIM}{text}{_RESET}" if _USE_COLOR else text
 
 
-def fetch_summary(api_url: str, *, timeout: float) -> dict[str, Any]:
+def fetch_summary(
+    api_url: str, *, timeout: float, ops_token: str | None = None
+) -> dict[str, Any]:
     url = f"{api_url.rstrip('/')}/health/summary"
-    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    headers = {"Accept": "application/json"}
+    if ops_token:
+        headers["X-Ops-Token"] = ops_token
+    request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
@@ -102,11 +108,28 @@ def main() -> int:
         "--timeout", type=float, default=10.0, help="Request timeout in seconds"
     )
     parser.add_argument("--json", action="store_true", help="Print raw JSON instead")
+    parser.add_argument(
+        "--token",
+        default=os.environ.get("OPS_TOKEN"),
+        help="Operator token for /health/summary (default: $OPS_TOKEN)",
+    )
     args = parser.parse_args()
 
     try:
-        summary = fetch_summary(args.api_url, timeout=args.timeout)
+        summary = fetch_summary(
+            args.api_url, timeout=args.timeout, ops_token=args.token
+        )
     except urllib.error.HTTPError as exc:
+        if exc.code == 403:
+            print(
+                f"{args.api_url}/health/summary refused the request.\n"
+                "It is gated by OPS_TOKEN. Either export OPS_TOKEN (or pass "
+                "--token) with the value the API was started with, or, if the "
+                "API has no OPS_TOKEN set outside development, set one there — "
+                "an unconfigured deployment keeps this endpoint shut.",
+                file=sys.stderr,
+            )
+            return EXIT_UNREACHABLE
         print(f"API returned HTTP {exc.code} for {args.api_url}/health/summary", file=sys.stderr)
         return EXIT_UNREACHABLE
     except Exception as exc:

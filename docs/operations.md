@@ -40,8 +40,12 @@ Truth of Fun: DEGRADED
 | `GET /health/live` | no | Liveness probe. Only fails if the process is wedged. |
 | `GET /health/ready` | yes | Readiness probe. Returns 503 when Postgres is unreachable. |
 | `GET /health` | yes | Legacy combined check; the compose healthcheck uses it. |
-| `GET /health/sources` | yes | Per-source detail: status, last run, last error. |
-| `GET /health/summary` | yes | Everything above rolled into one verdict + problem list. |
+| `GET /health/sources` | yes | Per-source detail: status, last run, last error. **Operator token.** |
+| `GET /health/summary` | yes | Everything above rolled into one verdict + problem list. **Operator token.** |
+
+The bottom two require an `X-Ops-Token` header matching `OPS_TOKEN`. The
+probes above them never do — the compose healthcheck hits `/health`, and
+orchestrators hit `/live` and `/ready`, none of which can carry a secret.
 
 Liveness and readiness are deliberately separate: a brief database outage
 should take the API *out of the load balancer*, not trigger a restart loop.
@@ -165,9 +169,27 @@ Run `make seed` for demo data, or `make worker` to ingest real data.
 
 ## What health endpoints do and don't reveal
 
-`/health/*` is **unauthenticated**. Treat it as public and firewall it if that
-is not acceptable — nothing in it is secret by design, but it does describe
-your ingestion state.
+The probes (`/health`, `/health/live`, `/health/ready`) are public and say
+only whether the process and its database are up.
+
+`/health/sources` and `/health/summary` describe your ingestion state — which
+scrapers are failing, when each last ran, what the last error was — so they
+are gated behind `OPS_TOKEN`, sent as an `X-Ops-Token` header.
+
+Three states, and the third is the one that matters:
+
+- development with no `OPS_TOKEN`: open, so `make demo` needs no setup.
+- any environment with `OPS_TOKEN` set: the header must match it.
+- anything other than development with no `OPS_TOKEN`: **refused**. A
+  deployment whose operator never thought about this fails closed rather
+  than publishing its ingestion state to anyone who guesses the path.
+
+Generate one with `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
+Outside development the API refuses to boot if it is shorter than 32 bytes.
+
+Consumers: `make status` reads `$OPS_TOKEN` (or `--token`), the MCP server
+reads `TOF_OPS_TOKEN`, and `/admin/sources` prompts for it and keeps it in
+sessionStorage for that tab.
 
 Exception text is handled carefully because it is where credentials leak:
 psycopg2 puts the connection DSN (including the password) in its errors, and
@@ -205,8 +227,10 @@ simplest version.
 - [ ] `ALERT_WEBHOOK_URL` set and tested.
 - [ ] `LOG_FORMAT=json` in the deployed environment (already the compose default).
 - [ ] `EXPOSE_ERROR_DETAIL` left unset (defaults to false outside development).
-- [ ] `/health/*` and `/admin/*` firewalled or fronted by auth — neither has any
-      today, and the admin page shows ingestion internals.
+- [ ] `OPS_TOKEN` set, so `/health/sources`, `/health/summary` and the
+      `/admin/sources` page that reads them are reachable by you and not by
+      the public. Without it they are refused outside development, which is
+      safe but leaves you no status page.
 - [ ] `make status` returns `ok` against the deployed API.
 - [ ] A scheduled `make status` check exists, so a stalled worker is noticed
       without anyone looking.

@@ -33,6 +33,10 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const client = new TruthOfFunApiClient(config.apiUrl);
 
+  if (config.opsToken) {
+    client.setOpsToken(config.opsToken);
+  }
+
   if (config.token) {
     client.setToken(config.token);
     log("Using TOF_TOKEN for authenticated tools.");

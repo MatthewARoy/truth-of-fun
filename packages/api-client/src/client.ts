@@ -40,6 +40,7 @@ type RequestOptions = {
 export class TruthOfFunApiClient {
   private readonly baseUrl: string;
   private token: string | null = null;
+  private opsToken: string | null = null;
 
   constructor(baseUrl: string) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
@@ -51,6 +52,19 @@ export class TruthOfFunApiClient {
 
   getToken(): string | null {
     return this.token;
+  }
+
+  /**
+   * Operator token for the gated health endpoints (/health/sources,
+   * /health/summary). Sent as X-Ops-Token, deliberately not Authorization:
+   * that carries the signed-in user's JWT, and an operator is usually both.
+   */
+  setOpsToken(token: string | null) {
+    this.opsToken = token;
+  }
+
+  getOpsToken(): string | null {
+    return this.opsToken;
   }
 
   private async request<T>(
@@ -83,6 +97,9 @@ export class TruthOfFunApiClient {
     };
     if (this.token) {
       headers["Authorization"] = `Bearer ${this.token}`;
+    }
+    if (this.opsToken) {
+      headers["X-Ops-Token"] = this.opsToken;
     }
 
     while (attempts <= retries) {

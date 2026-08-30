@@ -140,6 +140,7 @@ All runtime config is read from environment variables — see [`.env.example`](.
 | `REDIS_URL` | optional | Required only if `AAIM_ENABLED=true` — see [Enabling AAIM key rotation](./docs/architecture.md#enabling-aaim-key-rotation) |
 | `PROXY_URL` / `PROXY_ROTATION` | optional | For scrapers behind aggressive bot protection |
 | `RATE_LIMIT_LLM_PER_HOUR` etc. | optional | Per-client inbound rate limits on the LLM-backed, share, and auth endpoints (defaults 30/60/20; `0` disables). Behind a reverse proxy, run uvicorn with `--proxy-headers` so limits key on the real client IP. |
+| `OPS_TOKEN` | yes for non-dev | Gates `GET /health/sources`, `GET /health/summary`, and the `/admin/sources` page that reads them, via an `X-Ops-Token` header. The `/health`, `/health/live` and `/health/ready` probes stay public. Unset in development leaves the gated endpoints open; unset anywhere else refuses them. Must be at least 32 bytes outside development. |
 | `MAX_REQUEST_BODY_BYTES` | optional | Maximum API request body size (default 1 MB, including chunked bodies; `0` disables). |
 | `FORWARDED_ALLOW_IPS` | production proxy deployments | IP/CIDR allowlist for proxies whose forwarded-client headers Uvicorn may trust. Defaults to loopback; never use `*` on a directly reachable API port. |
 
