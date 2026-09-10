@@ -59,6 +59,7 @@ def _build_client() -> Generator[TestClient, None, None]:
                     title VARCHAR NOT NULL,
                     description VARCHAR,
                     start_at TIMESTAMP NOT NULL,
+                    start_time_is_estimated BOOLEAN NOT NULL DEFAULT 0,
                     end_at TIMESTAMP,
                     source_name VARCHAR NOT NULL,
                     source_tier INTEGER NOT NULL,

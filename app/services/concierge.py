@@ -20,6 +20,7 @@ class EventLike(Protocol):
     id: int | None
     title: str
     start_at: datetime
+    start_time_is_estimated: bool
     end_at: datetime | None
     source_tier: int
     venue_name: str | None
@@ -44,6 +45,8 @@ class SequencedStop:
     event_id: int
     title: str
     start_at: datetime
+    # The stop's clock time is a connector placeholder; only the day is real.
+    start_time_is_estimated: bool
     end_at: datetime | None
     venue_name: str | None
     external_url: str | None
@@ -138,6 +141,7 @@ def _build_stop(
         event_id=int(event.id or 0),
         title=event.title,
         start_at=event.start_at,
+        start_time_is_estimated=event.start_time_is_estimated,
         end_at=event.end_at,
         venue_name=event.venue_name,
         external_url=event.external_url,

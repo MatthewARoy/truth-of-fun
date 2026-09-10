@@ -16,8 +16,10 @@ from app.ingestion.input_agent import InputAgentSource
 from app.ingestion.venue_cache import lookup_venue_coordinates
 
 SF_TZ = ZoneInfo("America/Los_Angeles")
-# Listings expose an explicit calendar date but no wall-clock time, so we display
-# a sensible evening default. The date itself is always taken from the page.
+# Most listings expose an explicit calendar date but no wall-clock time, so we
+# fall back to a sensible evening default. The date itself is always taken from
+# the page, and the record is flagged start_time_is_estimated so nothing
+# downstream mistakes the placeholder hour for a published one.
 DEFAULT_EVENT_HOUR = 19
 
 
@@ -45,10 +47,11 @@ class EventbriteSource(InputAgentSource):
         if not title or not source_url:
             return None
 
-        start_time = self._parse_listing_date(raw_item.get("start_date"))
-        if start_time is None:
+        parsed_start = self._parse_listing_date(raw_item.get("start_date"))
+        if parsed_start is None:
             # No explicit date on the page => drop, never default to "today".
             return None
+        start_time, start_time_is_estimated = parsed_start
 
         location_text = self._pick_first_str(raw_item, "venue_name")
         lat, lon = self._resolve_coordinates(raw_item, location_text)
@@ -72,6 +75,7 @@ class EventbriteSource(InputAgentSource):
             title=title,
             description=self._pick_first_str(raw_item, "description"),
             start_time=start_time,
+            start_time_is_estimated=start_time_is_estimated,
             location=LocationModel(
                 venue_name=location_text,
                 address_line1=self._pick_first_str(raw_item, "street_address"),
@@ -208,17 +212,25 @@ class EventbriteSource(InputAgentSource):
             return coords[0], coords[1]
         return None, None
 
-    def _parse_listing_date(self, value: Any) -> datetime | None:
-        """Parse an explicit ISO date (YYYY-MM-DD[...]) into a tz-aware datetime.
+    def _parse_listing_date(self, value: Any) -> tuple[datetime, bool] | None:
+        """Parse an ISO ``startDate`` into (UTC datetime, time_is_estimated).
 
-        Only the wall-clock time defaults; the calendar date must be present and
-        is never invented.
+        schema.org allows either a bare date or a full timestamp. A published
+        time is used as-is; otherwise only the wall-clock time defaults, and the
+        caller is told so. The calendar date must be present and is never
+        invented.
         """
         if not isinstance(value, str) or not value.strip():
             return None
-        match = re.match(r"(\d{4})-(\d{2})-(\d{2})", value.strip())
+        text = value.strip()
+        match = re.match(r"(\d{4})-(\d{2})-(\d{2})", text)
         if not match:
             return None
+
+        explicit = self._parse_explicit_timestamp(text)
+        if explicit is not None:
+            return explicit, False
+
         year, month, day = (int(group) for group in match.groups())
         try:
             local_dt = datetime(
@@ -226,7 +238,21 @@ class EventbriteSource(InputAgentSource):
             )
         except ValueError:
             return None
-        return local_dt.astimezone(timezone.utc)
+        return local_dt.astimezone(timezone.utc), True
+
+    @staticmethod
+    def _parse_explicit_timestamp(text: str) -> datetime | None:
+        """Return a UTC datetime when the value carries a real time, else None."""
+        if "T" not in text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            # Eventbrite renders local times; a naive stamp is SF wall clock.
+            parsed = parsed.replace(tzinfo=SF_TZ)
+        return parsed.astimezone(timezone.utc)
 
     def _clean_url(self, value: Any) -> str:
         url = self._clean_text(value)
@@ -236,9 +262,9 @@ class EventbriteSource(InputAgentSource):
         return url.split("?", 1)[0]
 
     def _iso_date(self, value: Any) -> str:
+        """Keep the whole ISO stamp: truncating to a date discards a real time."""
         text = self._clean_text(value)
-        match = re.match(r"(\d{4}-\d{2}-\d{2})", text)
-        return match.group(1) if match else ""
+        return text if re.match(r"\d{4}-\d{2}-\d{2}", text) else ""
 
     def _to_float(self, value: Any) -> float | None:
         if isinstance(value, (int, float)):

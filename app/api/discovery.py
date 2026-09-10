@@ -47,6 +47,9 @@ class EventResponse(BaseModel):
     title: str
     description: str | None
     start_at: datetime
+    # The date is real; the clock time is a connector placeholder. Clients must
+    # not render a precise time when this is true.
+    start_time_is_estimated: bool = False
     end_at: datetime | None
     external_url: str | None
     venue_name: str | None
@@ -113,6 +116,8 @@ class ItineraryStopResponse(BaseModel):
     event_id: int
     title: str
     start_at: datetime
+    # Defaulted so snapshots frozen before the flag existed still rehydrate.
+    start_time_is_estimated: bool = False
     end_at: datetime | None
     venue_name: str | None
     external_url: str | None
@@ -228,6 +233,7 @@ def _serialize_event(event: Event, *, people_interested: int = 0) -> EventRespon
         title=event.title,
         description=event.description,
         start_at=event.start_at,
+        start_time_is_estimated=bool(event.start_time_is_estimated),
         end_at=event.end_at,
         external_url=event.external_url,
         venue_name=event.venue_name,
@@ -823,7 +829,14 @@ async def build_concierge_itinerary(
             local_hour = func.extract(
                 "hour", func.timezone(str(LOCAL_TZ), Event.start_at)
             )
-            stmt = stmt.where(local_hour >= hours[0], local_hour <= hours[1])
+            # An estimated 19:00 lands inside every evening intent's range, so
+            # placeholders would out-compete events that really do start then.
+            # The unrestricted fallback query below still considers them.
+            stmt = stmt.where(
+                Event.start_time_is_estimated.is_(False),
+                local_hour >= hours[0],
+                local_hour <= hours[1],
+            )
         # No SQL limit: only one of these rows becomes the anchor, and the
         # choice is made by vibe ranking below. Cutting the set down to the
         # earliest `payload.limit` rows first (that field sizes the itinerary
@@ -925,6 +938,7 @@ async def build_concierge_itinerary(
                     event_id=item.event_id,
                     title=item.title,
                     start_at=item.start_at,
+                    start_time_is_estimated=item.start_time_is_estimated,
                     end_at=item.end_at,
                     venue_name=item.venue_name,
                     external_url=item.external_url,
@@ -970,6 +984,9 @@ def _portable_response(itinerary: SavedItinerary) -> PortableItineraryResponse:
                     event_id=int(stop.get("event_id") or 0),
                     title=str(stop.get("title") or "Untitled"),
                     start_at=datetime.fromisoformat(stop["start_at"]),
+                    start_time_is_estimated=bool(
+                        stop.get("start_time_is_estimated", False)
+                    ),
                     end_at=(
                         datetime.fromisoformat(stop["end_at"])
                         if stop.get("end_at")
@@ -1052,6 +1069,7 @@ def share_concierge_itinerary(
                 "event_id": int(event.id or 0),
                 "title": event.title,
                 "start_at": event.start_at.isoformat(),
+                "start_time_is_estimated": bool(event.start_time_is_estimated),
                 "end_at": event.end_at.isoformat() if event.end_at else None,
                 "venue_name": event.venue_name,
                 "address": event.raw_address,

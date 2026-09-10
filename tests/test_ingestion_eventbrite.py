@@ -183,3 +183,54 @@ def test_offers_omit_currency_when_no_price_is_known() -> None:
     assert event is not None
     assert event.offers.price_min is None
     assert event.offers.currency is None
+
+
+def test_eventbrite_flags_the_defaulted_wall_clock_time() -> None:
+    """A date-only listing gets a placeholder hour - and says so."""
+    source = EventbriteSource()
+    candidates = source._extract_listing_candidates(LIVE_LDJSON_HTML)
+    event = source.normalize_raw(candidates[0])
+
+    assert event is not None
+    assert event.start_time_is_estimated is True
+    payload = event.to_legacy_event_payload(source_tier=source.source_tier)
+    assert payload["start_time_is_estimated"] is True
+
+
+def test_eventbrite_keeps_an_explicit_start_time_unflagged() -> None:
+    """schema.org startDate may carry a real time; when it does, use it."""
+    source = EventbriteSource()
+    raw_item = {
+        "title": "Sunset Rooftop Session",
+        "source_url": "https://www.eventbrite.com/e/sunset-rooftop-tickets-321",
+        "source_record_id": "https://www.eventbrite.com/e/sunset-rooftop-tickets-321",
+        "start_date": "2026-06-20T14:30:00-07:00",
+        "venue_name": "620 Jones",
+        "lat": "37.787177",
+        "lon": "-122.412987",
+    }
+
+    event = source.normalize_raw(raw_item)
+
+    assert event is not None
+    assert event.start_time_is_estimated is False
+    assert event.start_time == datetime(2026, 6, 20, 21, 30, tzinfo=timezone.utc)
+
+
+def test_eventbrite_candidate_preserves_the_time_component() -> None:
+    """The listing parser must not truncate a real timestamp to a bare date."""
+    source = EventbriteSource()
+    html = """
+    <script type="application/ld+json">
+    {"@context":"https://schema.org","@type":"Event",
+     "name":"Sunset Rooftop Session",
+     "url":"https://www.eventbrite.com/e/sunset-rooftop-tickets-321",
+     "startDate":"2026-06-20T14:30:00-07:00",
+     "location":{"@type":"Place","name":"620 Jones",
+       "geo":{"@type":"GeoCoordinates","latitude":"37.787177","longitude":"-122.412987"}}}
+    </script>
+    """
+    candidates = source._extract_listing_candidates(html)
+
+    assert len(candidates) == 1
+    assert candidates[0]["start_date"] == "2026-06-20T14:30:00-07:00"

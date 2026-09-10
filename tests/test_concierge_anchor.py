@@ -373,3 +373,74 @@ def test_a_post_anchor_stop_survives_a_small_itinerary_limit(
         "late_night_snack",
     ]
     assert payload["itinerary"][-1]["title"] == "support-after-2200"
+
+
+@pytest.fixture
+def sunday_estimated_and_real_evening_events():
+    """Two Sunday evening candidates: one real 8pm show, one 7pm placeholder."""
+    engine = create_engine(get_settings().database_url)
+    rows = [
+        ("anchor-estimated-brunch", _next_sunday_at(19), True),
+        ("anchor-real-evening-show", _next_sunday_at(20), False),
+    ]
+    with engine.begin() as connection:
+        for title, start_at, estimated in rows:
+            connection.execute(
+                text(
+                    "INSERT INTO events (title, start_at, start_time_is_estimated,"
+                    " source_name, source_tier, location, categories, tags, status,"
+                    " attendee_count, location_confidence, is_free, venue_name,"
+                    " raw_address, created_at, updated_at)"
+                    " VALUES (:title, :start_at, :estimated, 'test-anchor-estimated', 2,"
+                    " ST_SetSRID(ST_MakePoint(-122.4194, 37.7749), 4326), '[]', '[]',"
+                    " 'scheduled', 0, 1.0, false, 'Test Venue',"
+                    " 'Test Venue, San Francisco, CA', now(), now())"
+                ),
+                {"title": title, "start_at": start_at, "estimated": estimated},
+            )
+    yield
+    with engine.begin() as connection:
+        connection.execute(
+            text("DELETE FROM events WHERE source_name = 'test-anchor-estimated'")
+        )
+    engine.dispose()
+
+
+def test_intent_hours_do_not_anchor_on_a_placeholder_time(
+    sunday_estimated_and_real_evening_events,
+) -> None:
+    """A defaulted 19:00 lands inside every evening range without earning it.
+
+    The Eventbrite connector stamps 19:00 when a listing publishes no time, so
+    an R&B brunch would out-rank a show that genuinely starts in the evening.
+    """
+    client = TestClient(app)
+    response = client.post(
+        "/concierge/itinerary",
+        json={"query": "date night in San Francisco Sunday", "limit": 10},
+    )
+
+    assert response.status_code == 200
+    assert _anchor_title(response.json()) != "anchor-estimated-brunch"
+
+
+def test_the_api_reports_an_estimated_start_time(
+    sunday_estimated_and_real_evening_events,
+) -> None:
+    """Clients need the flag to avoid rendering the placeholder as a clock time."""
+    client = TestClient(app)
+    # Bounded to the fixture's own Sunday evening: the shared dev database
+    # holds thousands of rows, so an unbounded page would not reach these.
+    response = client.get(
+        "/events",
+        params={
+            "start_at": _next_sunday_at(18).isoformat(),
+            "end_at": _next_sunday_at(21).isoformat(),
+            "limit": 100,
+        },
+    )
+
+    assert response.status_code == 200
+    by_title = {event["title"]: event for event in response.json()}
+    assert by_title["anchor-estimated-brunch"]["start_time_is_estimated"] is True
+    assert by_title["anchor-real-evening-show"]["start_time_is_estimated"] is False

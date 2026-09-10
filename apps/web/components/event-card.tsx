@@ -29,7 +29,16 @@ export function EventCard({ event, showRecommendationFields, folderOptions = [],
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [selectedFolderId, setSelectedFolderId] = useState<string>("");
 
-  const startLabel = useMemo(() => new Date(event.start_at).toLocaleString(), [event.start_at]);
+  // A placeholder hour rendered as a clock time reads as fact and gets
+  // planned around, so estimated starts show the day and say the time is
+  // unpublished. The date itself is always real.
+  const startLabel = useMemo(
+    () =>
+      event.start_time_is_estimated
+        ? `${new Date(event.start_at).toLocaleDateString()} · time TBA`
+        : new Date(event.start_at).toLocaleString(),
+    [event.start_at, event.start_time_is_estimated]
+  );
 
   function isAuthError(err: unknown): boolean {
     return err instanceof ApiClientError && err.status === 401;

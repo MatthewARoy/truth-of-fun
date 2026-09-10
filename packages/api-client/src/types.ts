@@ -3,6 +3,9 @@ export type EventResponse = {
   title: string;
   description: string | null;
   start_at: string;
+  /** The calendar date is real, but the clock time is a source placeholder.
+   * Render the day and say the time isn't published — never a precise time. */
+  start_time_is_estimated: boolean;
   end_at: string | null;
   external_url: string | null;
   venue_name: string | null;
@@ -88,6 +91,8 @@ export type ItineraryStopResponse = {
   event_id: number;
   title: string;
   start_at: string;
+  /** See `EventResponse.start_time_is_estimated`. */
+  start_time_is_estimated: boolean;
   end_at: string | null;
   venue_name: string | null;
   external_url: string | null;

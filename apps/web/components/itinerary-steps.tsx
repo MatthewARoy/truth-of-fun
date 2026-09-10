@@ -14,7 +14,14 @@ function stopKindLabel(kind: string): string {
   return STOP_KIND_LABELS[kind] ?? kind.replace(/_/g, " ");
 }
 
-function formatTimeRange(startAt: string, endAt: string | null): string {
+function formatTimeRange(
+  startAt: string,
+  endAt: string | null,
+  startTimeIsEstimated = false
+): string {
+  // Mirrors `render_itinerary_text`: an estimated start has a real day and a
+  // placeholder hour, so the hour is withheld rather than dressed up.
+  if (startTimeIsEstimated) return "Time TBA";
   return endAt
     ? `${formatLocalTime(startAt)} – ${formatLocalTime(endAt)}`
     : formatLocalTime(startAt);
@@ -85,9 +92,13 @@ export function ItinerarySteps({ stops, showDayPerStop = false }: Props) {
               <div className="min-w-0 flex-1 space-y-1">
                 <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
                   <span className="text-base font-semibold text-brand-100">
-                    {formatTimeRange(stop.start_at, stop.end_at)}
+                    {formatTimeRange(
+                      stop.start_at,
+                      stop.end_at,
+                      stop.start_time_is_estimated
+                    )}
                   </span>
-                  {showDayPerStop && (
+                  {(showDayPerStop || stop.start_time_is_estimated) && (
                     <span className="text-xs text-slate-500">
                       {formatLocalDay(stop.start_at)}
                     </span>

@@ -8,8 +8,10 @@ from typing import Any
 
 from Levenshtein import ratio as levenshtein_ratio
 from rapidfuzz import fuzz
+from sqlalchemy import or_
 from sqlmodel import Session, select
 
+from app.core.localtime import LOCAL_TZ
 from app.models.event import Event
 from app.services.categories import infer_categories
 from app.services.geocoding import (
@@ -206,10 +208,24 @@ class DataPipelineService:
     ) -> Event | None:
         start_at = incoming_event["start_at"]
         window = timedelta(hours=self.DEDUPE_WINDOW_HOURS)
-        stmt = select(Event).where(
-            Event.start_at >= (start_at - window),
-            Event.start_at <= (start_at + window),
-        )
+        day_start, day_end = self._local_day_bounds(start_at)
+        if incoming_event.get("start_time_is_estimated"):
+            # Our own clock time is a placeholder, so scan the whole local day.
+            time_filter = (Event.start_at >= day_start, Event.start_at < day_end)
+        else:
+            # We have a real time, but a stored row may not: an Eventbrite
+            # placeholder at 19:00 sits outside a real 13:00 start's +/-2h
+            # window, so widen to the local day for flagged rows only.
+            time_filter = (
+                or_(
+                    (Event.start_at >= (start_at - window))
+                    & (Event.start_at <= (start_at + window)),
+                    Event.start_time_is_estimated.is_(True)
+                    & (Event.start_at >= day_start)
+                    & (Event.start_at < day_end),
+                ),
+            )
+        stmt = select(Event).where(*time_filter)
         candidates = session.exec(stmt).all()
         if not candidates:
             return None
@@ -239,6 +255,7 @@ class DataPipelineService:
         return {
             "title": candidate.title,
             "start_at": candidate.start_at,
+            "start_time_is_estimated": candidate.start_time_is_estimated,
             "venue_name": candidate.venue_name,
             "external_url": candidate.external_url,
         }
@@ -304,7 +321,26 @@ class DataPipelineService:
             ):
                 return True
 
-        if existing_payload.get("start_at") and incoming_event.get("start_at"):
+        # Losing the placeholder flag matters even when the clock value is
+        # unchanged: the field goes from a guess to a fact.
+        if existing_payload.get("start_time_is_estimated") and not incoming_event.get(
+            "start_time_is_estimated"
+        ):
+            return True
+
+        # Only meaningful between two published times. A placeholder hour sits
+        # a fabricated distance from everything, so comparing it would report a
+        # significant move on every cycle forever -- the merge rule keeps the
+        # real time, so the delta never closes.
+        both_times_are_real = not (
+            existing_payload.get("start_time_is_estimated")
+            or incoming_event.get("start_time_is_estimated")
+        )
+        if (
+            both_times_are_real
+            and existing_payload.get("start_at")
+            and incoming_event.get("start_at")
+        ):
             delta = abs(
                 (
                     incoming_event["start_at"] - existing_payload["start_at"]
@@ -320,10 +356,7 @@ class DataPipelineService:
         # is deliberately inside this guard: connectors fall back to a venue
         # calendar or profile page when a row has no event-specific link, so
         # the same URL routinely covers a whole season of different nights.
-        start_delta_hours = (
-            abs((left["start_at"] - right["start_at"]).total_seconds()) / 3600
-        )
-        if start_delta_hours > self.DEDUPE_WINDOW_HOURS:
+        if not self._starts_are_compatible(left, right):
             return False
 
         if self._same_external_url(left.get("external_url"), right.get("external_url")):
@@ -344,6 +377,44 @@ class DataPipelineService:
             return token_similarity >= self.DEDUPE_SAME_VENUE_TOKEN_THRESHOLD
 
         return False
+
+    def _starts_are_compatible(
+        self, left: dict[str, Any], right: dict[str, Any]
+    ) -> bool:
+        """Are these two start times close enough to be the same event?
+
+        Normally: within DEDUPE_WINDOW_HOURS. But when either side's clock time
+        is a connector placeholder, the hours carry no information and the gap
+        between them is noise -- Eventbrite's 19:00 default sat six hours from
+        funcheap's real 13:00 for the same zoo tea party, so the window barred
+        a match it should have made. Only the calendar date is real on that
+        side, so that is all we require. The title/venue/URL corroboration
+        below is unchanged and remains the guard against over-merging.
+        """
+        if left.get("start_time_is_estimated") or right.get("start_time_is_estimated"):
+            return self._same_local_day(left["start_at"], right["start_at"])
+        start_delta_hours = (
+            abs((left["start_at"] - right["start_at"]).total_seconds()) / 3600
+        )
+        return start_delta_hours <= self.DEDUPE_WINDOW_HOURS
+
+    @staticmethod
+    def _same_local_day(left: datetime, right: datetime) -> bool:
+        """Compare calendar dates in SF local time.
+
+        Not UTC: a 19:00 SF placeholder is 02:00 UTC the *next* day, so a UTC
+        date comparison would fail exactly the case this exists for.
+        """
+        return left.astimezone(LOCAL_TZ).date() == right.astimezone(LOCAL_TZ).date()
+
+    @staticmethod
+    def _local_day_bounds(moment: datetime) -> tuple[datetime, datetime]:
+        """UTC bounds of the SF-local calendar day containing ``moment``."""
+        local_start = moment.astimezone(LOCAL_TZ).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        local_end = local_start + timedelta(days=1)
+        return local_start.astimezone(timezone.utc), local_end.astimezone(timezone.utc)
 
     @staticmethod
     def _same_external_url(left: Any, right: Any) -> bool:
@@ -394,21 +465,38 @@ class DataPipelineService:
     ) -> dict[str, Any]:
         merged = dict(primary)
 
-        # Trust hierarchy: a more authoritative (lower-tier) source owns the
-        # times. Between equal tiers, keep the earliest start and latest end.
+        # A published time beats a placeholder outright, whatever the tiers say:
+        # the trust hierarchy ranks sources, not guesses, and Eventbrite (tier 1)
+        # defaults its hour while funcheap (tier 2) reads the real one off the
+        # page. Otherwise the usual rule holds -- a more authoritative
+        # (lower-tier) source owns the times, and between equal tiers we keep
+        # the earliest start and latest end.
+        primary_estimated = bool(primary.get("start_time_is_estimated"))
+        secondary_estimated = bool(secondary.get("start_time_is_estimated"))
         primary_tier = int(primary.get("source_tier", 99))
         secondary_tier = int(secondary.get("source_tier", 99))
-        if primary_tier < secondary_tier:
+        if primary_estimated != secondary_estimated:
+            time_winner, time_loser = (
+                (secondary, primary) if primary_estimated else (primary, secondary)
+            )
+            merged["start_at"] = time_winner["start_at"]
+            merged["end_at"] = time_winner.get("end_at") or time_loser.get("end_at")
+            merged["start_time_is_estimated"] = False
+        elif primary_tier < secondary_tier:
             merged["start_at"] = primary["start_at"]
             merged["end_at"] = primary.get("end_at") or secondary.get("end_at")
+            merged["start_time_is_estimated"] = primary_estimated
         elif secondary_tier < primary_tier:
             merged["start_at"] = secondary["start_at"]
             merged["end_at"] = secondary.get("end_at") or primary.get("end_at")
+            merged["start_time_is_estimated"] = secondary_estimated
         else:
             merged["start_at"] = min(primary["start_at"], secondary["start_at"])
             merged["end_at"] = self._pick_latest_datetime(
                 primary.get("end_at"), secondary.get("end_at")
             )
+            # Both sides agree on whether the hour is real (they are equal here).
+            merged["start_time_is_estimated"] = primary_estimated
 
         for field in (
             "title",
@@ -495,6 +583,7 @@ class DataPipelineService:
             "title": self._clamp(title.strip(), _MAX_TITLE),
             "description": self._normalize_str(event.get("description")),
             "start_at": start_at,
+            "start_time_is_estimated": bool(event.get("start_time_is_estimated", False)),
             "end_at": self._coerce_datetime(event.get("end_at")),
             "source_name": self._clamp(source_name.strip(), _MAX_SOURCE_NAME),
             "source_tier": source_tier,
@@ -534,6 +623,7 @@ class DataPipelineService:
             "title": event.title,
             "description": event.description,
             "start_at": event.start_at,
+            "start_time_is_estimated": event.start_time_is_estimated,
             "end_at": event.end_at,
             "source_name": event.source_name,
             "source_tier": event.source_tier,
@@ -558,6 +648,9 @@ class DataPipelineService:
         existing.title = payload["title"]
         existing.description = payload.get("description")
         existing.start_at = payload["start_at"]
+        existing.start_time_is_estimated = bool(
+            payload.get("start_time_is_estimated", False)
+        )
         existing.end_at = payload.get("end_at")
         existing.source_name = payload["source_name"]
         existing.source_tier = payload["source_tier"]
