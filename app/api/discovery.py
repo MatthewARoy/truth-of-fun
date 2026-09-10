@@ -89,6 +89,10 @@ class EventDetailResponse(EventResponse):
 
 class ConciergeRequest(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
+    # Accepted for compatibility, deliberately unused: an itinerary is at most
+    # three stops by construction, so this never sized the response. It used to
+    # cap the candidate pools instead, which silently decided the anchor and the
+    # post-anchor stop by start time before ranking and sequencing ran.
     limit: int = Field(default=25, ge=3, le=100)
 
 
@@ -784,7 +788,6 @@ async def build_concierge_itinerary(
     user: User | None = Depends(get_optional_user),
 ) -> ConciergeResponse:
     parsed = await parse_intent_async(payload.query)
-    limit = payload.limit
 
     def _anchor_query(*, restrict_to_intent_hours: bool):
         stmt = select(Event).where(
@@ -800,7 +803,12 @@ async def build_concierge_itinerary(
                 "hour", func.timezone(str(LOCAL_TZ), Event.start_at)
             )
             stmt = stmt.where(local_hour >= hours[0], local_hour <= hours[1])
-        stmt = stmt.order_by(Event.start_at.asc()).limit(limit)
+        # No SQL limit: only one of these rows becomes the anchor, and the
+        # choice is made by vibe ranking below. Cutting the set down to the
+        # earliest `payload.limit` rows first (that field sizes the itinerary
+        # payload, not the candidate pool) hid every later event from that
+        # ranking.
+        stmt = stmt.order_by(Event.start_at.asc())
         stmt = _apply_concierge_geography_filter(stmt, parsed.geography)
         return _apply_concierge_category_filter(stmt, parsed.category_focus)
 
@@ -867,8 +875,14 @@ async def build_concierge_itinerary(
                         radius_miles * 1609.34,
                     ),
                 )
+                # No SQL limit, for the same reason as the anchor query above:
+                # `sequence_itinerary` brackets the anchor, taking the last
+                # support event before it and the first one after. Keeping only
+                # the earliest rows threw away every post-anchor candidate as
+                # soon as the pre-anchor ones filled the quota, so a night out
+                # silently ended at the main event. The set is already bounded
+                # by the intent window and the ST_DWithin radius.
                 .order_by(Event.start_at.asc())
-                .limit(limit)
             )
 
         support_events = session.exec(_support_query(radius_miles=0.5)).all()
