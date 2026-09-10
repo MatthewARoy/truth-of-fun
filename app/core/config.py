@@ -38,6 +38,43 @@ class Settings(BaseSettings):
         default="truth-of-fun/0.1 (event discovery; +https://github.com/MatthewARoy/truth-of-fun)",
         description="Reddit requires a unique, descriptive User-Agent on every request.",
     )
+    # Geocoding. Unset provider means the static venue table only — exactly
+    # today's behaviour — so a deployment with no geocoder configured keeps
+    # working and simply resolves fewer venues.
+    geocoding_provider: str | None = Field(
+        default=None,
+        description=(
+            "Geocoder for venues missing from the static table: 'nominatim' "
+            "(OpenStreetMap, free, 1 req/s, no key) or unset to disable. "
+            "Google/Mapbox need billing and are not implemented."
+        ),
+    )
+    geocoding_user_agent: str = Field(
+        default=(
+            "truth-of-fun/0.1 (event discovery; "
+            "+https://github.com/MatthewARoy/truth-of-fun)"
+        ),
+        description=(
+            "Nominatim's usage policy requires a descriptive User-Agent "
+            "identifying the application and a contact point."
+        ),
+    )
+    geocoding_max_lookups_per_run: int = Field(
+        default=200,
+        description=(
+            "Ceiling on provider calls per ingestion cycle. At Nominatim's "
+            "1 req/s this bounds a cycle's geocoding at a few minutes even "
+            "when a new source dumps thousands of unknown venues."
+        ),
+    )
+    geocoding_failure_retry_days: int = Field(
+        default=30,
+        description=(
+            "How long a failed lookup stays cached. Most unresolved names "
+            "will never resolve, so retrying them every cycle spends the "
+            "whole rate-limit budget on the same dead ends."
+        ),
+    )
     worker_interval_seconds: int = Field(
         default=6 * 60 * 60,
         description="Ingestion worker polling interval in seconds",

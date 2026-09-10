@@ -68,7 +68,10 @@ class SFStationSource(InputAgentSource):
         coords = lookup_venue_coordinates(venue_name)
         lat = coords[0] if coords else DEFAULT_SF_LAT
         lon = coords[1] if coords else DEFAULT_SF_LON
-        confidence = 0.9 if coords else (0.5 if venue_name else 0.3)
+        # An unresolved venue lands on the SF centroid, so it must stay under
+        # DEFAULT_MIN_LOCATION_CONFIDENCE or radius search treats that guess
+        # as the event's real location.
+        confidence = 0.9 if coords else (0.4 if venue_name else 0.3)
 
         return CanonicalEvent(
             source=SourceMetadata(

@@ -76,6 +76,29 @@ Each event description is passed to Anthropic Claude (Haiku) with a system promp
 
 The tagger gracefully degrades: if `ANTHROPIC_API_KEY` is unset or any error occurs, it returns `[]` and the pipeline continues. Tags from the source itself are still preserved.
 
+### Venue geocoding (`app/services/geocoding.py`)
+
+Events carry a `location_confidence`, and radius search drops anything below `0.5` — so a venue the pipeline cannot place is invisible to every distance query, not merely imprecise.
+
+Resolution runs in two passes:
+
+1. **Static table** (`app/ingestion/venue_cache.py`) — a hand-verified dict of Bay Area venues. Offline, exact, and scored `0.9`. Sources apply it while normalizing.
+2. **Geocoding provider** — consulted only on a miss, from `DataPipelineService.enrich_locations` before the upsert. Queries are tried most-specific first: `raw_address`, then the venue name qualified with its city, then any street address embedded in either (`"Local Economy, 6028 College Ave, Oakland"` resolves to nothing; the address inside it resolves to a building).
+
+Confidence comes from the provider's own precision signal rather than a constant. Nominatim's `place_rank` maps to `poi` → `0.85`, `street` → `0.7`, and anything coarser to `area` → `0.4`. That last case is deliberate: a result that only resolves to a city *is* the centroid fallback the row already has, so it stays under the radius threshold instead of pushing a guess through it. Nothing geocoded ever outranks the hand-verified table.
+
+Two guards protect against the failure that matters more than a miss — a confident coordinate in the wrong place. The request is hard-bounded to a Northern California viewbox, and the response coordinate is re-checked against the same box.
+
+A venue name that is a placeholder — `TBA`, `Secret Location`, `Private Residence`, `Online` — is never geocoded, qualified or not (19hz writes `TBA (San Jose)`). Observed on real data: geocoding `TBA` returned a POI near Merced at `0.85`, which is an event with no known location acquiring a confident, fabricated one. Only a `raw_address` alongside the placeholder is treated as real.
+
+Known limitation: the provider is asked for a single best match, so an ambiguous chain name (`Dave & Buster's`, with several Bay Area locations) can resolve to the wrong branch. The bounding box catches the wrong *region*, not the wrong branch within it; a `raw_address` is what disambiguates, which is why it leads the query order.
+
+Everything degrades to the previous behaviour. `GEOCODING_PROVIDER` unset means the static table only; an unrecognised value logs a warning and disables geocoding rather than failing the run; and an unreachable provider, a 429, or any exception leaves the event on its city centroid and the cycle completes.
+
+Provider answers — successes *and* failures — are cached in the `geocode_cache` table. The worker re-reads every feed every six hours and Nominatim permits one request per second, so negative caching is what keeps the long tail of names that will never resolve from consuming the whole budget every cycle. Failure rows expire after `GEOCODING_FAILURE_RETRY_DAYS`.
+
+The ingestion hook only reaches events a source re-emits. For events already stored on a centroid whose listing has rolled off its feed, `python -m scripts.backfill_geocode` (dry-run by default, `--apply` to write) resolves them using the same geocoder, cache and write rule.
+
 ### Concierge intent parsing (`app/services/concierge.py`)
 
 Natural-language requests like *"Plan a date night in the Mission Saturday"* are parsed by Claude into a structured JSON schema:

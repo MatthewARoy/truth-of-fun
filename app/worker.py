@@ -22,6 +22,7 @@ from app.models.event import Event
 from app.models.source_health import SourceHealthRecord
 from app.services.alerting import send_alert
 from app.services.data_pipeline import DataPipelineService
+from app.services.geocoding import build_geocoder
 from app.services.secrets_store import get_secrets_store
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,9 @@ class IngestionWorker:
         quota_window_hours: int | None = None,
     ) -> None:
         self._run_interval_seconds = run_interval_seconds
-        self._pipeline_service = pipeline_service or DataPipelineService()
+        self._pipeline_service = pipeline_service or DataPipelineService(
+            geocoder=build_geocoder()
+        )
         self._session_factory = session_factory or (lambda: Session(engine))
         self._registry = source_registry or registry
         self._source_count_history: dict[str, deque[int]] = defaultdict(

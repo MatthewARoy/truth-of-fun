@@ -12,6 +12,11 @@ from sqlmodel import Session, select
 
 from app.models.event import Event
 from app.services.categories import infer_categories
+from app.services.geocoding import (
+    MIN_SEARCHABLE_LOCATION_CONFIDENCE,
+    VenueGeocoder,
+    worth_writing,
+)
 from app.services.tags import canonical_vibe_tags
 from app.services.vibe_tagger import ClaudeVibeTagger, VibeTagger
 
@@ -51,8 +56,17 @@ class DataPipelineService:
     # venue score around 24.
     DEDUPE_SAME_VENUE_TOKEN_THRESHOLD = 60.0
 
-    def __init__(self, *, vibe_tagger: VibeTagger | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        vibe_tagger: VibeTagger | None = None,
+        geocoder: VenueGeocoder | None = None,
+    ) -> None:
         self._vibe_tagger = vibe_tagger or ClaudeVibeTagger()
+        # No geocoder is the default: the pipeline then behaves exactly as it
+        # did before geocoding existed. The worker supplies one when the
+        # deployment has a provider configured.
+        self._geocoder = geocoder
 
     async def process_raw_events(
         self,
@@ -60,7 +74,9 @@ class DataPipelineService:
         session: Session,
         raw_events: list[dict[str, Any]],
     ) -> dict[str, int]:
-        deduped_events = self.deduplicate_events(raw_events)
+        deduped_events = await self.enrich_locations(
+            session=session, events=self.deduplicate_events(raw_events)
+        )
 
         inserted = 0
         updated = 0
@@ -101,6 +117,62 @@ class DataPipelineService:
             "skipped": skipped,
             "deduped_count": len(deduped_events),
         }
+
+    async def enrich_locations(
+        self,
+        *,
+        session: Session | None,
+        events: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Give every centroid-bound payload one more shot at a real address.
+
+        A payload already at or above the radius-search threshold is left
+        alone: its venue came from the hand-verified table, which outranks
+        anything a provider returns, and confirming it would spend a
+        rate-limited lookup for nothing.
+
+        Enrichment happens before the upsert, so ``has_significant_new
+        _information`` sees the improved confidence and rewrites rows that
+        were stored on a centroid in an earlier cycle.
+        """
+        if self._geocoder is None:
+            return events
+
+        # The lookup ceiling bounds a single cycle. A worker process lives
+        # for weeks, so without this it would spend the budget once and stop
+        # geocoding for good.
+        self._geocoder.reset_run_budget()
+
+        for payload in events:
+            confidence = float(payload.get("location_confidence") or 0.0)
+            if confidence >= MIN_SEARCHABLE_LOCATION_CONFIDENCE:
+                continue
+
+            try:
+                result = await self._geocoder.resolve(
+                    session=session,
+                    venue_name=payload.get("venue_name"),
+                    raw_address=payload.get("raw_address"),
+                    city=payload.get("city"),
+                )
+            except Exception:
+                # Geocoding is an enhancement, never a precondition. A broken
+                # provider leaves the payload on its centroid and the cycle
+                # completes.
+                logger.warning(
+                    "geocoding failed for %r; keeping fallback location",
+                    payload.get("venue_name") or payload.get("raw_address"),
+                    exc_info=True,
+                )
+                continue
+
+            if not worth_writing(result, confidence):
+                continue
+
+            payload["location"] = f"POINT({result.lon} {result.lat})"
+            payload["location_confidence"] = result.confidence
+
+        return events
 
     def deduplicate_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         deduped: list[dict[str, Any]] = []
@@ -193,6 +265,19 @@ class DataPipelineService:
                 incoming_event.get(key)
             ):
                 return True
+
+        # A venue that has since become resolvable is new information: without
+        # this, a row stored on a centroid guess keeps that guess forever and
+        # stays invisible to radius search. The margin stops float noise from
+        # rewriting rows every cycle.
+        existing_confidence = existing_payload.get("location_confidence")
+        incoming_confidence = incoming_event.get("location_confidence")
+        if (
+            isinstance(existing_confidence, (int, float))
+            and isinstance(incoming_confidence, (int, float))
+            and float(incoming_confidence) > float(existing_confidence) + 0.05
+        ):
+            return True
 
         existing_categories = set(existing_payload.get("categories") or [])
         incoming_categories = set(incoming_event.get("categories") or [])
@@ -370,10 +455,14 @@ class DataPipelineService:
             int(primary.get("attendee_count") or 0),
             int(secondary.get("attendee_count") or 0),
         )
-        merged["location_confidence"] = max(
-            float(primary.get("location_confidence") or 1.0),
-            float(secondary.get("location_confidence") or 1.0),
-        )
+        # location and location_confidence travel together: keeping one
+        # payload's coordinate while taking the other's confidence would stamp
+        # a high score onto a city-centroid guess and let it pass radius search.
+        primary_confidence = float(primary.get("location_confidence") or 1.0)
+        secondary_confidence = float(secondary.get("location_confidence") or 1.0)
+        merged["location_confidence"] = max(primary_confidence, secondary_confidence)
+        if secondary_confidence > primary_confidence and secondary.get("location"):
+            merged["location"] = secondary["location"]
         merged["is_free"] = bool(primary.get("is_free")) or bool(
             secondary.get("is_free")
         )

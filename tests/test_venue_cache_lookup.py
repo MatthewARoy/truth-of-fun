@@ -1,0 +1,133 @@
+"""Venue coordinate lookup: punctuation, city safety and specificity.
+
+An unresolved venue falls back to a city/SF centroid with a low
+``location_confidence``, and the discovery radius filter drops anything
+below ``min_location_confidence`` (default 0.5). So a lookup miss silently
+removes the event from every distance-based query — and a *wrong* hit is
+worse still, placing an out-of-town event in San Francisco at full
+confidence.
+"""
+
+from __future__ import annotations
+
+from app.ingestion.venue_cache import (
+    CITY_COORDINATES,
+    VENUE_COORDINATES,
+    lookup_venue_coordinates,
+)
+
+SF = CITY_COORDINATES["san francisco"]
+
+
+def test_curly_apostrophe_resolves_same_as_straight_apostrophe() -> None:
+    """Scrapers emit U+2019 ('Cobb’s'); the cache stores U+0027 ('Cobb's')."""
+    straight = lookup_venue_coordinates("Cobb's Comedy Club")
+    curly = lookup_venue_coordinates("Cobb’s Comedy Club")
+    assert straight is not None
+    assert curly == straight
+
+
+def test_same_named_venue_in_another_city_does_not_resolve_to_sf() -> None:
+    """'Punch Line Comedy Club - Sacramento' shares a name prefix with the SF
+    club. Returning the SF coordinate would place a Sacramento show in SF."""
+    sf_coords = lookup_venue_coordinates("Punch Line Comedy Club - San Francisco")
+    assert sf_coords is not None
+    assert lookup_venue_coordinates("Punch Line Comedy Club - Sacramento") != sf_coords
+
+
+def test_oakland_venue_does_not_match_sf_venue_of_similar_name() -> None:
+    """'The Independent Bar & Grill, Oakland' must not resolve to SF's
+    The Independent on Divisadero."""
+    assert lookup_venue_coordinates("The Independent Bar & Grill, Oakland") != (
+        VENUE_COORDINATES["the independent"]
+    )
+
+
+def test_ggp_bandshell_resolves_to_golden_gate_park() -> None:
+    """The bandshell hosts the free Sunday concerts; it must not fall through
+    to the SoMa nightclub 'Temple' on a loose substring match."""
+    coords = lookup_venue_coordinates("Spreckels Temple of Music (GGP Bandshell)")
+    assert coords is not None
+    assert coords != VENUE_COORDINATES["temple nightclub"]
+
+
+def test_central_corridor_venues_are_known() -> None:
+    """Venues that recur in the live feed and anchor Mission/Castro nights."""
+    for name in [
+        "Cafe du Nord",
+        "The Roxie",
+        "Biscuits and Blues",
+        "Madrone Art Bar",
+        "The Midway",
+        "Halcyon",
+        "Japanese Tea Garden",
+    ]:
+        assert lookup_venue_coordinates(name) is not None, f"unresolved venue: {name}"
+
+
+# Generous box around Northern California. Catches sign flips and transposed
+# digits in hand-entered coordinates without pinning venues to exact points.
+NORCAL_BOX = (36.0, 40.0, -124.5, -119.0)
+# Tight box around San Francisco proper.
+SF_BOX = (37.70, 37.84, -122.53, -122.35)
+
+SF_VENUES = [
+    "cafe du nord",
+    "swedish american hall",
+    "the roxie",
+    "roxie theater",
+    "biscuits and blues",
+    "madrone art bar",
+    "club waziema",
+    "the midway",
+    "halcyon",
+    "the endup",
+    "the hibernia",
+    "rickshaw stop",
+    "zeitgeist",
+    "el rio",
+    "thee parkside",
+    "bissap baobab",
+    "the function",
+    "endgames improv",
+    "japanese tea garden",
+    "spreckels temple of music",
+    "robin williams meadow",
+    "skatin' place",
+    "dolores park",
+    "crissy field",
+    "union square park",
+    "house of air",
+]
+
+
+def _in_box(coords: tuple[float, float], box: tuple[float, ...]) -> bool:
+    lat, lon = coords
+    return box[0] <= lat <= box[1] and box[2] <= lon <= box[3]
+
+
+def test_every_cached_venue_sits_in_northern_california() -> None:
+    for name, coords in VENUE_COORDINATES.items():
+        assert _in_box(coords, NORCAL_BOX), f"{name} is outside NorCal: {coords}"
+
+
+def test_san_francisco_venues_sit_inside_san_francisco() -> None:
+    for name in SF_VENUES:
+        coords = VENUE_COORDINATES[name]
+        assert _in_box(coords, SF_BOX), f"{name} is outside SF: {coords}"
+
+
+def test_out_of_city_venues_are_not_placed_in_san_francisco() -> None:
+    """Mesa Maguey is in Oakland; Mersea is on Treasure Island."""
+    assert not _in_box(VENUE_COORDINATES["mesa maguey"], SF_BOX)
+    assert _in_box(VENUE_COORDINATES["mesa maguey"], (37.70, 37.90, -122.35, -122.15))
+    assert _in_box(VENUE_COORDINATES["mersea"], (37.80, 37.84, -122.39, -122.35))
+
+
+def test_html_entities_resolve_same_as_decoded_text() -> None:
+    """Scraped venue names arrive HTML-encoded ("Bimbo&#039;s 365 Club",
+    "Brick &amp; Mortar"). Undecoded, they never match the cache."""
+    decoded = lookup_venue_coordinates("Bimbo's 365 Club")
+    assert decoded is not None
+    assert lookup_venue_coordinates("Bimbo&#039;s 365 Club") == decoded
+    assert lookup_venue_coordinates("Bimbo&#x27;s 365 Club") == decoded
