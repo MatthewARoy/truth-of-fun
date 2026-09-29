@@ -32,7 +32,7 @@ class MeetupSource(InputAgentSource):
 
     async def discover_candidates(self, **kwargs: Any) -> list[Any]:
         if not self._api_token:
-            self.last_fetch_error = "Disabled: set MEETUP_API_TOKEN to enable live ingestion"
+            self.last_empty_reason = "Disabled: set MEETUP_API_TOKEN to enable live ingestion"
             return []
         first = int(kwargs.get("first", 20))
         topic = str(kwargs.get("topic", "bay area events"))

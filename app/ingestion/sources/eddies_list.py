@@ -119,13 +119,24 @@ class EddiesListSource(InputAgentSource):
         messages = kwargs.get("messages")
         if messages is None:
             if not (self._imap_host and self._imap_user and self._imap_password):
-                self.last_fetch_error = "Disabled: set IMAP_HOST, IMAP_USER and IMAP_PASSWORD to enable Eddie's List"
+                self.last_empty_reason = "Disabled: set IMAP_HOST, IMAP_USER and IMAP_PASSWORD to enable Eddie's List"
                 return []
             messages = await asyncio.to_thread(self._fetch_imap_messages)
 
         candidates: list[dict[str, Any]] = []
-        for raw_message in list(messages)[:_MAX_ISSUES]:
+        fetched_messages = list(messages)[:_MAX_ISSUES]
+        rejected_senders = 0
+        for raw_message in fetched_messages:
+            raw_bytes = raw_message.encode("utf-8", errors="replace") if isinstance(raw_message, str) else raw_message
+            message = email.message_from_bytes(raw_bytes, policy=email.policy.default)
+            if not self._is_allowed_sender(parseaddr(str(message.get("From", "")))[1].lower()):
+                rejected_senders += 1
+                continue
             candidates.extend(self._extract_issue_items(raw_message))
+        if not candidates and fetched_messages:
+            self.last_empty_reason = (
+                f"{len(fetched_messages)} messages fetched, {rejected_senders} rejected by sender allowlist; no event candidates"
+            )
         return candidates
 
     async def extract_candidate(self, candidate: Any) -> dict[str, Any] | None:

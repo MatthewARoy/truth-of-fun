@@ -43,6 +43,24 @@ return 1
 """
 
 
+_SYNC_ENV_QUOTA_LUA = """
+redis.call('HSETNX', KEYS[1], 'usage_count', 0)
+redis.call('HSETNX', KEYS[1], 'status', 'active')
+redis.call('HSET', KEYS[1], 'quota_limit', ARGV[1])
+local usage = tonumber(redis.call('HGET', KEYS[1], 'usage_count')) or 0
+local status = redis.call('HGET', KEYS[1], 'status')
+if status ~= 'disabled' then
+    if tonumber(ARGV[1]) > 0 and usage >= tonumber(ARGV[1]) then
+        status = 'exhausted'
+    else
+        status = 'active'
+    end
+    redis.call('HSET', KEYS[1], 'status', status)
+end
+return 1
+"""
+
+
 @dataclass
 class KeyLease:
     provider: str
@@ -125,11 +143,10 @@ class SecretsStore:
             usage, status = 0, "active"
             if self._redis is not None:
                 # Track fallback usage without copying the environment secret
-                # into Redis or adding it to the rotation inventory. HSETNX
-                # leaves concurrent reporters and deliberate disables intact.
+                # into Redis or adding it to the rotation inventory. The atomic
+                # config refresh preserves counts and deliberate disables.
                 key_hash = self._key_hash(provider, "env-ticketmaster")
-                for field, value in {"usage_count": 0, "quota_limit": self._default_quota(provider), "status": "active"}.items():
-                    self._redis.hsetnx(key_hash, field, value)
+                self._redis.eval(_SYNC_ENV_QUOTA_LUA, 1, key_hash, self._default_quota(provider))
                 payload = self._redis.hgetall(key_hash)
                 usage = self._coerce_int(payload.get("usage_count"))
                 status = payload.get("status", "active")

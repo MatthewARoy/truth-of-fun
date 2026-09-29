@@ -37,14 +37,14 @@ class NineteenHzSource(InputAgentSource):
         """Read the parenthesised city out of a 19hz venue string.
 
         The listing renders venues as "Venue Name (City) genre, genre", so the
-        first parenthesised group is the city.
+        last parenthesised group is the city (earlier ones can qualify the venue).
         """
         if not venue_name:
             return None
-        match = re.search(r"\(([^)]+)\)", venue_name)
-        if not match:
+        matches = list(re.finditer(r"\(([^)]+)\)", venue_name))
+        if not matches:
             return None
-        city = match.group(1).strip()
+        city = matches[-1].group(1).strip()
         return city or None
 
     def normalize_raw(self, raw_item: dict[str, Any]) -> CanonicalEvent | None:
@@ -61,8 +61,9 @@ class NineteenHzSource(InputAgentSource):
         # Keep the city suffix for compatibility with venue/city lookup.
         genres: list[str] = []
         if isinstance(venue_name, str):
-            city_match = re.search(r"\([^)]+\)", venue_name)
-            if city_match:
+            matches = list(re.finditer(r"\([^)]+\)", venue_name))
+            if matches:
+                city_match = matches[-1]
                 genres = [value.strip() for value in venue_name[city_match.end():].split(",") if value.strip()]
                 venue_name = venue_name[:city_match.end()].strip()
         location_is_private = (
@@ -155,7 +156,6 @@ class NineteenHzSource(InputAgentSource):
                     "time_text": time_text,
                     "title": title,
                     "venue_name": venue_name,
-                    "tags": [],
                     "cost_text": cost_text,
                     "source_url": source_url,
                     "source_record_id": source_url,

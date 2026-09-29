@@ -354,7 +354,7 @@ class IngestionWorker:
             # keep displaying a stale failure; last_error_at/last_success_at
             # preserve the history either way.
             "last_error": diagnostic,
-            "last_error_at": now_iso if error is not None else prev.get("last_error_at"),
+            "last_error_at": now_iso if diagnostic is not None else prev.get("last_error_at"),
             "last_success_at": (
                 now_iso if error is None and (current_count > 0 or empty_is_success)
                 else prev.get("last_success_at")
@@ -415,7 +415,8 @@ class IngestionWorker:
             1 for item in key_health if item.status == "active"
             and not (managed_inventory and getattr(item, "key_id", "") == "env-ticketmaster")
         )
-        exhausted_count = sum(1 for item in key_health if item.status == "exhausted")
+        exhausted_count = sum(1 for item in key_health if item.status == "exhausted"
+            and not (managed_inventory and getattr(item, "key_id", "") == "env-ticketmaster"))
         if active_count <= 1:
             logger.warning(
                 "AAIM quota health warning: active_ticketmaster_keys=%s exhausted_ticketmaster_keys=%s",

@@ -346,7 +346,7 @@ async def test_worker_persists_specific_empty_reason_for_operator(monkeypatch, c
         record = session.exec(select(SourceHealthRecord)).one()
         assert record.status == "degraded"
         assert record.last_error == source.last_empty_reason
-        assert record.last_error_at is None
+        assert record.last_error_at is not None
     assert source.last_empty_reason in caplog.text
 
 
@@ -380,3 +380,20 @@ async def test_historic_env_telemetry_does_not_inflate_leaseable_inventory(monke
     with caplog.at_level("WARNING"):
         worker._record_quota_health(source_name="ticketmaster")
     assert "active_ticketmaster_keys=0" in caplog.text
+
+
+async def test_disabled_optional_source_does_not_dispatch_per_cycle_alerts(monkeypatch):
+    from app.ingestion.sources.meetup import MeetupSource
+    monkeypatch.delenv('MEETUP_API_TOKEN', raising=False)
+    calls = []
+    async def alert(**kwargs):
+        calls.append(kwargs)
+    monkeypatch.setattr('app.worker.send_alert', alert)
+    source = MeetupSource()
+    worker = IngestionWorker(source_registry=_FakeRegistry({'meetup': source}),
+        pipeline_service=_FakePipeline(), session_factory=lambda: nullcontext(object()))
+    for _ in range(3):
+        await worker.run_once()
+    assert calls == []
+    from app.worker import _source_health_state
+    assert 'MEETUP_API_TOKEN' in _source_health_state['meetup']['last_error']

@@ -13,13 +13,15 @@ async def test_missing_token_is_explicit_and_does_not_call_provider(monkeypatch)
         raise AssertionError("Disabled source must not make requests")
     monkeypatch.setattr(source, "_get_client", no_client)
     assert await source.fetch_events() == []
-    assert "disabled" in source.last_fetch_error.lower()
-    assert "MEETUP_API_TOKEN" in source.last_fetch_error
+    assert source.last_fetch_error is None
+    assert "disabled" in source.last_empty_reason.lower()
+    assert "MEETUP_API_TOKEN" in source.last_empty_reason
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("payload", [
     {"errors": [{"message": "private secret error"}]},
+    {"data": {"keywordSearch": {"edges": []}}, "errors": [{"message": "partial private error"}]},
     {"data": {"keywordSearch": None}},
 ])
 async def test_graphql_errors_and_schema_failures_do_not_look_empty(payload):

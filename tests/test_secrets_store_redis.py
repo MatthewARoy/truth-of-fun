@@ -75,3 +75,20 @@ def test_concurrent_environment_usage_is_durable_and_never_copies_secret(store):
     assert health.usage_count == 80
     assert store._redis.smembers(store._ids_key('ticketmaster')) == set()
     assert 'private-environment-fixture' not in str(store._redis.hgetall(store._key_hash('ticketmaster', 'env-ticketmaster')))
+
+
+def test_env_quota_refresh_and_disable_are_atomic_in_real_redis(store):
+    store._settings = store._settings.model_copy(update={'aaim_fallback_to_env': True,
+        'ticketmaster_api_key': 'fixture', 'aaim_ticketmaster_quota_limit': 10})
+    store.get_active_key('ticketmaster')
+    store.report_usage(provider='ticketmaster', key_id='env-ticketmaster', calls=5)
+    store._settings = store._settings.model_copy(update={'aaim_ticketmaster_quota_limit': 4})
+    with pytest.raises(RuntimeError):
+        store.get_active_key('ticketmaster')
+    store._settings = store._settings.model_copy(update={'aaim_ticketmaster_quota_limit': 8})
+    assert store.get_active_key('ticketmaster').usage_count == 5
+    store.report_usage(provider='ticketmaster', key_id='env-ticketmaster', calls=0, disable=True)
+    store._settings = store._settings.model_copy(update={'aaim_ticketmaster_quota_limit': 100})
+    with pytest.raises(RuntimeError):
+        store.get_active_key('ticketmaster')
+    assert store.health('ticketmaster')[0].status == 'disabled'

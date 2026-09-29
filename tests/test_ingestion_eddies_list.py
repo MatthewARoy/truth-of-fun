@@ -181,9 +181,10 @@ def test_disabled_and_empty_newsletter_results_have_distinct_diagnostics():
     source = EddiesListSource()
     source._imap_host = None
     assert asyncio.run(source.fetch_events()) == []
-    assert "Disabled" in source.last_fetch_error
+    assert source.last_fetch_error is None
+    assert "Disabled" in source.last_empty_reason
     assert asyncio.run(source.fetch_events(messages=[])) == []
     assert source.last_fetch_error is None
     assert "Empty" in source.last_empty_reason
     assert asyncio.run(source.fetch_events(messages=[_build_issue_email()])) == []  # sender not allowed by default
-    assert source.last_empty_reason
+    assert "rejected by sender allowlist" in source.last_empty_reason

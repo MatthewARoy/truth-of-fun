@@ -171,3 +171,17 @@ def test_free_19hz_listing_is_marked_free() -> None:
     assert normalized is not None
     assert normalized.offers.is_free is True
     assert normalized.offers.price_min == 0.0
+
+
+def test_missing_city_does_not_guess_genres_and_venue_qualifiers_survive():
+    source = NineteenHzSource()
+    raw = {'title': 'Night', 'time_text': 'Sun: Aug 2 (5pm-11pm)',
+        'venue_name': 'Some Venue', 'source_url': 'https://19hz.info/e/fixture'}
+    event = source.normalize_raw(raw)
+    assert event.location.venue_name == 'Some Venue'
+    assert event.category_tags == []
+    raw['venue_name'] = 'Some Venue (Main Room) (San Francisco) house, disco'
+    event = source.normalize_raw(raw)
+    assert event.location.city == 'San Francisco'
+    assert event.location.venue_name == 'Some Venue (Main Room) (San Francisco)'
+    assert event.category_tags == ['house', 'disco']

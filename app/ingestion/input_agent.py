@@ -63,7 +63,7 @@ class InputAgentSource(BaseSource):
             logger.warning("Source %s partial extraction: %s", self.source_name, self.last_fetch_error)
 
         if not canonical_events:
-            self.last_empty_reason = self.last_fetch_error or (
+            self.last_empty_reason = self.last_fetch_error or self.last_empty_reason or (
                 f"No usable events from {len(candidates)} discovered candidates (extraction/validation rejected them)"
                 if candidates else "Empty discovery result: no candidates returned"
             )
