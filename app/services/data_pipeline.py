@@ -333,7 +333,16 @@ class DataPipelineService:
                 legacy = session.exec(select(Event).where(
                     Event.source_name == name, Event.source_event_id == source_id
                 )).all()
-                for event in legacy:
+                if legacy:
+                    # Old ingestion inserted a new row when the same listing
+                    # moved dates. Preserve every row/reference, but route new
+                    # observations to the oldest row, as migration 003 does.
+                    event = min(legacy, key=lambda row: row.id)
+                    if len(legacy) > 1:
+                        logger.warning(
+                            "Legacy duplicate source identity for %s: routing rows %s to %s",
+                            name, sorted(row.id for row in legacy), event.id,
+                        )
                     owners[event.id] = event
         if len(owners) > 1:
             raise ValueError("Ambiguous source identities require reconciliation")
@@ -674,8 +683,14 @@ class DataPipelineService:
         secondary_estimated = bool(secondary.get("start_time_is_estimated"))
         primary_tier = int(primary.get("source_tier", 99))
         secondary_tier = int(secondary.get("source_tier", 99))
+        # Equal-tier aliases may refresh a scheduled listing, but cannot
+        # take ownership of an unavailable listing and later undo its owner's
+        # cancellation/postponement. Only the owner or a better tier can do so.
+        alias_can_revise = bool(secondary.get("_source_known_revision")) and (
+            secondary_tier < primary_tier or primary.get("status", "scheduled") == "scheduled"
+        )
         authoritative_revision = (
-            same_source or bool(secondary.get("_source_known_revision"))
+            same_source or alias_can_revise
         ) and secondary_tier <= primary_tier and not secondary.get("_source_unchanged")
         location_context_matches = self._location_context_matches(primary, secondary)
         if primary_estimated != secondary_estimated:

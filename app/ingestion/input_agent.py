@@ -55,7 +55,10 @@ class InputAgentSource(BaseSource):
         if failure_types:
             failed = sum(failure_types.values())
             details = ", ".join(f"{name}={count}" for name, count in sorted(failure_types.items()))
-            self.last_fetch_error = f"{failed} of {len(candidates)} candidates failed ({details})"[:1000]
+            extraction_error = f"{failed} of {len(candidates)} candidates failed ({details})"
+            self.last_fetch_error = "; ".join(
+                reason for reason in (self.last_fetch_error, extraction_error) if reason
+            )[:1000]
             logger.warning("Source %s partial extraction: %s", self.source_name, self.last_fetch_error)
 
         return [

@@ -125,10 +125,10 @@ class TicketmasterSource(BaseSource):
             return payload
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
-            last_error = str(exc)
+            last_error = type(exc).__name__
             raise
         except Exception as exc:
-            last_error = str(exc)
+            last_error = type(exc).__name__
             raise
         finally:
             if self._aaim_enabled:
@@ -251,11 +251,16 @@ class TicketmasterSource(BaseSource):
 
         # Date filters exclude undated events. Read them separately without
         # a horizon filter, so a postponement reaches the original stored row.
-        if self.last_fetch_error is None:
+        for undated_filter in ("includeTBA", "includeTBD"):
+            if self.last_fetch_error is not None:
+                break
             current_page, total_pages = 0, 1
             total_elements = 0
             while current_page < total_pages and current_page < page_limit:
-                payload = await read_page({**params, "includeTBA": "only", "page": current_page})
+                payload = await read_page({
+                    **params, "includeTBA": "no", "includeTBD": "no",
+                    undated_filter: "only", "page": current_page,
+                })
                 if payload is None:
                     break
                 page_info = payload.get("page", {})
@@ -264,7 +269,7 @@ class TicketmasterSource(BaseSource):
                 append_events(payload)
                 current_page += 1
             if self.last_fetch_error is None and (current_page < total_pages or total_elements > _DEEP_PAGING_LIMIT):
-                self.last_fetch_error = "Pagination cap reached in undated pass; search incomplete"
+                self.last_fetch_error = f"Pagination cap reached in {undated_filter} pass; search incomplete"
 
         if self.last_fetch_error is None and not keyword and not city and country_code == "US":
             self._pending_sync_timestamp = sync_started_at

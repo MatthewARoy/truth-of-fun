@@ -202,6 +202,7 @@ async def test_input_agent_extraction_failures_are_exposed_to_worker():
         source_name = 'fixture'
         source_tier = 2
         async def discover_candidates(self, **kwargs):
+            self.last_fetch_error = "calendar page cap reached"
             return ['broken']
         async def extract_candidate(self, candidate):
             raise TimeoutError('fixture')
@@ -211,6 +212,7 @@ async def test_input_agent_extraction_failures_are_exposed_to_worker():
     try:
         assert await source.fetch_events() == []
         assert source.last_fetch_error and 'TimeoutError' in source.last_fetch_error
+        assert 'calendar page cap reached' in source.last_fetch_error
     finally:
         await source.close()
 
@@ -309,8 +311,8 @@ async def test_worker_samples_the_used_key_once_per_cycle_even_when_event_proces
             snapshots = session.exec(select(ApiKeyUsageSnapshot)).all()
             assert len(snapshots) == 1
             assert snapshots[0].key_id == 'used-key'
-            assert snapshots[0].usage_count == 2  # Dated search plus the undated pass.
-        assert store.rows[0].usage_count == 4  # Two requests in each of two cycles.
+            assert snapshots[0].usage_count == 3  # Dated search plus TBA and TBD passes.
+        assert store.rows[0].usage_count == 6  # Three requests in each of two cycles.
         assert store.health_calls == 2
     finally:
         engine.dispose()

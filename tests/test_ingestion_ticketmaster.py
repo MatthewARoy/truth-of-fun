@@ -283,3 +283,43 @@ async def test_failed_postponed_pass_does_not_advance_the_cursor(
     assert [event["source_event_id"] for event in events] == ["G5vYZ_63xglaS"]
     assert tm_module._load_last_sync_timestamp() is None
     assert source.last_fetch_error is not None
+
+
+@pytest.mark.anyio
+async def test_date_tbd_postponements_are_read_without_date_filters(tmp_path, monkeypatch):
+    monkeypatch.setattr(tm_module, "_SYNC_STATE_PATH", tmp_path / "sync.json")
+    source = TicketmasterSource(api_key="fixture")
+    calls = []
+    async def page(params):
+        calls.append(params)
+        if params.get("includeTBD") == "only":
+            assert "startDateTime" not in params and "endDateTime" not in params
+            dates = {**_POSTPONED_WITHOUT_NEW_DATE, "start": {"dateTBD": True}}
+            return _page([_listing(dates=dates, event_id="tm-tbd")])
+        return _page([])
+    monkeypatch.setattr(source, "_fetch_page", page)
+    events = await source.fetch_events()
+    assert [(event["source_event_id"], event["status"]) for event in events] == [("tm-tbd", "postponed")]
+    assert source.last_fetch_error is None
+    assert len(calls) == 3
+
+
+@pytest.mark.anyio
+async def test_usage_errors_do_not_store_credential_bearing_request_urls(monkeypatch):
+    import httpx
+    source = TicketmasterSource(api_key="SUPERSECRET")
+    source._aaim_enabled = True
+    reports = []
+    class Store:
+        def report_usage(self, **kwargs):
+            reports.append(kwargs)
+    monkeypatch.setattr(tm_module, "get_secrets_store", lambda: Store())
+    async def failed_request(*args, **kwargs):
+        request = httpx.Request("GET", "https://example.test/events?apikey=SUPERSECRET")
+        httpx.Response(401, request=request).raise_for_status()
+    monkeypatch.setattr(source, "_get_json", failed_request)
+    with pytest.raises(httpx.HTTPStatusError):
+        await source._fetch_page({"page": 0})
+    assert reports[0]["last_status"] == 401
+    assert reports[0]["last_error"] == "HTTPStatusError"
+    assert "SUPERSECRET" not in str(reports)

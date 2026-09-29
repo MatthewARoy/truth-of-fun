@@ -64,7 +64,7 @@ class _FakeDiscoveryApi:
 
     async def fetch_page(self, params: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(dict(params))
-        if params.get("includeTBA") == "only":
+        if params.get("includeTBA") == "only" or params.get("includeTBD") == "only":
             return {"page": {"totalElements": 0, "totalPages": 0}}
         size, page = params["size"], params["page"]
         if page * size >= 1000:

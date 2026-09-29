@@ -13,7 +13,7 @@ baseline was `bdf444b`; local main at `b6bcca2` held 16 unpublished commits.
   browser request lifecycles, explicit authenticated public sharing, expiry,
   owner revocation, and real sharing acceptance in CI.
 - Recover the dirty `exciting-meitner-22f01a` work: correct Ticketmaster offsale
-  and postponed statuses, fetch undated postponements, retain listing identity
+  and postponed statuses, fetch TBA/TBD undated postponements, retain listing identity
   across reschedules, and explain unavailable events on cards. The newer source
   identity pipeline supplies the identity and revision behavior; its tests are
   retained rather than replacing it with the older implementation.
@@ -59,12 +59,49 @@ web lint/typecheck, production build, browser regressions, and production browse
 sharing acceptance against the real API/PostGIS. Hosted PR checks must pass
 before merging; do not bypass failed or missing checks.
 
+Local validation after review repairs: 664 backend tests pass with no skips;
+41 browser regressions, 10 API-client tests, eight MCP tests, and one real
+production-browser/API/PostGIS sharing lifecycle test pass. Web lint,
+typecheck, default production build, and fresh locked installs pass. npm audit
+reports zero findings and pip-audit reports no known vulnerabilities. Migration
+003 was upgraded on disposable PostGIS and tested against legacy duplicates,
+existing alias mappings, and retained foreign-key references. Provider crawls
+remain fixture-tested.
+
 Sharing migration `202609290002` requires coordinated migration/API release;
 old API processes cannot create shares after the required expiry column is
 added. See `sharing-safety.md`. Merging code does not migrate, deploy, ingest,
 configure credentials, or establish live provider coverage. Crawls cover their
 bounded configured horizons and surface partial coverage; they do not promise
 all provider listings. Provider behavior in new crawler tests is fixture-based.
+
+## Independent review repairs
+
+Claude Fable 5.1 on the 20x account reviewed frozen revision `8a70710` and
+identified three blockers. Follow-up changes, validated locally and in CI,
+address them without another provider invocation:
+
+- Backend CI uses `truth_of_fun_test` consistently, satisfying the disposable
+  database guard. The legacy listing-identity DB test now uses that guard too.
+- Migration `202609290003` seeds missing stable identities to the oldest event
+  row, matching the runtime fallback. Existing alias mappings win; no event or
+  folder/vote/signal reference is deleted or redirected. Duplicate historical
+  rows remain intact and auditable; physically merging them is separate work.
+- An equal-tier alias cannot take ownership of a cancelled, postponed, or past
+  row. Only the owner or a better tier may revise those facts; clock-expired
+  events still require a schedule move before restoration. Regression tests
+  cover description edits, date moves, repeated alias revisions and replay.
+
+Additional repairs remove credential-bearing exception strings from
+Ticketmaster usage telemetry, retain both discovery and extraction failure
+reasons, and fetch TBD separately from TBA within the same total request cap.
+Ticketmaster documents both `only` filters in its
+[Discovery API parameters](https://developer.ticketmaster.com/products-and-docs/apis/discovery-api/v2/).
+The completion file remains a durable-processing diagnostic rather than an
+incremental cursor; write failures remain visible. Default discovery excludes
+unavailable events deliberately. Public titles remain owner-published text.
+Fable's frozen snapshot preceded the PyJWT and CI wiring corrections; those
+and the follow-up repairs received direct review and validation.
 
 ## Preservation and restoration
 

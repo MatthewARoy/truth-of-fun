@@ -331,3 +331,66 @@ async def test_unchanged_listing_cannot_revive_a_clock_expired_event(database):
         saved = session.exec(select(Event)).one()
         assert saved.status == "scheduled"
         assert saved.start_at.replace(tzinfo=timezone.utc) == revised["start_at"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("known_owner", [False, True])
+async def test_legacy_duplicate_identity_preserves_rows_and_does_not_abort_batch(database, known_owner):
+    service = DataPipelineService(vibe_tagger=NoTags())
+    original = payload()
+    with Session(database) as session:
+        first = Event(**original)
+        second = Event(**payload(start_at=original["start_at"] + timedelta(days=30)))
+        session.add(first)
+        session.add(second)
+        session.flush()
+        owner_id = second.id if known_owner else first.id
+        if known_owner:
+            session.add(EventSourceRecord(source_name="ticketmaster", source_event_id="tm-123", event_id=owner_id))
+        session.commit()
+    with Session(database) as session:
+        moved = payload(start_at=original["start_at"] + timedelta(days=120))
+        unrelated = payload(source_event_id="tm-unrelated", venue_name="Other Venue", title="Other Show")
+        result = await service.process_raw_events(session=session, raw_events=[moved, unrelated])
+        assert result["inserted"] == 1
+        assert result["updated"] == 1
+        assert len(session.exec(select(Event)).all()) == 3
+        record = session.get(EventSourceRecord, ("ticketmaster", "tm-123"))
+        assert record.event_id == owner_id
+        assert session.get(Event, owner_id).start_at.replace(tzinfo=timezone.utc) == moved["start_at"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", ["cancelled", "postponed", "past"])
+@pytest.mark.parametrize("alias_tier", [1, 2])
+@pytest.mark.parametrize("date_moves", [False, True])
+async def test_alias_revision_cannot_take_ownership_and_restore_unavailable_event(database, status, alias_tier, date_moves):
+    service = DataPipelineService(vibe_tagger=NoTags())
+    owner = payload()
+    alias = payload(source_name="eventbrite", source_event_id="eb-456", source_tier=alias_tier)
+    with Session(database) as session:
+        await service.process_raw_events(session=session, raw_events=[owner, alias])
+        saved = session.exec(select(Event)).one()
+        saved.status = status
+        session.add(saved)
+        session.commit()
+    revised = {**alias, "description": "Edited alias details"}
+    if date_moves:
+        revised["start_at"] += timedelta(days=120)
+    # A second alias edit must not become an owner revision through a previous
+    # alias edit. Replaying the owner's unchanged observation also stays inert.
+    for observations in ([revised], [{**revised, "description": "Another edit"}], [owner]):
+        with Session(database) as session:
+            await service.process_raw_events(session=session, raw_events=observations)
+            saved = session.exec(select(Event)).one()
+            assert saved.status == status
+            assert saved.source_name == "ticketmaster"
+            assert saved.source_event_id == "tm-123"
+    with Session(database) as session:
+        # An explicit owner's reinstatement remains valid. Clock expiry still
+        # requires an actual date move rather than a description-only edit.
+        restored = {**owner, "description": "Owner reinstated this show"}
+        if status == "past":
+            restored["start_at"] += timedelta(days=120)
+        await service.process_raw_events(session=session, raw_events=[restored])
+        assert session.exec(select(Event)).one().status == "scheduled"

@@ -8,8 +8,8 @@ Only sources whose ids really are per-event get this. 19hz uses a promoter's
 Instagram post URL as the id, and one post covers up to nine different nights.
 
 Needs a real Postgres -- skips when the database is unreachable, same pattern
-as ``test_data_pipeline_estimated_times_db.py``. Rows carry a
-``test-listing-identity-`` id prefix and sit in 2031, clear of the dev corpus.
+as ``test_data_pipeline_estimated_times_db.py``. Requires a disposable loopback database ending in ``_test``. Rows carry a
+``test-listing-identity-`` id prefix and sit in 2031.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -17,6 +17,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import create_engine, text
 from sqlmodel import Session
+
+from conftest import _require_disposable_database
 
 from app.core.config import get_settings
 from app.services.data_pipeline import DataPipelineService
@@ -50,6 +52,7 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture
 def engine():
+    _require_disposable_database(get_settings().database_url)
     engine = create_engine(get_settings().database_url)
     cleanup = text("DELETE FROM events WHERE source_event_id LIKE :prefix")
     with engine.begin() as connection:
