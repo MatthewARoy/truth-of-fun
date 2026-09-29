@@ -175,3 +175,16 @@ def test_parsed_price_keeps_its_currency() -> None:
     assert canonical is not None
     assert canonical.offers.price_min == 25.0
     assert canonical.offers.currency == "USD"
+
+
+def test_disabled_and_empty_newsletter_results_have_distinct_diagnostics():
+    source = EddiesListSource()
+    source._imap_host = None
+    assert asyncio.run(source.fetch_events()) == []
+    assert source.last_fetch_error is None
+    assert "Disabled" in source.last_empty_reason
+    assert asyncio.run(source.fetch_events(messages=[])) == []
+    assert source.last_fetch_error is None
+    assert "Empty" in source.last_empty_reason
+    assert asyncio.run(source.fetch_events(messages=[_build_issue_email()])) == []  # sender not allowed by default
+    assert "rejected by sender allowlist" in source.last_empty_reason

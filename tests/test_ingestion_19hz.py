@@ -3,6 +3,21 @@ from __future__ import annotations
 from app.ingestion.sources.nineteen_hz import NineteenHzSource
 
 
+def test_published_genres_are_retained_without_inventing_a_vibe() -> None:
+    source = NineteenHzSource()
+    rows = source._extract_rows('''<tr><td>Sun: Aug 2 (5pm-11pm)</td>
+        <td><a href="https://19hz.info/e/genre">Night @ The Midway (San Francisco) bass house, future bass, dubstep</a></td>
+        <td>$25 | 21+</td></tr>''')
+    event = source.normalize_raw(rows[0])
+    assert event is not None
+    assert event.location.venue_name == "The Midway (San Francisco)"
+    assert event.location.city == "San Francisco"
+    assert event.category_tags == ["bass house", "future bass", "dubstep"]
+    assert event.vibe_tags == []
+    assert event.offers.price_min == 25
+    assert event.location.location_confidence == 0.9
+
+
 def test_19hz_extract_rows_and_normalize_private_location() -> None:
     source = NineteenHzSource()
     html = """
@@ -156,3 +171,17 @@ def test_free_19hz_listing_is_marked_free() -> None:
     assert normalized is not None
     assert normalized.offers.is_free is True
     assert normalized.offers.price_min == 0.0
+
+
+def test_missing_city_does_not_guess_genres_and_venue_qualifiers_survive():
+    source = NineteenHzSource()
+    raw = {'title': 'Night', 'time_text': 'Sun: Aug 2 (5pm-11pm)',
+        'venue_name': 'Some Venue', 'source_url': 'https://19hz.info/e/fixture'}
+    event = source.normalize_raw(raw)
+    assert event.location.venue_name == 'Some Venue'
+    assert event.category_tags == []
+    raw['venue_name'] = 'Some Venue (Main Room) (San Francisco) house, disco'
+    event = source.normalize_raw(raw)
+    assert event.location.city == 'San Francisco'
+    assert event.location.venue_name == 'Some Venue (Main Room) (San Francisco)'
+    assert event.category_tags == ['house', 'disco']

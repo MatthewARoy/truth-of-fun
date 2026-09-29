@@ -327,3 +327,73 @@ async def test_worker_clears_the_error_once_a_source_recovers() -> None:
     assert record.last_success_at is not None
     # The failure timestamp is retained as history even though the text cleared.
     assert record.last_error_at is not None
+
+async def test_worker_persists_specific_empty_reason_for_operator(monkeypatch, caplog):
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import Session, SQLModel, create_engine, select
+    from app.models.source_health import SourceHealthRecord
+    from app.worker import _source_health_state
+    _source_health_state.clear()
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(engine, tables=[SourceHealthRecord.__table__])
+    source = _FakeSource(source_name="quiet", events=[])
+    source.last_empty_reason = "Empty discovery result: no candidates returned"
+    worker = IngestionWorker(source_registry=_FakeRegistry({"quiet": source}),
+        pipeline_service=_FakePipeline(), session_factory=lambda: Session(engine))
+    with caplog.at_level("WARNING"):
+        await worker.run_once()
+    with Session(engine) as session:
+        record = session.exec(select(SourceHealthRecord)).one()
+        assert record.status == "degraded"
+        assert record.last_error == source.last_empty_reason
+        assert record.last_error_at is not None
+    assert source.last_empty_reason in caplog.text
+
+
+async def test_environment_key_with_unavailable_telemetry_is_not_reported_missing(monkeypatch, caplog):
+    from app.core.config import Settings
+    from app.services.secrets_store import NoopSecretsStore
+    settings = Settings(_env_file=None, aaim_enabled=True, ticketmaster_api_key="private")
+    monkeypatch.setattr("app.worker.get_settings", lambda: settings)
+    monkeypatch.setattr("app.worker.get_secrets_store", lambda: NoopSecretsStore(settings))
+    worker = IngestionWorker(pipeline_service=_FakePipeline())
+    with caplog.at_level("WARNING"):
+        worker._record_quota_health(source_name="ticketmaster", used_key_id="env-ticketmaster")
+    assert "environment Ticketmaster key used" in caplog.text
+    assert "no ticketmaster keys" not in caplog.text
+    assert "private" not in caplog.text
+
+
+async def test_historic_env_telemetry_does_not_inflate_leaseable_inventory(monkeypatch, caplog):
+    from app.core.config import Settings
+    from app.services.secrets_store import KeyHealth
+    settings = Settings(_env_file=None, aaim_enabled=True)
+    monkeypatch.setattr("app.worker.get_settings", lambda: settings)
+    class Store:
+        def health(self, provider):
+            return [KeyHealth(key_id="env-ticketmaster", usage_count=1, quota_limit=100,
+                status="active", last_status=200, last_error=None, updated_at_epoch=1),
+                KeyHealth(key_id="managed", usage_count=100, quota_limit=100,
+                status="disabled", last_status=200, last_error=None, updated_at_epoch=1)]
+    monkeypatch.setattr("app.worker.get_secrets_store", lambda: Store())
+    worker = IngestionWorker(pipeline_service=_FakePipeline())
+    with caplog.at_level("WARNING"):
+        worker._record_quota_health(source_name="ticketmaster")
+    assert "active_ticketmaster_keys=0" in caplog.text
+
+
+async def test_disabled_optional_source_does_not_dispatch_per_cycle_alerts(monkeypatch):
+    from app.ingestion.sources.meetup import MeetupSource
+    monkeypatch.delenv('MEETUP_API_TOKEN', raising=False)
+    calls = []
+    async def alert(**kwargs):
+        calls.append(kwargs)
+    monkeypatch.setattr('app.worker.send_alert', alert)
+    source = MeetupSource()
+    worker = IngestionWorker(source_registry=_FakeRegistry({'meetup': source}),
+        pipeline_service=_FakePipeline(), session_factory=lambda: nullcontext(object()))
+    for _ in range(3):
+        await worker.run_once()
+    assert calls == []
+    from app.worker import _source_health_state
+    assert 'MEETUP_API_TOKEN' in _source_health_state['meetup']['last_error']

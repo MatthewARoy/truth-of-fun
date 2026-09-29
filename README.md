@@ -84,7 +84,7 @@ flowchart LR
 | **Home** — landing page <br/> ![Home](./docs/screenshots/01-home.jpg) | **Explore** — deduped, filtered, image-rich event grid <br/> ![Explore](./docs/screenshots/02-explore.jpg) |
 | **Map view** — venues plotted from PostGIS geometry <br/> ![Map](./docs/screenshots/03-explore-map.jpg) | **Plan something** — natural-language → itinerary <br/> ![Planner](./docs/screenshots/04-planner.jpg) |
 | **For You** — multi-signal personalized recommendations <br/> ![Recommendations](./docs/screenshots/05-recommendations.jpg) | **Onboarding** — vibe-picker for cold-start signal <br/> ![Onboarding](./docs/screenshots/06-onboarding-vibes.jpg) |
-| **Source health** — live status of all 11 ingestion sources <br/> ![Source health](./docs/screenshots/07-admin-sources.jpg) | |
+| **Source health** — illustrative sample counts and states (not a live capture) <br/> ![Source health](./docs/screenshots/07-admin-sources.jpg) | |
 
 ## Quick start
 

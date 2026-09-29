@@ -31,6 +31,9 @@ class MeetupSource(InputAgentSource):
         self._api_token = api_token or os.getenv("MEETUP_API_TOKEN")
 
     async def discover_candidates(self, **kwargs: Any) -> list[Any]:
+        if not self._api_token:
+            self.last_empty_reason = "Disabled: set MEETUP_API_TOKEN to enable live ingestion"
+            return []
         first = int(kwargs.get("first", 20))
         topic = str(kwargs.get("topic", "bay area events"))
         return await self._search_events(topic=topic, first=first)
@@ -144,18 +147,22 @@ class MeetupSource(InputAgentSource):
         payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError("Expected object response from Meetup GraphQL.")
+        if payload.get("errors"):
+            # GraphQL often signals authentication/schema failures with HTTP
+            # 200. Do not publish upstream messages containing private data.
+            raise ValueError("Meetup GraphQL returned errors; check token and query compatibility")
         return payload
 
     def _extract_events(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         data = payload.get("data")
         if not isinstance(data, dict):
-            return []
+            raise ValueError("Meetup response missing data object")
         keyword_search = data.get("keywordSearch")
         if not isinstance(keyword_search, dict):
-            return []
+            raise ValueError("Meetup response missing keywordSearch object")
         edges = keyword_search.get("edges")
         if not isinstance(edges, list):
-            return []
+            raise ValueError("Meetup response missing keywordSearch edges")
 
         events: list[dict[str, Any]] = []
         for edge in edges:

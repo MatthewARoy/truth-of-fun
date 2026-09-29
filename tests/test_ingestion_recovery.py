@@ -282,9 +282,11 @@ async def test_worker_samples_the_used_key_once_per_cycle_even_when_event_proces
     monkeypatch.setattr('app.worker.get_settings', lambda: settings)
     monkeypatch.setattr('app.worker.get_secrets_store', lambda: store)
     source = TicketmasterSource()
-    async def get_json(*args, **kwargs):
-        return {'page': {'totalPages': 0, 'totalElements': 0}}
-    monkeypatch.setattr(source, '_get_json', get_json)
+    import httpx
+    source._client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={'page': {'totalPages': 0, 'totalElements': 0}})
+    ))
+    source._owns_client = False  # Keep injected transport across both worker cycles.
     class Registry:
         def list_sources(self):
             return ['ticketmaster']
@@ -315,4 +317,5 @@ async def test_worker_samples_the_used_key_once_per_cycle_even_when_event_proces
         assert store.rows[0].usage_count == 6  # Three requests in each of two cycles.
         assert store.health_calls == 2
     finally:
+        await source._client.aclose()
         engine.dispose()

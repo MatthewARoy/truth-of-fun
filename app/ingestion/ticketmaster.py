@@ -114,37 +114,18 @@ class TicketmasterSource(BaseSource):
         self,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """Fetch a single page from the Ticketmaster API and report usage."""
-        status_code: int | None = None
-        last_error: str | None = None
-        try:
-            payload = await self._get_json(
-                f"{self.base_url}/events.json", params=params,
-            )
-            status_code = 200
-            return payload
-        except httpx.HTTPStatusError as exc:
-            status_code = exc.response.status_code
-            last_error = type(exc).__name__
-            raise
-        except Exception as exc:
-            last_error = type(exc).__name__
-            raise
-        finally:
-            if self._aaim_enabled:
-                try:
-                    # 429s are transient (and retried with backoff in _get_json);
-                    # quota exhaustion is tracked via usage counts, so never
-                    # permanently disable a key here — there is no re-enable path.
-                    get_secrets_store().report_usage(
-                        provider="ticketmaster",
-                        key_id=self._key_id,
-                        calls=1,
-                        last_status=status_code,
-                        last_error=last_error,
-                    )
-                except Exception:
-                    pass
+        """Fetch a page; the request hook accounts for every retry."""
+        return await self._get_json(f"{self.base_url}/events.json", params=params)
+
+    def _record_request_usage(self, *, status_code: int | None, error_type: str | None) -> None:
+        if self._aaim_enabled:
+            try:
+                get_secrets_store().report_usage(
+                    provider="ticketmaster", key_id=self._key_id, calls=1,
+                    last_status=status_code, last_error=error_type,
+                )
+            except Exception:
+                logger.warning("Ticketmaster request spent but quota telemetry could not be recorded.")
 
     # ------------------------------------------------------------------
     # Public API
