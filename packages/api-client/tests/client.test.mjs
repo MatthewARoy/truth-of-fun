@@ -79,3 +79,50 @@ test("explicit preferences use the replacement endpoint and preserve all selecte
   };
   assert.deepEqual((await client().setPreferences({ preferred_vibes: selected })).preferred_vibes, selected);
 });
+
+test("public share serializes selected stops and expiry without a legacy private prompt", async () => {
+  globalThis.fetch = async (url, init) => {
+    assert.equal(url, "http://stub.invalid/concierge/itinerary/share");
+    assert.equal(init.method, "POST");
+    assert.deepEqual(JSON.parse(init.body), {
+      intent: "date_night", expires_in_days: 7,
+      stops: [{ event_id: 42, kind: "main_event", travel_buffer_minutes_before: 0 }],
+    });
+    return new Response(JSON.stringify({ share_token: "new-token", expires_at: "2026-10-06T00:00:00Z" }));
+  };
+  // Runtime callers can still pass old fields despite the updated TS type.
+  await client().shareItinerary({
+    query: "Private personal details must not be sent", intent: "date_night", expires_in_days: 7,
+    stops: [{ event_id: 42, kind: "main_event", travel_buffer_minutes_before: 0 }],
+  });
+});
+
+test("owner list and public detail use no-store and support abort signals", async () => {
+  const authenticated = client();
+  authenticated.setToken("owner-token");
+  const controller = new AbortController();
+  let calls = 0;
+  globalThis.fetch = async (url, init) => {
+    calls++;
+    assert.equal(init.cache, "no-store");
+    assert.equal(init.headers.Authorization, "Bearer owner-token");
+    assert.ok(init.signal instanceof AbortSignal);
+    assert.equal(url, calls === 1 ? "http://stub.invalid/users/me/itineraries?limit=25&offset=50" : "http://stub.invalid/shared/itineraries/token%2Fpart");
+    return new Response("[]");
+  };
+  assert.deepEqual(await authenticated.getMyItineraries(25, 50, { signal: controller.signal }), []);
+  await authenticated.getSharedItinerary("token/part", { signal: controller.signal });
+});
+
+test("revoking a share handles empty 204 responses and never retries a failed delete", async () => {
+  let calls = 0;
+  globalThis.fetch = async (url, init) => {
+    calls++;
+    assert.equal(url, "http://stub.invalid/users/me/itineraries/token%2Fpart");
+    assert.equal(init.method, "DELETE");
+    return calls === 1 ? new Response(null, { status: 204 }) : new Response("{}", { status: 503 });
+  };
+  assert.equal(await client().revokeItinerary("token/part"), undefined);
+  await assert.rejects(client().revokeItinerary("token/part"), { status: 503 });
+  assert.equal(calls, 2);
+});

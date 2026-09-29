@@ -19,6 +19,7 @@ import type {
   PreferencesRequest,
   RecommendationResponse,
   ShareItineraryRequest,
+  SharedItinerarySummary,
   SourceHealthEntry,
 } from "./types.js";
 
@@ -143,7 +144,7 @@ export class TruthOfFunApiClient {
             signal: controller.signal,
           });
           retryAfter = response.headers.get("Retry-After");
-          const payload = await response.json().catch(() => null);
+          const payload = response.status === 204 ? null : await response.json().catch(() => null);
           controller.signal.throwIfAborted();
           if (!response.ok) {
             const detail =
@@ -271,12 +272,32 @@ export class TruthOfFunApiClient {
   ): Promise<PortableItineraryResponse> {
     return this.request<PortableItineraryResponse>("/concierge/itinerary/share", {
       method: "POST",
-      body: JSON.stringify(payload),
+      // Whitelist public metadata so a legacy caller's query cannot be sent.
+      body: JSON.stringify({
+        expires_in_days: payload.expires_in_days,
+        intent: payload.intent,
+        timeframe: payload.timeframe,
+        geography: payload.geography,
+        anchor_event_id: payload.anchor_event_id,
+        stops: payload.stops,
+      }),
     });
   }
 
-  async getSharedItinerary(token: string): Promise<PortableItineraryResponse> {
-    return this.request<PortableItineraryResponse>(`/shared/itineraries/${token}`);
+  async getSharedItinerary(token: string, options?: RequestOptions): Promise<PortableItineraryResponse> {
+    return this.request<PortableItineraryResponse>(
+      `/shared/itineraries/${encodeURIComponent(token)}`, { cache: "no-store" }, options
+    );
+  }
+
+  async getMyItineraries(limit = 25, offset = 0, options?: RequestOptions): Promise<SharedItinerarySummary[]> {
+    return this.request<SharedItinerarySummary[]>(
+      `/users/me/itineraries?limit=${limit}&offset=${offset}`, { cache: "no-store" }, options
+    );
+  }
+
+  async revokeItinerary(token: string): Promise<void> {
+    await this.request<void>(`/users/me/itineraries/${encodeURIComponent(token)}`, { method: "DELETE" });
   }
 
   // Health

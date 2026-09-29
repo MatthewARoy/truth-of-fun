@@ -56,13 +56,17 @@ unauthenticated. Personalization and anything that writes will return a clear
 
 ### On credentials
 
-The platform has no scoped, revocable API tokens yet, so the only credential is
-a user JWT (7-day expiry) or the password that mints one. That means:
+The platform has no scoped, individually revocable API tokens yet, so the user
+credential is a JWT or the password that mints one. JWTs expire according to
+the server's JWT settings (7 days by default). That means:
 
 - `TOF_PASSWORD` puts your actual account password in a config file. Prefer
   `TOF_TOKEN`, which at least expires.
 - A token today carries full user authority; it cannot be limited to read-only
-  or revoked without changing your password.
+  or individually revoked. The platform has no password-change or session-revocation
+  endpoint, and changing a password hash alone would not invalidate an issued JWT.
+- Revoking a public itinerary link withdraws that link; it does not revoke your
+  authentication token.
 
 Scoped Personal Access Tokens are Workstream A of
 `docs/proposals/2026-07-agentic-platform.md`, and are the intended fix. Until
@@ -76,7 +80,10 @@ your own machine.
 | `search_events` | no | Keyword / tag / time / geo search. Returns a page plus total match count. |
 | `get_event` | no | One event with source provenance and first-seen time. |
 | `build_itinerary` | no | Natural language → sequenced itinerary with travel buffers. Not saved. |
-| `get_platform_status` | no | Is the platform healthy? Use it to qualify freshness claims. |
+| `share_itinerary` | yes | Publish selected event stops after an explicit request for a public link; requires `publish_publicly: true`. |
+| `list_my_itineraries` | yes | Inspect your published links, expiry dates, and revocation status. |
+| `revoke_itinerary` | yes | Revoke one of your public links when requested. |
+| `get_platform_status` | operator token | Is the platform healthy? Use it to qualify freshness claims. |
 | `get_recommendations` | yes | Personalized ranking with per-event match scores. |
 | `save_event` | yes | Save an event; also feeds the recommender. |
 | `record_feedback` | yes | Record a like or a click. |
@@ -94,8 +101,17 @@ reads:
   the model to include it — matching the project's responsible-scraping
   "link back" norm.
 - **Itineraries are suggestions, not commitments.** `build_itinerary` does not
-  save its result, book tickets, or add a calendar entry. The web planner
-  separately supports saved share links.
+  save or publish its result, book tickets, or add a calendar entry.
+- **Publishing requires an explicit request.** Planning, saving, or copying a
+  plan does not authorize a public link. `share_itinerary` requires a literal
+  `publish_publicly: true` with no default, and a configured user token. The
+  tool rejects free-form query, title, and note fields; it sends selected event
+  identities plus bounded metadata, and the API reads event details itself.
+- **Public links have a lifetime and an owner.** Links expire after 14 days by
+  default, with a maximum of 30 days. `list_my_itineraries` shows the owner's
+  links; `revoke_itinerary` withdraws a link on request. These tools call the
+  authenticated API, which enforces ownership. No original planning query is
+  included in the public snapshot.
 - **There is no dislike signal.** `record_feedback` documents that the platform
   has no negative-feedback channel, rather than letting a model imply one.
 
@@ -104,7 +120,12 @@ reads:
 ```bash
 npm run mcp-server:build       # compile to dist/
 npm run mcp-server:typecheck   # types only
+npm test --workspace @truth-of-fun/mcp-server  # in-memory MCP protocol + mocked HTTP
 ```
+
+The test command builds the API client and MCP server before testing. Tests
+exercise registered tools through a real MCP client/server connection with an
+in-memory transport; API requests are intercepted and nothing is published.
 
 Diagnostics go to **stderr** — stdout is the MCP protocol channel, and anything
 written there corrupts the stream and disconnects the client.

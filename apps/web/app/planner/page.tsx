@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import type {
   ConciergeResponse,
   PortableItineraryResponse,
@@ -14,6 +15,8 @@ import { Badge } from "@/components/ui/badge";
 import { InlineNotice } from "@/components/ui/inline-notice";
 import { CopyButton } from "@/components/copy-button";
 import { ItinerarySteps } from "@/components/itinerary-steps";
+import { Select } from "@/components/ui/select";
+import { formatLocalDay, formatLocalTime } from "@/lib/localtime";
 
 const EXAMPLE_PROMPTS = [
   "I want to plan a date in the Mission for midday Saturday, followed by some activity, with an easy extension into an evening.",
@@ -24,14 +27,15 @@ const EXAMPLE_PROMPTS = [
 ];
 
 export default function PlannerPage() {
-  const { token } = useAuth();
+  const { ready, token } = useAuth();
+  if (!ready) return <InlineNotice>Loading planner...</InlineNotice>;
   return <PlannerContent key={token ?? "anonymous"} />;
 }
 
 function PlannerContent() {
   const { token } = useAuth();
   const [query, setQuery] = useState("");
-  const [resultQuery, setResultQuery] = useState("");
+  const [expiresInDays, setExpiresInDays] = useState(14);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ConciergeResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -55,7 +59,6 @@ function PlannerContent() {
     try {
       const response = await apiClient.buildItinerary({ query: query.trim() });
       setResult(response);
-      setResultQuery(query.trim());
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to build itinerary");
     } finally {
@@ -64,14 +67,14 @@ function PlannerContent() {
   }
 
   async function handleShare() {
-    if (!result) return;
+    if (!result || !token || shared || sharing) return;
     setSharing(true);
     setShareError(null);
     try {
       // Send the stops on screen rather than the prompt: re-planning server
       // side could hand back a different night than the one being shared.
       const response = await apiClient.shareItinerary({
-        query: resultQuery,
+        expires_in_days: expiresInDays,
         intent: result.intent,
         timeframe: result.timeframe,
         geography: result.geography,
@@ -122,7 +125,7 @@ function PlannerContent() {
           onChange={(e) => setQuery(e.target.value)}
           rows={3}
         />
-        <Button type="submit" disabled={loading || !query.trim()}>
+        <Button type="submit" disabled={loading || sharing || !query.trim()}>
           {loading ? "Building your plan..." : "Build itinerary"}
         </Button>
       </form>
@@ -135,6 +138,7 @@ function PlannerContent() {
             <button
               key={i}
               type="button"
+              disabled={loading || sharing}
               onClick={() => applyExamplePrompt(prompt)}
               className="rounded-ui border border-slate-700 bg-slate-800/50 px-3 py-2 text-left text-xs text-slate-300 transition hover:border-slate-600 hover:bg-slate-800"
             >
@@ -171,17 +175,38 @@ function PlannerContent() {
                 <div>
                   <h3 className="font-semibold">Take it with you</h3>
                   <p className="text-sm text-slate-400">
-                    A link that opens on any phone, or the whole plan as text you can
-                    paste into a message.
+                    Copy the plan as text, or create a public link you can manage later.
                   </p>
                 </div>
 
-                <div className="flex flex-wrap gap-2">
-                  <Button type="button" onClick={handleShare} disabled={sharing}>
-                    {sharing ? "Creating link..." : shared ? "Link created" : "Get shareable link"}
-                  </Button>
-                  <CopyButton value={result.text} label="Copy as text" />
-                </div>
+                <CopyButton value={result.text} label="Copy as text" />
+
+                {token ? (
+                  <>
+                    <p className="text-sm text-slate-300">
+                      Anyone with the link can read this event plan until it expires or you revoke it.
+                      Your original request stays private and is not included in the link.
+                    </p>
+                    <Select
+                      label="Public link expires after"
+                      value={expiresInDays}
+                      onChange={(event) => setExpiresInDays(Number(event.target.value))}
+                      disabled={sharing || Boolean(shared)}
+                    >
+                      <option value={7}>7 days</option>
+                      <option value={14}>14 days</option>
+                      <option value={30}>30 days</option>
+                    </Select>
+                    <Button type="button" onClick={handleShare} disabled={sharing || Boolean(shared)}>
+                      {sharing ? "Creating public link..." : shared ? "Public link created" : "Create public link"}
+                    </Button>
+                  </>
+                ) : (
+                  <InlineNotice tone="info">
+                    Sign in to create a public link. You can copy this plan now.
+                    Copy it before leaving this page to sign in; this draft is not saved.
+                  </InlineNotice>
+                )}
 
                 {shareError && <InlineNotice tone="error">{shareError}</InlineNotice>}
 
@@ -196,6 +221,12 @@ function PlannerContent() {
                       {shareLink}
                     </a>
                     <CopyButton value={shareLink} label="Copy link" />
+                    <p className="text-sm text-slate-400">
+                      Expires {formatLocalDay(shared.expires_at)} at {formatLocalTime(shared.expires_at)} Pacific time.
+                    </p>
+                    <Link href="/shared-plans" className="text-sm text-brand-200 underline">
+                      Manage or revoke shared plans
+                    </Link>
                   </div>
                 )}
               </Card>

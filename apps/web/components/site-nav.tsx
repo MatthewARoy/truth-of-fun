@@ -11,7 +11,10 @@ const links = [
   { href: "/recommendations", label: "For You" },
 ];
 
-const authedLinks = [{ href: "/folders", label: "Folders" }];
+const authedLinks = [
+  { href: "/folders", label: "Folders" },
+  { href: "/shared-plans", label: "Shared plans" },
+];
 
 export function SiteNav() {
   const pathname = usePathname();
