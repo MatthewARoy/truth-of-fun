@@ -37,8 +37,10 @@ Abuse-prone endpoints enforce per-client sliding windows and return **429** with
 | POST | `/users/me/onboarding` | user JWT |
 | POST | `/users/me/interests` | user JWT |
 | POST | `/concierge/itinerary` | none |
-| POST | `/concierge/itinerary/share` | optional |
+| POST | `/concierge/itinerary/share` | user JWT |
 | GET | `/shared/itineraries/{token}` | none |
+| GET | `/users/me/itineraries` | user JWT |
+| DELETE | `/users/me/itineraries/{token}` | user JWT (owner) |
 | GET | `/folders` | user JWT |
 | POST | `/folders` | user JWT |
 | GET | `/folders/{folder_id}` | user JWT (owner or member) |
@@ -322,15 +324,15 @@ Response:
 
 ### POST /concierge/itinerary/share
 
-Auth: optional (associates the itinerary with the caller when a JWT is present). Freezes an itinerary and returns a public link.
+Auth: user bearer JWT. Freezes an owned itinerary and returns an expiring public link. Anonymous creation returns `401`; public reading still needs no sign-in. This is an intentional privacy change from the earlier optional-auth contract.
 
-Callers send the stops they are looking at rather than the original query — re-planning server-side could return a different night than the one being shared. Only `kind`, `event_id`, and ordering are taken from the request; every display field is re-read from `events` when the snapshot is written, so a shared page can never render caller-supplied text. `422` if `stops` is empty or longer than 20, `404` if any `event_id` is unknown.
+Callers send the selected stops, without the private planning prompt. Event titles, venues, coordinates, and times are re-read from `events`; plan metadata and ordering come from the caller. `422` if `stops` is empty or longer than 20, `404` if any `event_id` is unknown. Creating a link is a separate, explicit publication action; building or copying a plan does not publish it.
 
 Request:
 
 ```json
 {
-  "query": "string",
+  "expires_in_days": "int (1–30, default 14)",
   "intent": "string (default \"general_night_out\")",
   "timeframe": "string (default \"upcoming_week\")",
   "geography": "string | null",
@@ -345,15 +347,15 @@ Request:
 }
 ```
 
-`stops` holds 1–20 entries. Unauthenticated callers may share, so `query` is capped at 2000 characters.
+`stops` holds 1–20 entries. The legacy `query` input is accepted for compatibility but ignored and not stored on new snapshots. The TypeScript client and MCP sharing tool do not accept it. All sharing and owner-management responses use `Cache-Control: private, no-store`.
 
 Response: `PortableItinerary` (below).
 
 ### GET /shared/itineraries/{token}
 
-Auth: none — the link is the credential. `404` for an unknown or malformed token.
+Auth: none — anyone holding a live link can read the itinerary. Unknown, malformed, expired, and revoked links all return the same `404`. Public responses omit `query` entirely, including snapshots written before this change. Legacy query text may remain in the private database; it is never serialized by these endpoints.
 
-The stored stops are a snapshot, so the page keeps rendering after the underlying events are re-deduped, repriced, or dropped from the feed. Links are recomputed from the snapshot on every read rather than stored, so improvements to URL building reach itineraries shared before the change.
+The stored stops are a snapshot, so an active link keeps rendering after the underlying events are re-deduped, repriced, or dropped from the feed. It becomes unavailable at `expires_at` or on owner revocation. Links are recomputed from the snapshot on every read rather than stored. Migration `202609290002` gives existing links a 14-day grace period from migration time and preserves their existing ownership.
 
 `PortableItinerary`:
 
@@ -362,16 +364,35 @@ The stored stops are a snapshot, so the page keeps rendering after the underlyin
   "share_token": "string",
   "share_url": "string (relative, e.g. \"/itinerary/<token>\")",
   "title": "string",
-  "query": "string",
   "intent": "string",
   "timeframe": "string",
   "geography": "string | null",
   "anchor_event_id": "int | null",
   "created_at": "datetime",
+  "expires_at": "datetime",
   "itinerary": ["ItineraryStop"],
   "text": "string"
 }
 ```
+
+### GET /users/me/itineraries
+
+Auth: user bearer JWT. Lists only the caller's published links, newest first.
+Accepts `limit` (1–100, default 25) and `offset` (default 0). Includes expired
+and revoked links so owners can inspect prior outcomes. Anonymous legacy links
+are not assigned to a new owner.
+
+Response: a list of `{share_token, share_url, title, created_at, expires_at,
+revoked_at, status}`, where `status` is `active`, `expired`, or `revoked`.
+No original prompt is included.
+
+### DELETE /users/me/itineraries/{token}
+
+Auth: user bearer JWT, matching the stored owner. Marks the share revoked and
+returns `204` without a body. Repeating the owner's request is idempotent.
+Unknown tokens and another user's tokens return the same `404`; knowing a
+public token does not grant revocation authority. Revocation prevents future
+reads but cannot erase copies a recipient already made.
 
 ## Social
 

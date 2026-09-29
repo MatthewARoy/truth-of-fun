@@ -15,12 +15,12 @@ The reviewed local baseline was 16 commits ahead of the GitHub baseline
 | Discovery and planning | Exclude unavailable events by default, preserve ongoing events, share current-weekend windows, and avoid already-elapsed named-day windows. Multi-stop plans require published predecessor end times and a 30-minute buffer on the same outing night. Labels describe event order rather than inventing food/drink activities. Uncertain anchor coordinates produce one stop. |
 | Preferences and ranking | Structured choices persist directly and can be replaced/cleared. Cold or unmatched profiles receive eligible fallback suggestions. More matching preferences and learned behavior can improve an existing score. The UI identifies scores as heuristic scores. |
 | Recommendation work | SQL applies relevance, popularity, freshness, diversity, and pagination before hydrating a page. No earliest-N cutoff or arbitrary result-pool truncation. Profile scoring uses one streamed join instead of a per-signal event lookup. |
-| Browser reliability | Separate draft/applied search, cancel superseded work, ignore stale responses, retry the failed page, show errors, debounce affected folder queries, clear personal content on logout, preserve safe invitation return paths, and render venue-local time. Sharing retains the submitted query. |
+| Browser reliability | Separate draft/applied search, cancel superseded work, ignore stale responses, retry the failed page, show errors, debounce affected folder queries, clear personal content on logout, preserve safe invitation return paths, and render venue-local time. The subsequent sharing safeguards omit the original query from public links. |
 | HTTP client | GET-only bounded transient retries with backoff, Retry-After, deadline, and cancellation. Writes do not retry. |
 | Optional AAIM | Atomic usage/reset transitions preserve disabled keys. Failed Redis initialization retries. Health reads are read-only; API and worker usage sample only used keys, skip busy sampling locks, and bound retained history. |
 | Release checks | Add client regressions, production web build, and real Redis/Postgres concurrency checks to CI. Browser tests own their loopback server. Update locked JavaScript dependencies to remove the reported advisories. |
 
-## Validation
+## Validation of the initial reliability fixes
 
 - Fresh Python installation from `uv.lock`: **568 backend tests passed**, no skips,
   using disposable PostgreSQL 16/PostGIS and Redis 7. The only warning is the
@@ -71,22 +71,18 @@ constant total work or production latency.
 1. Date-partitioned Ticketmaster coverage and durable per-source observations,
    last-verified timestamps, correction history, and shared-plan freshness.
 2. Saved-events view and unsave; negative feedback and ranking evaluation.
-3. Account recovery/deletion/session revocation and membership/share revocation.
+3. Account recovery/deletion/session revocation and folder membership/share revocation.
 4. Structured planner constraints, stop editing, resolved geography, and travel
    estimates. The 30-minute buffer does not establish opening hours, reservations,
    accessibility, or transport availability.
-5. A real browser/API/database acceptance job, plus deployment verification.
+5. Broader real browser/API/database acceptance and deployment verification. The
+   subsequent sharing safeguards add a focused real sharing lifecycle CI job.
 
-## MCP public-sharing proposal requiring approval
+## Subsequent sharing safeguards
 
-The proposed `share_itinerary` tool would accept the submitted query and selected
-event IDs, stop order/kinds, and travel buffers, then call the existing
-`POST /concierge/itinerary/share` API. It would return the public share link and
-stored plan. A deliberate invocation would persist the query and event snapshot;
-anyone with the link could read it without signing in. Existing snapshots have
-no expiry/revocation flow.
-
-Automatic approval review rejected registering that new capability because the
-broad repair request did not explicitly authorize this public disclosure path.
-The tool was not added or invoked. Existing MCP capability descriptions were
-corrected, and existing web sharing was tested only with mocked responses.
+The user explicitly approved removing public prompts, requiring deliberate
+publication, and adding expiry and owner revocation. The implementation and
+rollout requirements are recorded in [Sharing safeguards](sharing-safety.md).
+The earlier blocked MCP proposal is superseded: the implemented tool accepts
+selected event IDs and bounded metadata, requires authenticated explicit public
+publication, and never accepts the original planning prompt.
