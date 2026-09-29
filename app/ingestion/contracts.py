@@ -128,6 +128,7 @@ class CanonicalEvent(BaseModel):
             "external_url": str(self.source.source_url),
             "venue_name": self.location.venue_name,
             "raw_address": self.location.address_line1,
+            "city": self.location.city,
             "location": location,
             "categories": self.category_tags,
             "tags": self.vibe_tags,
