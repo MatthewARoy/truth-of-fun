@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { InlineNotice } from "@/components/ui/inline-notice";
 import { Select } from "@/components/ui/select";
+import { formatLocalDay, formatLocalTime } from "@/lib/localtime";
 
 type Props = {
   event: EventResponse;
@@ -21,7 +22,12 @@ type Props = {
   onAddToFolder?: (eventId: number, folderId: number) => Promise<void>;
 };
 
-export function EventCard({ event, showRecommendationFields, folderOptions = [], onAddToFolder }: Props) {
+export function EventCard(props: Props) {
+  const { token } = useAuth();
+  return <EventCardContent key={token ?? "anonymous"} {...props} />;
+}
+
+function EventCardContent({ event, showRecommendationFields, folderOptions = [], onAddToFolder }: Props) {
   const { token } = useAuth();
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -35,8 +41,8 @@ export function EventCard({ event, showRecommendationFields, folderOptions = [],
   const startLabel = useMemo(
     () =>
       event.start_time_is_estimated
-        ? `${new Date(event.start_at).toLocaleDateString()} · time TBA`
-        : new Date(event.start_at).toLocaleString(),
+        ? `${formatLocalDay(event.start_at)} · time TBA`
+        : `${formatLocalDay(event.start_at)} · ${formatLocalTime(event.start_at)}`,
     [event.start_at, event.start_time_is_estimated]
   );
 
@@ -135,7 +141,7 @@ export function EventCard({ event, showRecommendationFields, folderOptions = [],
           />
           {showRecommendationFields ? (
             <div className="absolute right-2 top-2 rounded-full bg-brand-500/90 px-2.5 py-1 text-xs font-semibold text-white shadow-lg backdrop-blur">
-              {showRecommendationFields.matchScore}% match
+              Match score: {showRecommendationFields.matchScore}
             </div>
           ) : null}
         </div>
@@ -156,7 +162,7 @@ export function EventCard({ event, showRecommendationFields, folderOptions = [],
 
       {showRecommendationFields && !event.image_url ? (
         <div className="flex flex-wrap items-center gap-2 text-xs text-brand-200">
-          <Badge active>Match {showRecommendationFields.matchScore}</Badge>
+          <Badge active>Match score: {showRecommendationFields.matchScore}</Badge>
         </div>
       ) : null}
       {showRecommendationFields && showRecommendationFields.matchedVibes.length > 0 ? (

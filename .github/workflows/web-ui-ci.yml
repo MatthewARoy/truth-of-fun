@@ -29,6 +29,9 @@ jobs:
           cache: "npm"
       - name: Install dependencies
         run: npm ci
+
+      - name: Test shared API client
+        run: npm test --workspace @truth-of-fun/api-client
       - name: Audit JavaScript dependencies
         run: npm audit --audit-level=high
       - name: Build shared api client
@@ -42,10 +45,11 @@ jobs:
         run: npm run web:lint
       - name: Typecheck web app
         run: npm run web:typecheck
+      - name: Build production web app
+        run: npm run web:build
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
-      # The Playwright suite is route-level smoke tests: it auto-starts the
-      # Next.js dev server and asserts static page content only. No backend
-      # or database is required (and none is provided here).
-      - name: Run web smoke tests (no backend)
+      # Route smoke, mocked API interactions, and unavailable-API recovery.
+      # This checks browser behavior, not a live full-stack deployment.
+      - name: Run browser regression tests (no backend)
         run: npm run web:test

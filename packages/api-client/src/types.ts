@@ -68,6 +68,10 @@ export type InterestResponse = {
   preferred_vibes: string[];
 };
 
+export type PreferencesRequest = {
+  preferred_vibes: string[];
+};
+
 export type ConciergeRequest = {
   query: string;
   limit?: number;

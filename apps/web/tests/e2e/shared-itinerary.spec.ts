@@ -105,6 +105,24 @@ test("shared itinerary renders every stop with its map links", async ({ page }) 
   await expect(stops.nth(0).getByRole("link", { name: "Tickets" })).toHaveCount(0);
 });
 
+test("sharing keeps the submitted query when the draft is edited afterward", async ({ page }) => {
+  let sharedQuery: string | undefined;
+  await page.route(`${API_BASE}/concierge/itinerary`, (route) => route.fulfill({ json: SHARED_ITINERARY }));
+  await page.route(`${API_BASE}/concierge/itinerary/share`, (route) => {
+    sharedQuery = route.request().postDataJSON().query;
+    return route.fulfill({ json: SHARED_ITINERARY });
+  });
+  await page.goto("/planner");
+  const input = page.getByPlaceholder(/plan a date in the Mission/);
+  await input.fill("Original Saturday plan");
+  await page.getByRole("button", { name: "Build itinerary", exact: true }).click();
+  await expect(page.getByText("Julien Baker at The Chapel")).toBeVisible();
+  await input.fill("A different Sunday plan");
+  await page.getByRole("button", { name: "Get shareable link", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Link created", exact: true })).toBeVisible();
+  expect(sharedQuery).toBe("Original Saturday plan");
+});
+
 test.describe("opened from another timezone", () => {
   // A shared plan travels; the venue's clock does not. Someone reading this in
   // New York still needs the time they should show up at the door in SF.

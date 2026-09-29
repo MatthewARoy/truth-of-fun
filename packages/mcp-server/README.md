@@ -93,9 +93,9 @@ reads:
 - **Cite the source.** Every event carries `external_url`, and tools instruct
   the model to include it — matching the project's responsible-scraping
   "link back" norm.
-- **Itineraries are suggestions, not commitments.** `build_itinerary` returns a
-  plan but nothing persists it, and the tool says so, so a model doesn't tell
-  someone their evening is booked.
+- **Itineraries are suggestions, not commitments.** `build_itinerary` does not
+  save its result, book tickets, or add a calendar entry. The web planner
+  separately supports saved share links.
 - **There is no dislike signal.** `record_feedback` documents that the platform
   has no negative-feedback channel, rather than letting a model imply one.
 

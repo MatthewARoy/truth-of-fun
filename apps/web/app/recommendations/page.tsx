@@ -11,22 +11,36 @@ import { useAuth } from "@/lib/auth-context";
 
 export default function RecommendationsPage() {
   const { ready, token } = useAuth();
+  if (!ready) return <InlineNotice>Loading recommendations...</InlineNotice>;
+  if (!token) return (
+    <section className="space-y-4">
+      <h2 className="text-xl font-semibold">Recommendations</h2>
+      <InlineNotice tone="info">Sign in to see personalized recommendations.</InlineNotice>
+    </section>
+  );
+  return <SignedInRecommendations key={token} />;
+}
+
+function SignedInRecommendations() {
   const { items, loading, error, loadRecommendations } = useRecommendations();
   const [folders, setFolders] = useState<FolderResponse[]>([]);
 
   useEffect(() => {
-    if (!ready || !token) return;
+    const controller = new AbortController();
     async function bootstrap() {
-      await loadRecommendations();
+      await loadRecommendations(controller.signal);
+      if (controller.signal.aborted) return;
       try {
-        const response = await apiClient.listFolders();
+        const response = await apiClient.listFolders({ signal: controller.signal });
+        if (controller.signal.aborted) return;
         setFolders(response);
       } catch {
         // Page still functions if folder fetch fails.
       }
     }
     void bootstrap();
-  }, [ready, token, loadRecommendations]);
+    return () => controller.abort();
+  }, [loadRecommendations]);
 
   async function addEventToFolder(eventId: number, folderId: number) {
     await apiClient.addFolderItem(folderId, eventId);
@@ -38,12 +52,9 @@ export default function RecommendationsPage() {
       <Card className="space-y-2">
         <p className="text-sm text-slate-300">Personalized picks based on your onboarding and recent signals.</p>
       </Card>
-      {ready && !token ? (
-        <InlineNotice tone="info">Sign in to see personalized recommendations.</InlineNotice>
-      ) : null}
       {loading ? <InlineNotice>Loading recommendations...</InlineNotice> : null}
       {error ? <InlineNotice tone="error">Error: {error}</InlineNotice> : null}
-      {ready && token && !loading && !error && items.length === 0 ? (
+      {!loading && !error && items.length === 0 ? (
         <InlineNotice>No recommendations yet — try saving a few events first.</InlineNotice>
       ) : null}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">

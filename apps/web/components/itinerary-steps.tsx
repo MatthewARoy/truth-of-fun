@@ -5,6 +5,8 @@ import { cn } from "@/lib/cn";
 import { formatLocalDay, formatLocalTime } from "@/lib/localtime";
 
 const STOP_KIND_LABELS: Record<string, string> = {
+  before_event: "Before",
+  after_event: "After",
   pre_event_drink: "Before",
   main_event: "Main event",
   late_night_snack: "After",

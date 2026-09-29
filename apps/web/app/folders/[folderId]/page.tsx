@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import type { EventResponse, FolderDetailResponse, InviteResponse, RecommendationResponse } from "@truth-of-fun/api-client";
 import { apiClient } from "@/lib/api/client";
 import { useAuth } from "@/lib/auth-context";
@@ -10,11 +10,24 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { InlineNotice } from "@/components/ui/inline-notice";
 import { Input } from "@/components/ui/input";
+import { formatLocalDay } from "@/lib/localtime";
 
 export default function FolderDetailPage() {
   const params = useParams<{ folderId: string }>();
   const folderId = Number(params.folderId);
   const { ready, token } = useAuth();
+  if (!ready) return <InlineNotice>Loading folder...</InlineNotice>;
+  if (!token) return (
+    <section className="space-y-4">
+      <h2 className="text-xl font-semibold">Folder Detail</h2>
+      <InlineNotice tone="info">Sign in to view this folder.</InlineNotice>
+    </section>
+  );
+  if (!Number.isSafeInteger(folderId) || folderId < 1) return <InlineNotice tone="error">Invalid folder.</InlineNotice>;
+  return <SignedInFolder key={`${token}:${folderId}`} folderId={folderId} />;
+}
+
+function SignedInFolder({ folderId }: { folderId: number }) {
   const [folder, setFolder] = useState<FolderDetailResponse | null>(null);
   const [invite, setInvite] = useState<InviteResponse | null>(null);
   const [copied, setCopied] = useState(false);
@@ -23,38 +36,47 @@ export default function FolderDetailPage() {
   const [vibeFilter, setVibeFilter] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const response = await apiClient.getFolder(folderId);
-      setFolder(response);
-      const [eventResponse, recommendationResponse] = await Promise.all([
-        apiClient.getEvents({ limit: 8, time_preset: "this_weekend", vibe_tag: vibeFilter || undefined }),
-        apiClient.getRecommendations(6, 0),
-      ]);
-      setExploreEvents(eventResponse);
-      setRecommendations(recommendationResponse);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
-    } finally {
-      setLoading(false);
-    }
-  }, [folderId, vibeFilter]);
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(true);
+  const [suggestionError, setSuggestionError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Wait for auth hydration before firing authenticated requests, so deep
-    // links and hard reloads don't error with a missing-token response.
-    if (!ready) return;
-    if (!token) {
-      setLoading(false);
-      return;
-    }
-    if (!Number.isNaN(folderId)) {
-      void refresh();
-    }
-  }, [ready, token, folderId, refresh]);
+    const controller = new AbortController();
+    setLoading(true);
+    setError(null);
+    void apiClient.getFolder(folderId, { signal: controller.signal }).then((response) => {
+      if (!controller.signal.aborted) setFolder(response);
+    }).catch((err) => {
+      if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "Could not load folder.");
+    }).finally(() => {
+      if (!controller.signal.aborted) setLoading(false);
+    });
+    void apiClient.getRecommendations(6, 0, { signal: controller.signal }).then((response) => {
+      if (!controller.signal.aborted) setRecommendations(response);
+    }).catch((err) => {
+      if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "Could not load recommendations.");
+    });
+    return () => controller.abort();
+  }, [folderId, refreshVersion]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setSuggestionsLoading(true);
+    setExploreEvents([]);
+    setSuggestionError(null);
+    const timer = setTimeout(() => {
+      void apiClient.getEvents({ limit: 8, time_preset: "this_weekend", vibe_tag: vibeFilter.trim() || undefined }, {
+        signal: controller.signal,
+      }).then((response) => {
+        if (!controller.signal.aborted) setExploreEvents(response);
+      }).catch((err) => {
+        if (!controller.signal.aborted) setSuggestionError(err instanceof Error ? err.message : "Could not load suggestions.");
+      }).finally(() => {
+        if (!controller.signal.aborted) setSuggestionsLoading(false);
+      });
+    }, 300);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [vibeFilter, refreshVersion]);
 
   async function addItem(eventId: number) {
     setError(null);
@@ -125,10 +147,7 @@ export default function FolderDetailPage() {
   return (
     <section className="space-y-4">
       <h2 className="text-xl font-semibold">Folder Detail</h2>
-      {ready && !token ? (
-        <InlineNotice tone="info">Sign in to view this folder.</InlineNotice>
-      ) : null}
-      {loading && token ? <InlineNotice>Loading folder...</InlineNotice> : null}
+      {loading ? <InlineNotice>Loading folder...</InlineNotice> : null}
       {error ? <InlineNotice tone="error">Error: {error}</InlineNotice> : null}
       {folder ? (
         <Card className="space-y-3">
@@ -137,7 +156,7 @@ export default function FolderDetailPage() {
             <Button type="button" onClick={() => void generateInvite()} variant="secondary">
               Generate share link
             </Button>
-            <Button type="button" variant="ghost" onClick={() => void refresh()}>
+            <Button type="button" variant="ghost" onClick={() => setRefreshVersion((version) => version + 1)}>
               Refresh suggestions
             </Button>
           </div>
@@ -206,17 +225,19 @@ export default function FolderDetailPage() {
           onChange={(event) => setVibeFilter(event.target.value)}
         />
         <div className="grid gap-2">
+          {suggestionsLoading ? <InlineNotice>Loading suggestions...</InlineNotice> : null}
+          {suggestionError ? <InlineNotice tone="error">{suggestionError}</InlineNotice> : null}
           {exploreEvents.map((event) => (
             <div key={event.id} className="flex items-center justify-between rounded-ui border border-slate-800 p-2">
               <p className="text-sm">
-                {event.title} <span className="text-slate-400">({new Date(event.start_at).toLocaleDateString()})</span>
+                {event.title} <span className="text-slate-400">({formatLocalDay(event.start_at)})</span>
               </p>
               <Button type="button" size="sm" onClick={() => void addItem(event.id)}>
                 Add
               </Button>
             </div>
           ))}
-          {exploreEvents.length === 0 ? <p className="text-sm text-slate-400">No explore suggestions right now.</p> : null}
+          {!suggestionsLoading && !suggestionError && exploreEvents.length === 0 ? <p className="text-sm text-slate-400">No explore suggestions right now.</p> : null}
         </div>
       </Card>
 

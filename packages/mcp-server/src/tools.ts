@@ -45,10 +45,11 @@ function fail(message: string): ToolResult {
  * a thrown error is a protocol-level fault the model cannot see or recover
  * from, whereas an error result lets it retry or explain.
  */
-function describeError(error: unknown): string {
+function describeError(error: unknown, operatorTool = false): string {
   const apiError = error as Partial<ApiClientError> & { status?: number };
   if (typeof apiError?.status === "number") {
     if (apiError.status === 401 || apiError.status === 403) {
+      if (operatorTool) return `Operator authorization required (HTTP ${apiError.status}). Configure TOF_OPS_TOKEN for get_platform_status; a user token does not grant operator access.`;
       return (
         `Not authorized (HTTP ${apiError.status}). This tool needs a signed-in ` +
         "user. Set TOF_TOKEN (or TOF_EMAIL/TOF_PASSWORD) in the MCP server " +
@@ -67,11 +68,11 @@ function describeError(error: unknown): string {
   );
 }
 
-async function guard(run: () => Promise<ToolResult>): Promise<ToolResult> {
+async function guard(run: () => Promise<ToolResult>, operatorTool = false): Promise<ToolResult> {
   try {
     return await run();
   } catch (error) {
-    return fail(describeError(error));
+    return fail(describeError(error, operatorTool));
   }
 }
 
@@ -184,9 +185,9 @@ export function registerTools(server: McpServer, client: TruthOfFunApiClient): v
         "Turn a request like 'date night in the Mission on Saturday' into a " +
         "sequenced itinerary: an anchor event plus nearby pre- and post- " +
         "stops within half a mile, with travel buffers between them. " +
-        "The result is returned, not saved — this platform has no plan " +
-        "storage yet, so tell the user it is a suggestion rather than " +
-        "something now on their calendar. " +
+        "The result is returned without saving. The web planner supports " +
+        "saved share links, but this tool only builds a suggestion. It does " +
+        "not book anything or add it to a calendar. " +
         CITATION_NOTE,
       inputSchema: {
         query: z.string().describe("Natural-language request, in the user's own words"),
@@ -226,7 +227,7 @@ export function registerTools(server: McpServer, client: TruthOfFunApiClient): v
       inputSchema: {},
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
     },
-    async () => guard(async () => ok(await client.getHealthSummary()))
+    async () => guard(async () => ok(await client.getHealthSummary()), true)
   );
 
   server.registerTool(

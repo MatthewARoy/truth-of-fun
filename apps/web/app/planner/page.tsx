@@ -25,7 +25,13 @@ const EXAMPLE_PROMPTS = [
 
 export default function PlannerPage() {
   const { token } = useAuth();
+  return <PlannerContent key={token ?? "anonymous"} />;
+}
+
+function PlannerContent() {
+  const { token } = useAuth();
   const [query, setQuery] = useState("");
+  const [resultQuery, setResultQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ConciergeResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -49,6 +55,7 @@ export default function PlannerPage() {
     try {
       const response = await apiClient.buildItinerary({ query: query.trim() });
       setResult(response);
+      setResultQuery(query.trim());
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to build itinerary");
     } finally {
@@ -64,7 +71,7 @@ export default function PlannerPage() {
       // Send the stops on screen rather than the prompt: re-planning server
       // side could hand back a different night than the one being shared.
       const response = await apiClient.shareItinerary({
-        query: query.trim(),
+        query: resultQuery,
         intent: result.intent,
         timeframe: result.timeframe,
         geography: result.geography,

@@ -16,6 +16,7 @@ import type {
   OnboardingRequest,
   OnboardingResponse,
   PortableItineraryResponse,
+  PreferencesRequest,
   RecommendationResponse,
   ShareItineraryRequest,
   SourceHealthEntry,
@@ -33,9 +34,29 @@ export class ApiClientError extends Error {
   }
 }
 
-type RequestOptions = {
+export type RequestOptions = {
   retries?: number;
+  signal?: AbortSignal;
+  /** Deadline for the entire operation, including retries. Defaults to 30s. */
+  timeoutMs?: number;
 };
+
+const TRANSIENT_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+
+function waitForRetry(delayMs: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(signal.reason);
+    const abort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    }, delayMs);
+    signal.addEventListener("abort", abort, { once: true });
+  });
+}
 
 export class TruthOfFunApiClient {
   private readonly baseUrl: string;
@@ -87,9 +108,18 @@ export class TruthOfFunApiClient {
   ): Promise<{ data: T; response: Response }> {
     const url = `${this.baseUrl}${path}`;
     const method = (init?.method || "GET").toUpperCase();
-    const retries = method === "GET" ? Math.max(0, options?.retries ?? 1) : 0;
-    let attempts = 0;
-    let lastError: unknown;
+    const retryLimit = options?.retries ?? 1;
+    const retries = method === "GET" && Number.isFinite(retryLimit)
+      ? Math.min(3, Math.max(0, Math.floor(retryLimit))) : 0;
+    const controller = new AbortController();
+    const callerSignal = options?.signal ?? init?.signal;
+    const abort = () => controller.abort(callerSignal?.reason);
+    if (callerSignal?.aborted) abort();
+    else callerSignal?.addEventListener("abort", abort, { once: true });
+    const deadline = Date.now() + (options?.timeoutMs ?? 30_000);
+    const timer = setTimeout(() => controller.abort(
+      new DOMException("Request timed out. Please try again.", "TimeoutError")
+    ), Math.max(0, deadline - Date.now()));
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -102,34 +132,52 @@ export class TruthOfFunApiClient {
       headers["X-Ops-Token"] = this.opsToken;
     }
 
-    while (attempts <= retries) {
-      try {
-        const response = await fetch(url, {
-          ...init,
-          headers,
-        });
-        const payload = await response.json().catch(() => null);
-        if (!response.ok) {
-          const detail =
-            typeof payload === "object" &&
-            payload !== null &&
-            "detail" in payload &&
-            typeof (payload as { detail?: unknown }).detail === "string"
-              ? (payload as { detail: string }).detail
-              : `Request failed: ${response.status}`;
-          throw new ApiClientError(detail, response.status, payload);
-        }
-        return { data: payload as T, response };
-      } catch (error) {
-        lastError = error;
-        if (attempts >= retries) {
-          throw lastError;
+    try {
+      for (let attempt = 0; ; attempt += 1) {
+        let retryAfter: string | null = null;
+        try {
+          controller.signal.throwIfAborted();
+          const response = await fetch(url, {
+            ...init,
+            headers,
+            signal: controller.signal,
+          });
+          retryAfter = response.headers.get("Retry-After");
+          const payload = await response.json().catch(() => null);
+          controller.signal.throwIfAborted();
+          if (!response.ok) {
+            const detail =
+              typeof payload === "object" &&
+              payload !== null &&
+              "detail" in payload &&
+              typeof (payload as { detail?: unknown }).detail === "string"
+                ? (payload as { detail: string }).detail
+                : `Request failed: ${response.status}`;
+            throw new ApiClientError(detail, response.status, payload);
+          }
+          return { data: payload as T, response };
+        } catch (error) {
+          controller.signal.throwIfAborted();
+          const retryable = error instanceof ApiClientError
+            ? TRANSIENT_STATUSES.has(error.status)
+            : error instanceof TypeError;
+          if (attempt >= retries || !retryable) throw error;
+          const seconds = retryAfter === null ? NaN : Number(retryAfter);
+          const requestedDelay = Number.isFinite(seconds)
+            ? seconds * 1000
+            : retryAfter ? Date.parse(retryAfter) - Date.now() : NaN;
+          const delay = Number.isFinite(requestedDelay)
+            ? Math.max(0, requestedDelay)
+            : 500 * 2 ** attempt;
+          // A server asking us to wait beyond the deadline must not be retried early.
+          if (delay >= deadline - Date.now()) throw error;
+          await waitForRetry(delay, controller.signal);
         }
       }
-      attempts += 1;
+    } finally {
+      clearTimeout(timer);
+      callerSignal?.removeEventListener("abort", abort);
     }
-
-    throw lastError;
   }
 
   // Auth
@@ -158,9 +206,9 @@ export class TruthOfFunApiClient {
     return params.toString() ? `?${params.toString()}` : "";
   }
 
-  async getEvents(query: EventsQuery = {}): Promise<EventResponse[]> {
+  async getEvents(query: EventsQuery = {}, options?: RequestOptions): Promise<EventResponse[]> {
     return this.request<EventResponse[]>(
-      `/events${TruthOfFunApiClient.buildEventsQuery(query)}`
+      `/events${TruthOfFunApiClient.buildEventsQuery(query)}`, undefined, options
     );
   }
 
@@ -168,9 +216,9 @@ export class TruthOfFunApiClient {
    * Like getEvents, but also returns the total number of matches before
    * pagination (from the X-Total-Count header) so callers can page correctly.
    */
-  async getEventsPage(query: EventsQuery = {}): Promise<EventsPage> {
+  async getEventsPage(query: EventsQuery = {}, options?: RequestOptions): Promise<EventsPage> {
     const { data, response } = await this.requestWithResponse<EventResponse[]>(
-      `/events${TruthOfFunApiClient.buildEventsQuery(query)}`
+      `/events${TruthOfFunApiClient.buildEventsQuery(query)}`, undefined, options
     );
     const header = response.headers.get("X-Total-Count");
     const total = header === null ? null : Number.parseInt(header, 10);
@@ -184,9 +232,9 @@ export class TruthOfFunApiClient {
     return this.request<EventDetailResponse>(`/events/${eventId}`);
   }
 
-  async getRecommendations(limit = 25, offset = 0): Promise<RecommendationResponse[]> {
+  async getRecommendations(limit = 25, offset = 0, options?: RequestOptions): Promise<RecommendationResponse[]> {
     return this.request<RecommendationResponse[]>(
-      `/recommendations?limit=${limit}&offset=${offset}`
+      `/recommendations?limit=${limit}&offset=${offset}`, undefined, options
     );
   }
 
@@ -200,6 +248,13 @@ export class TruthOfFunApiClient {
   async updateInterests(payload: InterestRequest): Promise<InterestResponse> {
     return this.request<InterestResponse>("/users/me/interests", {
       method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async setPreferences(payload: PreferencesRequest): Promise<InterestResponse> {
+    return this.request<InterestResponse>("/users/me/preferences", {
+      method: "PUT",
       body: JSON.stringify(payload),
     });
   }
@@ -235,8 +290,8 @@ export class TruthOfFunApiClient {
   }
 
   // Folders
-  async listFolders(): Promise<FolderResponse[]> {
-    return this.request<FolderResponse[]>("/folders");
+  async listFolders(options?: RequestOptions): Promise<FolderResponse[]> {
+    return this.request<FolderResponse[]>("/folders", undefined, options);
   }
 
   async createFolder(name: string): Promise<FolderResponse> {
@@ -246,8 +301,8 @@ export class TruthOfFunApiClient {
     });
   }
 
-  async getFolder(folderId: number): Promise<FolderDetailResponse> {
-    return this.request<FolderDetailResponse>(`/folders/${folderId}`);
+  async getFolder(folderId: number, options?: RequestOptions): Promise<FolderDetailResponse> {
+    return this.request<FolderDetailResponse>(`/folders/${folderId}`, undefined, options);
   }
 
   async addFolderItem(folderId: number, eventId: number): Promise<FolderDetailResponse> {

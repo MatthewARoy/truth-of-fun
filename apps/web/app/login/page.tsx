@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { InlineNotice } from "@/components/ui/inline-notice";
+import { safeReturnPath } from "@/lib/return-path";
 
 const VIBE_OPTIONS = [
   { tag: "#LiveMusic", label: "Live Music", emoji: "🎵" },
@@ -15,17 +16,17 @@ const VIBE_OPTIONS = [
   { tag: "#Nightlife", label: "Nightlife & Clubs", emoji: "🌃" },
   { tag: "#FoodAndDrink", label: "Food & Drink", emoji: "🍷" },
   { tag: "#Outdoors", label: "Outdoors & Nature", emoji: "🌲" },
-  { tag: "#Tech", label: "Tech & Startups", emoji: "💻" },
+  { tag: "#intellectual", label: "Tech & Startups", emoji: "💻" },
   { tag: "#Art", label: "Art & Museums", emoji: "🎨" },
   { tag: "#Sports", label: "Sports", emoji: "⚽" },
-  { tag: "#Theater", label: "Theater & Film", emoji: "🎭" },
+  { tag: "#theatre", label: "Theater & Film", emoji: "🎭" },
   { tag: "#Wellness", label: "Wellness & Fitness", emoji: "🧘" },
-  { tag: "#Family", label: "Family Friendly", emoji: "👨‍👩‍👧" },
+  { tag: "#familyfriendly", label: "Family Friendly", emoji: "👨‍👩‍👧" },
   { tag: "#Free", label: "Free Events", emoji: "🆓" },
   { tag: "#Social", label: "Mixers & Networking", emoji: "🤝" },
   { tag: "#HighEnergy", label: "Raves & Festivals", emoji: "🔥" },
   { tag: "#Chill", label: "Chill & Relaxed", emoji: "☕" },
-  { tag: "#Intellectual", label: "Talks & Lectures", emoji: "📚" },
+  { tag: "#workshop", label: "Talks & Workshops", emoji: "📚" },
 ];
 
 type Mode = "login" | "signup";
@@ -41,6 +42,11 @@ export default function LoginPage() {
   const [selectedVibes, setSelectedVibes] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  function finishLogin() {
+    const next = new URLSearchParams(window.location.search).get("next");
+    router.replace(safeReturnPath(next));
+  }
 
   function toggleVibe(tag: string) {
     setSelectedVibes((prev) => {
@@ -61,7 +67,7 @@ export default function LoginPage() {
         setStep("vibes");
       } else {
         await login(email, password);
-        router.push("/explore");
+        finishLogin();
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Authentication failed");
@@ -74,17 +80,8 @@ export default function LoginPage() {
     setLoading(true);
     setError(null);
     try {
-      if (selectedVibes.size > 0) {
-        // Send vibes as an onboarding description
-        const vibeLabels = [...selectedVibes].map((tag) => {
-          const opt = VIBE_OPTIONS.find((v) => v.tag === tag);
-          return opt?.label ?? tag;
-        });
-        await apiClient.submitOnboarding({
-          perfect_saturday: `I enjoy ${vibeLabels.join(", ")}`,
-        });
-      }
-      router.push("/explore");
+      await apiClient.setPreferences({ preferred_vibes: [...selectedVibes] });
+      finishLogin();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save preferences");
     } finally {
