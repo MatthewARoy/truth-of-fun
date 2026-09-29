@@ -4,15 +4,19 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
+from pydantic import BaseModel, Field, field_validator
 from geoalchemy2 import Geography
-from sqlalchemy import cast, func, text
+from sqlalchemy import and_, case, cast, delete, func, literal, or_, text, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Session, select
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.database import get_session
-from app.core.localtime import LOCAL_TZ
+from app.core.localtime import LOCAL_TZ, tonight_end, weekend_window
 from app.core.ratelimit import llm_rate_limit, share_rate_limit
 from app.core.security import get_current_user, get_optional_user
 from app.models.event import Event
@@ -34,7 +38,7 @@ from app.services.itinerary import (
 )
 from app.services.recommender import RecommenderService, ScoredEvent
 from app.services.social import generate_share_token, is_valid_share_token
-from app.services.tags import stored_forms_for
+from app.services.tags import VIBE_VOCABULARY, resolve_vibe_tag, stored_forms_for
 from app.services.user_profile import UserProfileService
 
 router = APIRouter(tags=["discovery"])
@@ -47,6 +51,9 @@ class EventResponse(BaseModel):
     title: str
     description: str | None
     start_at: datetime
+    # The date is real; the clock time is a connector placeholder. Clients must
+    # not render a precise time when this is true.
+    start_time_is_estimated: bool = False
     end_at: datetime | None
     external_url: str | None
     venue_name: str | None
@@ -89,6 +96,10 @@ class EventDetailResponse(EventResponse):
 
 class ConciergeRequest(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
+    # Accepted for compatibility, deliberately unused: an itinerary is at most
+    # three stops by construction, so this never sized the response. It used to
+    # cap the candidate pools instead, which silently decided the anchor and the
+    # post-anchor stop by start time before ranking and sequencing ran.
     limit: int = Field(default=25, ge=3, le=100)
 
 
@@ -109,6 +120,8 @@ class ItineraryStopResponse(BaseModel):
     event_id: int
     title: str
     start_at: datetime
+    # Defaulted so snapshots frozen before the flag existed still rehydrate.
+    start_time_is_estimated: bool = False
     end_at: datetime | None
     venue_name: str | None
     external_url: str | None
@@ -144,9 +157,10 @@ class ShareItineraryStopRequest(BaseModel):
 
 
 class ShareItineraryRequest(BaseModel):
-    # Bounded because this endpoint writes a row for an unauthenticated caller:
-    # a real night out is a handful of stops, and the prompt is a sentence.
+    # Accepted only for older clients. A raw planning prompt is never persisted
+    # by this endpoint or included in the public response.
     query: str = Field(default="", max_length=2000)
+    expires_in_days: int = Field(default=14, ge=1, le=30)
     intent: str = Field(default="general_night_out", max_length=100)
     timeframe: str = Field(default="upcoming_week", max_length=100)
     geography: str | None = Field(default=None, max_length=255)
@@ -158,14 +172,47 @@ class PortableItineraryResponse(BaseModel):
     share_token: str
     share_url: str
     title: str
-    query: str
     intent: str
     timeframe: str
     geography: str | None
     anchor_event_id: int | None
     created_at: datetime
+    expires_at: datetime
     itinerary: list[ItineraryStopResponse]
     text: str
+
+
+class OwnedItineraryResponse(BaseModel):
+    share_token: str
+    share_url: str
+    title: str
+    created_at: datetime
+    expires_at: datetime
+    revoked_at: datetime | None
+    status: Literal["active", "expired", "revoked"]
+
+
+class _NoStoreShareRoute(APIRoute):
+    """Revocable links and owner inventories must not outlive access in caches."""
+
+    def get_route_handler(self):
+        original = super().get_route_handler()
+
+        async def handler(request: Request) -> Response:
+            try:
+                response = await original(request)
+            except StarletteHTTPException as exc:
+                exc.headers = {**(exc.headers or {}), "Cache-Control": "private, no-store"}
+                raise
+            except RequestValidationError as exc:
+                response = await request_validation_exception_handler(request, exc)
+            response.headers["Cache-Control"] = "private, no-store"
+            return response
+
+        return handler
+
+
+_sharing_router = APIRouter(route_class=_NoStoreShareRoute)
 
 
 class InterestRequest(BaseModel):
@@ -178,6 +225,22 @@ class InterestResponse(BaseModel):
     user_id: int
     saved_event_ids: list[int]
     preferred_vibes: list[str]
+
+
+class PreferencesRequest(BaseModel):
+    preferred_vibes: list[str] = Field(max_length=50)
+
+    @field_validator("preferred_vibes")
+    @classmethod
+    def known_vibes(cls, values: list[str]) -> list[str]:
+        tags: list[str] = []
+        for value in values:
+            tag = resolve_vibe_tag(value)
+            if tag not in VIBE_VOCABULARY:
+                raise ValueError(f"Unknown vibe: {value[:100]}")
+            if tag not in tags:
+                tags.append(tag)
+        return tags
 
 
 class OnboardingRequest(BaseModel):
@@ -224,6 +287,7 @@ def _serialize_event(event: Event, *, people_interested: int = 0) -> EventRespon
         title=event.title,
         description=event.description,
         start_at=event.start_at,
+        start_time_is_estimated=bool(event.start_time_is_estimated),
         end_at=event.end_at,
         external_url=event.external_url,
         venue_name=event.venue_name,
@@ -316,6 +380,26 @@ def _canonical_tag_filter(vibe_tag: str):
     return select(element).where(normalized.in_(forms)).exists()
 
 
+# Below this, a coordinate is treated as a city-centroid guess rather than a
+# place worth searching on. Ingestion sources must score an unresolved venue
+# under this value or its centroid fallback is returned as a real location.
+DEFAULT_MIN_LOCATION_CONFIDENCE = 0.5
+
+
+def overlaps_window(window_start: datetime, window_end: datetime):
+    """SQL predicate: the event overlaps [window_start, window_end].
+
+    Filtering on ``start_at`` alone hides anything already under way, so a
+    festival running 10:15-16:00 vanishes from an afternoon query made at
+    15:00. An event with no published ``end_at`` is treated as a point in
+    time at ``start_at``.
+    """
+    return and_(
+        func.coalesce(Event.end_at, Event.start_at) >= window_start,
+        Event.start_at <= window_end,
+    )
+
+
 def _apply_concierge_geography_filter(stmt: object, geography: str | None) -> object:
     if not geography:
         return stmt
@@ -367,22 +451,10 @@ def _apply_time_preset(
     if not time_preset:
         return None, None
     now = now or datetime.now(timezone.utc)
-    local_now = now.astimezone(LOCAL_TZ)
     if time_preset == "tonight":
-        # Ends 3 AM local the next morning so late shows still count as tonight.
-        end_local = (local_now + timedelta(days=1)).replace(
-            hour=3, minute=0, second=0, microsecond=0
-        )
-        return now, end_local.astimezone(timezone.utc)
+        return now, tonight_end(now)
     if time_preset == "this_weekend":
-        days_to_friday = (4 - local_now.weekday()) % 7
-        friday_local = (local_now + timedelta(days=days_to_friday)).replace(
-            hour=17, minute=0, second=0, microsecond=0
-        )
-        monday_local = (friday_local + timedelta(days=3)).replace(
-            hour=6, minute=0, second=0, microsecond=0
-        )
-        return friday_local.astimezone(timezone.utc), monday_local.astimezone(timezone.utc)
+        return weekend_window(now)
     return None, None
 
 
@@ -411,7 +483,7 @@ def search_events(
     lng: float | None = Query(default=None, ge=-180, le=180, description="Longitude for geo search"),
     radius_miles: float | None = Query(default=None, gt=0, le=500, description="Search radius miles"),
     min_location_confidence: float = Query(
-        default=0.5,
+        default=DEFAULT_MIN_LOCATION_CONFIDENCE,
         ge=0,
         le=1,
         description=(
@@ -434,7 +506,7 @@ def search_events(
         default=None,
         description="Friendly location filter for quick UI controls",
     ),
-    start_at: datetime | None = Query(default=None, description="Start time lower bound"),
+    start_at: datetime | None = Query(default=None, description="Window lower bound; includes ongoing events"),
     end_at: datetime | None = Query(default=None, description="Start time upper bound"),
     include_past: bool = Query(False, description="Include past events in results"),
     sort_by: Literal["date", "distance"] = Query(
@@ -471,16 +543,20 @@ def search_events(
         )
 
     if not include_past:
-        stmt = stmt.where(Event.start_at >= func.now())
+        # An event in progress is not a past event: filter on when it ends,
+        # falling back to the start when no end time was published.
+        stmt = stmt.where(func.coalesce(Event.end_at, Event.start_at) >= func.now())
     if status is not None:
         stmt = stmt.where(Event.status == status)
+    elif not include_past:
+        stmt = stmt.where(Event.status == "scheduled")
 
     preset_start, preset_end = _apply_time_preset(time_preset=time_preset)
     start_bound = start_at or preset_start
     end_bound = end_at or preset_end
 
     if start_bound is not None:
-        stmt = stmt.where(Event.start_at >= start_bound)
+        stmt = stmt.where(func.coalesce(Event.end_at, Event.start_at) >= start_bound)
     if end_bound is not None:
         stmt = stmt.where(Event.start_at <= end_bound)
     if vibe_tag:
@@ -516,9 +592,9 @@ def search_events(
 
     # Sort order: distance (when geo available) or date (default / fallback).
     if sort_by == "distance" and has_geo:
-        stmt = stmt.order_by(distance_expr.asc())
+        stmt = stmt.order_by(distance_expr.asc(), Event.start_at.asc(), Event.id.asc())
     else:
-        stmt = stmt.order_by(Event.start_at.asc())
+        stmt = stmt.order_by(Event.start_at.asc(), Event.id.asc())
 
     # Total matching rows before pagination, so a client (notably an agent
     # driving this through the MCP server) knows whether to keep paging without
@@ -590,6 +666,33 @@ def get_event(
         source_tier=event.source_tier,
         raw_address=event.raw_address,
     )
+
+
+@router.put(
+    "/users/me/preferences",
+    response_model=InterestResponse,
+    operation_id="setPreferences",
+    summary="Replace the current user's explicit vibe preferences",
+)
+def set_preferences(
+    *,
+    payload: PreferencesRequest,
+    session: Session = Depends(get_session),
+    user: User = Depends(get_current_user),
+) -> InterestResponse:
+    user.preferred_vibes = list(payload.preferred_vibes)
+    # Replacing explicit choices must also remove their old derived weights.
+    # Event engagement remains a separate behavioral signal.
+    session.execute(delete(UserSignal).where(
+        UserSignal.user_id == user.id,
+        UserSignal.signal_type.in_(["like", "onboarding"]),
+        UserSignal.event_id.is_(None),
+    ))
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return InterestResponse(user_id=int(user.id), saved_event_ids=list(user.saved_event_ids),
+                            preferred_vibes=list(user.preferred_vibes))
 
 
 @router.post(
@@ -719,37 +822,92 @@ def get_recommendations(
         user_id=int(user.id or 0),
         now=datetime.now(timezone.utc),
     )
-    if not preferred_vibes and not profile_scores:
-        return []
-
     now_utc = datetime.now(timezone.utc)
-    stmt = select(Event).where(Event.start_at >= now_utc).order_by(Event.start_at.asc())
-    upcoming_events = session.exec(stmt).all()
-
-    # Popularity = distinct users with engagement signals, one aggregated query.
-    pop_rows = session.exec(
+    eligible = and_(
+        func.coalesce(Event.end_at, Event.start_at) >= now_utc,
+        Event.status == "scheduled",
+    )
+    # Rank lightweight scoring inputs in Postgres, including diversity, before
+    # hydrating only the requested page of event descriptions/geometries.
+    popularity = (
         select(UserSignal.event_id, func.count(func.distinct(UserSignal.user_id)))
+        .join(Event, Event.id == UserSignal.event_id)
         .where(
-            UserSignal.event_id.isnot(None),
+            eligible,
             UserSignal.signal_type.in_(["save", "click", "external_ticket_click"]),
         )
         .group_by(UserSignal.event_id)
+    ).subquery()
+    popularity_count = func.coalesce(popularity.c[1], 0)
+    raw_weights: dict[str, float] = {}
+    for tag in {resolve_vibe_tag(v) for v in preferred_vibes} - {None}:
+        raw_weights[tag] = 100.0
+    for tag, value in profile_scores.items():
+        key = resolve_vibe_tag(tag)
+        if key:
+            raw_weights[key] = raw_weights.get(key, 0.0) + value * 10.0
+    raw_vibe = sum(
+        (case((_canonical_tag_filter(tag), weight), else_=0.0) for tag, weight in raw_weights.items()),
+        literal(0.0),
+    )
+    vibe = 100.0 * raw_vibe / (raw_vibe + 100.0)
+    freshness = case(
+        (Event.created_at >= now_utc - timedelta(hours=24), 100.0),
+        (Event.created_at >= now_utc - timedelta(hours=48), 75.0),
+        (Event.created_at >= now_utc - timedelta(days=7), 50.0),
+        else_=25.0,
+    )
+    score = (
+        vibe * _recommender_service.VIBE_WEIGHT
+        + func.least(popularity_count * 10.0, 100.0) * _recommender_service.POPULARITY_WEIGHT
+        + freshness * _recommender_service.FRESHNESS_WEIGHT
+        + 100.0 * _recommender_service.DIVERSITY_WEIGHT
+    )
+    candidates = (
+        select(
+            Event.id, Event.start_at, Event.categories[0].as_string().label("category"),
+            popularity_count.label("popularity"), raw_vibe.label("vibe"), score.label("score"),
+        )
+        .outerjoin(popularity, popularity.c.event_id == Event.id)
+        .where(eligible)
+    ).cte("recommendation_candidates")
+    ranked = select(
+        candidates,
+        func.lag(candidates.c.category).over(
+            order_by=(candidates.c.score.desc(), candidates.c.start_at, candidates.c.id)
+        ).label("previous_category"),
+    )
+    if raw_weights:
+        any_match = select(candidates.c.id).where(candidates.c.vibe > 0).exists()
+        ranked = ranked.where(or_(candidates.c.vibe > 0, ~any_match))
+    ranked = ranked.subquery()
+    final_score = ranked.c.score - case(
+        (and_(ranked.c.category.is_not(None), ranked.c.category == ranked.c.previous_category),
+         _recommender_service.DIVERSITY_PENALTY),
+        else_=0.0,
+    )
+    candidates_page = session.exec(
+        select(Event, ranked.c.popularity, final_score)
+        .join(ranked, ranked.c.id == Event.id)
+        .order_by(final_score.desc(), Event.start_at.asc(), Event.id.asc())
+        .offset(offset).limit(limit)
     ).all()
-    popularity_counts: dict[int, int] = {
-        int(eid): int(cnt) for eid, cnt in pop_rows if eid is not None
-    }
+    upcoming_events = [event for event, _, _ in candidates_page]
+    popularity_counts = {int(event.id): int(count) for event, count, _ in candidates_page}
+    final_scores = {int(event.id): float(value) for event, _, value in candidates_page}
 
     scored_events: list[ScoredEvent] = _recommender_service.score_events(
         events=upcoming_events,
         user=user,
         user_vibe_scores=profile_scores,
         popularity_counts=popularity_counts,
+        apply_diversity=False,
     )
-
-    # Filter out events with no signal at all (vibe_score <= 0 and no matched tags).
-    scored_events = [se for se in scored_events if se.vibe_score > 0 or se.matched_tags]
-
-    paged = scored_events[offset : offset + limit]
+    # SQL already ranked the full eligible corpus; never reapply a diversity
+    # penalty to a page (its previous neighbor may live on the preceding page).
+    for scored in scored_events:
+        scored.total_score = final_scores[int(scored.event.id)]
+    paged = sorted(scored_events, key=lambda item: (-item.total_score, item.event.start_at, item.event.id))
 
     recommendations: list[RecommendationResponse] = []
     counts = _people_interested_counts(
@@ -784,13 +942,12 @@ async def build_concierge_itinerary(
     user: User | None = Depends(get_optional_user),
 ) -> ConciergeResponse:
     parsed = await parse_intent_async(payload.query)
-    limit = payload.limit
 
     def _anchor_query(*, restrict_to_intent_hours: bool):
         stmt = select(Event).where(
-            Event.start_at >= parsed.window_start,
-            Event.start_at <= parsed.window_end,
+            overlaps_window(parsed.window_start, parsed.window_end),
             Event.source_tier <= 2,
+            Event.status == "scheduled",
         )
         hours = anchor_hour_range(parsed.intent) if restrict_to_intent_hours else None
         if hours is not None:
@@ -799,8 +956,20 @@ async def build_concierge_itinerary(
             local_hour = func.extract(
                 "hour", func.timezone(str(LOCAL_TZ), Event.start_at)
             )
-            stmt = stmt.where(local_hour >= hours[0], local_hour <= hours[1])
-        stmt = stmt.order_by(Event.start_at.asc()).limit(limit)
+            # An estimated 19:00 lands inside every evening intent's range, so
+            # placeholders would out-compete events that really do start then.
+            # The unrestricted fallback query below still considers them.
+            stmt = stmt.where(
+                Event.start_time_is_estimated.is_(False),
+                local_hour >= hours[0],
+                local_hour <= hours[1],
+            )
+        # No SQL limit: only one of these rows becomes the anchor, and the
+        # choice is made by vibe ranking below. Cutting the set down to the
+        # earliest `payload.limit` rows first (that field sizes the itinerary
+        # payload, not the candidate pool) hid every later event from that
+        # ranking.
+        stmt = stmt.order_by(Event.start_at.asc())
         stmt = _apply_concierge_geography_filter(stmt, parsed.geography)
         return _apply_concierge_category_filter(stmt, parsed.category_focus)
 
@@ -846,7 +1015,8 @@ async def build_concierge_itinerary(
         )
 
     anchor_lat, anchor_lng = _extract_lat_lng(anchor)
-    if anchor_lat is None or anchor_lng is None:
+    if (anchor_lat is None or anchor_lng is None
+            or anchor.location_confidence < DEFAULT_MIN_LOCATION_CONFIDENCE):
         support_events = []
     else:
         anchor_point = func.ST_SetSRID(
@@ -858,17 +1028,25 @@ async def build_concierge_itinerary(
                 select(Event)
                 .where(
                     Event.id != anchor.id,
-                    Event.start_at >= parsed.window_start,
-                    Event.start_at <= parsed.window_end,
+                    overlaps_window(parsed.window_start, parsed.window_end),
                     Event.source_tier >= 3,
+                    Event.status == "scheduled",
+                    Event.start_time_is_estimated.is_(False),
+                    Event.location_confidence >= DEFAULT_MIN_LOCATION_CONFIDENCE,
                     func.ST_DWithin(
                         cast(Event.location, Geography),
                         cast(anchor_point, Geography),
                         radius_miles * 1609.34,
                     ),
                 )
+                # No SQL limit, for the same reason as the anchor query above:
+                # `sequence_itinerary` brackets the anchor, taking the last
+                # support event before it and the first one after. Keeping only
+                # the earliest rows threw away every post-anchor candidate as
+                # soon as the pre-anchor ones filled the quota, so a night out
+                # silently ended at the main event. The set is already bounded
+                # by the intent window and the ST_DWithin radius.
                 .order_by(Event.start_at.asc())
-                .limit(limit)
             )
 
         support_events = session.exec(_support_query(radius_miles=0.5)).all()
@@ -891,6 +1069,7 @@ async def build_concierge_itinerary(
                     event_id=item.event_id,
                     title=item.title,
                     start_at=item.start_at,
+                    start_time_is_estimated=item.start_time_is_estimated,
                     end_at=item.end_at,
                     venue_name=item.venue_name,
                     external_url=item.external_url,
@@ -922,6 +1101,17 @@ def _share_url_for(token: str) -> str:
     return f"/itinerary/{token}"
 
 
+def _utc_datetime(value: datetime) -> datetime:
+    # SQLite fixtures return naive timestamps; PostgreSQL stores timestamptz.
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def _itinerary_share_status(saved: SavedItinerary, now: datetime) -> Literal["active", "expired", "revoked"]:
+    if saved.revoked_at is not None:
+        return "revoked"
+    return "expired" if _utc_datetime(saved.expires_at) <= now else "active"
+
+
 def _portable_response(itinerary: SavedItinerary) -> PortableItineraryResponse:
     """Rehydrate a stored snapshot, recomputing links from the stored facts.
 
@@ -936,6 +1126,9 @@ def _portable_response(itinerary: SavedItinerary) -> PortableItineraryResponse:
                     event_id=int(stop.get("event_id") or 0),
                     title=str(stop.get("title") or "Untitled"),
                     start_at=datetime.fromisoformat(stop["start_at"]),
+                    start_time_is_estimated=bool(
+                        stop.get("start_time_is_estimated", False)
+                    ),
                     end_at=(
                         datetime.fromisoformat(stop["end_at"])
                         if stop.get("end_at")
@@ -953,7 +1146,8 @@ def _portable_response(itinerary: SavedItinerary) -> PortableItineraryResponse:
                     lat=stop.get("lat"),
                     lng=stop.get("lng"),
                     location_confidence=float(
-                        stop.get("location_confidence") or 1.0
+                        stop["location_confidence"]
+                        if stop.get("location_confidence") is not None else 1.0
                     ),
                 ),
             )
@@ -965,12 +1159,12 @@ def _portable_response(itinerary: SavedItinerary) -> PortableItineraryResponse:
         share_token=itinerary.share_token,
         share_url=share_url,
         title=itinerary.title,
-        query=itinerary.query,
         intent=itinerary.intent,
         timeframe=itinerary.timeframe,
         geography=itinerary.geography,
         anchor_event_id=itinerary.anchor_event_id,
-        created_at=itinerary.created_at,
+        created_at=_utc_datetime(itinerary.created_at),
+        expires_at=_utc_datetime(itinerary.expires_at),
         itinerary=stops,
         text=render_itinerary_text(
             title=itinerary.title, stops=stops, share_url=share_url
@@ -978,7 +1172,7 @@ def _portable_response(itinerary: SavedItinerary) -> PortableItineraryResponse:
     )
 
 
-@router.post(
+@_sharing_router.post(
     "/concierge/itinerary/share",
     response_model=PortableItineraryResponse,
     dependencies=[Depends(share_rate_limit)],
@@ -987,9 +1181,9 @@ def share_concierge_itinerary(
     *,
     payload: ShareItineraryRequest,
     session: Session = Depends(get_session),
-    user: User | None = Depends(get_optional_user),
+    user: User = Depends(get_current_user),
 ) -> PortableItineraryResponse:
-    """Freeze an itinerary and hand back a link you can send to someone.
+    """Freeze an owned itinerary and return a public link with a bounded lifetime.
 
     Takes the stops the caller is looking at rather than re-running the
     concierge: re-planning here would quietly hand back a different night than
@@ -1018,6 +1212,7 @@ def share_concierge_itinerary(
                 "event_id": int(event.id or 0),
                 "title": event.title,
                 "start_at": event.start_at.isoformat(),
+                "start_time_is_estimated": bool(event.start_time_is_estimated),
                 "end_at": event.end_at.isoformat() if event.end_at else None,
                 "venue_name": event.venue_name,
                 "address": event.raw_address,
@@ -1038,20 +1233,23 @@ def share_concierge_itinerary(
     first_start = min(
         events_by_id[stop.event_id].start_at for stop in payload.stops
     )
+    now = datetime.now(timezone.utc)
     saved = SavedItinerary(
         share_token=generate_share_token(),
-        user_id=int(user.id) if user is not None and user.id is not None else None,
+        user_id=int(user.id),
         title=itinerary_title(
             intent=payload.intent,
             geography=payload.geography,
             starts_at=first_start,
         ),
-        query=payload.query,
+        query="",
         intent=payload.intent,
         timeframe=payload.timeframe,
         geography=payload.geography,
         anchor_event_id=payload.anchor_event_id,
         stops=snapshot,
+        created_at=now,
+        expires_at=now + timedelta(days=payload.expires_in_days),
     )
     session.add(saved)
     session.commit()
@@ -1059,7 +1257,7 @@ def share_concierge_itinerary(
     return _portable_response(saved)
 
 
-@router.get("/shared/itineraries/{token}", response_model=PortableItineraryResponse)
+@_sharing_router.get("/shared/itineraries/{token}", response_model=PortableItineraryResponse)
 def get_shared_itinerary(
     *,
     token: str,
@@ -1071,6 +1269,58 @@ def get_shared_itinerary(
     saved = session.exec(
         select(SavedItinerary).where(SavedItinerary.share_token == token)
     ).first()
-    if saved is None:
+    if saved is None or _itinerary_share_status(saved, datetime.now(timezone.utc)) != "active":
         raise HTTPException(status_code=404, detail="Itinerary not found")
     return _portable_response(saved)
+
+
+@_sharing_router.get("/users/me/itineraries", response_model=list[OwnedItineraryResponse])
+def list_owned_itineraries(
+    *,
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    session: Session = Depends(get_session),
+    user: User = Depends(get_current_user),
+) -> list[OwnedItineraryResponse]:
+    saved = session.exec(
+        select(SavedItinerary).where(SavedItinerary.user_id == user.id)
+        .order_by(SavedItinerary.created_at.desc(), SavedItinerary.id.desc())
+        .offset(offset).limit(limit)
+    ).all()
+    now = datetime.now(timezone.utc)
+    return [OwnedItineraryResponse(
+        share_token=item.share_token,
+        share_url=_share_url_for(item.share_token),
+        title=item.title,
+        created_at=_utc_datetime(item.created_at),
+        expires_at=_utc_datetime(item.expires_at),
+        revoked_at=_utc_datetime(item.revoked_at) if item.revoked_at is not None else None,
+        status=_itinerary_share_status(item, now),
+    ) for item in saved]
+
+
+@_sharing_router.delete("/users/me/itineraries/{token}", status_code=204)
+def revoke_owned_itinerary(
+    *,
+    token: str,
+    session: Session = Depends(get_session),
+    user: User = Depends(get_current_user),
+) -> Response:
+    if not is_valid_share_token(token):
+        raise HTTPException(status_code=404, detail="Itinerary not found")
+    saved = session.exec(select(SavedItinerary).where(
+        SavedItinerary.share_token == token, SavedItinerary.user_id == user.id
+    )).first()
+    if saved is None:
+        raise HTTPException(status_code=404, detail="Itinerary not found")
+    # Repeated/concurrent revocation leaves the original timestamp intact.
+    session.execute(update(SavedItinerary).where(
+        SavedItinerary.id == saved.id,
+        SavedItinerary.user_id == user.id,
+        SavedItinerary.revoked_at.is_(None),
+    ).values(revoked_at=datetime.now(timezone.utc)))
+    session.commit()
+    return Response(status_code=204)
+
+
+router.include_router(_sharing_router)

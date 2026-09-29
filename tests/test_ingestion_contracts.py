@@ -43,6 +43,7 @@ def test_canonical_event_maps_to_legacy_payload() -> None:
         location=LocationModel(
             venue_name="Pier 70",
             address_line1="420 22nd St",
+            city="Oakland",
             lat=37.7577,
             lon=-122.3872,
         ),
@@ -53,6 +54,7 @@ def test_canonical_event_maps_to_legacy_payload() -> None:
     assert payload["source_tier"] == 1
     assert payload["source_event_id"] == "tm_1"
     assert payload["location"] == "POINT(-122.3872 37.7577)"
+    assert payload["city"] == "Oakland"
 
 
 def test_legacy_payload_carries_organizer_signals_and_confidence() -> None:

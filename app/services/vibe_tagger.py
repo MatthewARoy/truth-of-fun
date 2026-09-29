@@ -21,9 +21,21 @@ class ClaudeVibeTagger:
         settings = get_settings()
         self._api_key = api_key or settings.anthropic_api_key
         self._model = model or settings.anthropic_model
-        self._client = anthropic.AsyncAnthropic(api_key=self._api_key) if self._api_key else None
+        self._client = (
+            anthropic.AsyncAnthropic(api_key=self._api_key, timeout=20.0, max_retries=1)
+            if self._api_key else None
+        )
+        self.last_call_succeeded = False
+
+    MAX_DESCRIPTION_CHARS = 8000
+    PROMPT_VERSION = "closed-vocabulary-v1"
+
+    @property
+    def cache_identity(self) -> str:
+        return f"{self._model}:{self.PROMPT_VERSION}:{','.join(sorted(VIBE_VOCABULARY))}"
 
     async def generate_vibe_tags(self, description: str | None) -> list[str]:
+        self.last_call_succeeded = False
         if self._client is None or not description or not description.strip():
             return []
 
@@ -37,7 +49,7 @@ class ClaudeVibeTagger:
             f"{vocabulary}\n\n"
             "Return only comma-separated tags and no explanations. If fewer than "
             "three fit, return only the ones that fit.\n\n"
-            f"Description:\n{description.strip()}"
+            f"Description:\n{description.strip()[:self.MAX_DESCRIPTION_CHARS]}"
         )
 
         try:
@@ -51,7 +63,9 @@ class ClaudeVibeTagger:
             return []
 
         content = response.content[0].text if response.content else ""
-        return self._normalize_tags(content)
+        tags = self._normalize_tags(content)
+        self.last_call_succeeded = True
+        return tags
 
     def _normalize_tags(self, raw_content: str | None) -> list[str]:
         if not raw_content:

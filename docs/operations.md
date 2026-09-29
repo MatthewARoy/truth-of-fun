@@ -220,6 +220,12 @@ simplest version.
 
 ## Before going live
 
+For the itinerary sharing release, coordinate migration `202609290002` with the
+new API: old API processes cannot create links after expiry becomes required.
+Existing links receive a 14-day grace period from migration time. See
+[Sharing safeguards](sharing-safety.md) for rollout, legacy ownership, and
+rollback limitations.
+
 - [ ] `JWT_SECRET_KEY` set (the app refuses to boot without it when `APP_ENV`
       is not `development`).
 - [ ] `APP_ENV` set to something other than `development`.

@@ -12,8 +12,13 @@
 
 ## Ingestion Strategy
 - Target site: `https://sf.funcheap.com/`
-- Use Playwright for lazy loading/infinite scroll pages
-- After render completion, parse HTML with deterministic extractors
+- Use Playwright (with stealth) to load the dated day indexes `/YYYY/MM/DD/` for the
+  next 10 days, following `/page/N/` via `rel="next"` (at most 3 pages a day), with a
+  1s pause between page loads
+- Each day index embeds its events as a JSON-LD array (title, start/end with offset,
+  venue, address, `offers.price`, `eventStatus`); parse that directly
+- Visit event detail pages, with deterministic extractors, only for an index page that
+  lacks the JSON-LD
 - LLM assist for listicle/unstructured blocks when deterministic parse confidence is low
 
 ## Field Mapping

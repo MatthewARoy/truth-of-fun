@@ -5,11 +5,13 @@ import { useMemo, useState } from "react";
 import { ApiClientError, type EventResponse } from "@truth-of-fun/api-client";
 import { apiClient } from "@/lib/api/client";
 import { useAuth } from "@/lib/auth-context";
+import { cn } from "@/lib/cn";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { InlineNotice } from "@/components/ui/inline-notice";
 import { Select } from "@/components/ui/select";
+import { formatLocalDay, formatLocalTime } from "@/lib/localtime";
 
 type Props = {
   event: EventResponse;
@@ -21,7 +23,25 @@ type Props = {
   onAddToFolder?: (eventId: number, folderId: number) => Promise<void>;
 };
 
-export function EventCard({ event, showRecommendationFields, folderOptions = [], onAddToFolder }: Props) {
+// A postponed or cancelled show keeps the date it was listed for, and that is
+// not a date to plan around: say what happened, and call the time the original.
+function statusNotice(status: string): { label: string; className: string } | null {
+  switch (status) {
+    case "postponed":
+      return { label: "Postponed", className: "border-amber-700 bg-amber-900/40 text-amber-100" };
+    case "cancelled":
+      return { label: "Cancelled", className: "border-rose-700 bg-rose-900/40 text-rose-100" };
+    default:
+      return null;
+  }
+}
+
+export function EventCard(props: Props) {
+  const { token } = useAuth();
+  return <EventCardContent key={token ?? "anonymous"} {...props} />;
+}
+
+function EventCardContent({ event, showRecommendationFields, folderOptions = [], onAddToFolder }: Props) {
   const { token } = useAuth();
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -29,7 +49,17 @@ export function EventCard({ event, showRecommendationFields, folderOptions = [],
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [selectedFolderId, setSelectedFolderId] = useState<string>("");
 
-  const startLabel = useMemo(() => new Date(event.start_at).toLocaleString(), [event.start_at]);
+  // A placeholder hour rendered as a clock time reads as fact and gets
+  // planned around, so estimated starts show the day and say the time is
+  // unpublished. The date itself is always real.
+  const startLabel = useMemo(
+    () =>
+      event.start_time_is_estimated
+        ? `${formatLocalDay(event.start_at)} · time TBA`
+        : `${formatLocalDay(event.start_at)} · ${formatLocalTime(event.start_at)}`,
+    [event.start_at, event.start_time_is_estimated]
+  );
+  const notice = statusNotice(event.status);
 
   function isAuthError(err: unknown): boolean {
     return err instanceof ApiClientError && err.status === 401;
@@ -126,15 +156,26 @@ export function EventCard({ event, showRecommendationFields, folderOptions = [],
           />
           {showRecommendationFields ? (
             <div className="absolute right-2 top-2 rounded-full bg-brand-500/90 px-2.5 py-1 text-xs font-semibold text-white shadow-lg backdrop-blur">
-              {showRecommendationFields.matchScore}% match
+              Match score: {showRecommendationFields.matchScore}
             </div>
           ) : null}
         </div>
       ) : null}
-      <div className="flex flex-1 flex-col gap-3 p-4">
+      <article className="flex flex-1 flex-col gap-3 p-4">
       <div className="space-y-1">
+        {notice ? (
+          <span
+            className={cn(
+              "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold",
+              notice.className
+            )}
+          >
+            {notice.label}
+          </span>
+        ) : null}
         <h3 className="text-lg font-semibold">{event.title}</h3>
         <p className="text-sm text-slate-300">
+          {notice ? "Originally " : null}
           {startLabel} at {event.venue_name || "Unknown venue"}
         </p>
       </div>
@@ -147,7 +188,7 @@ export function EventCard({ event, showRecommendationFields, folderOptions = [],
 
       {showRecommendationFields && !event.image_url ? (
         <div className="flex flex-wrap items-center gap-2 text-xs text-brand-200">
-          <Badge active>Match {showRecommendationFields.matchScore}</Badge>
+          <Badge active>Match score: {showRecommendationFields.matchScore}</Badge>
         </div>
       ) : null}
       {showRecommendationFields && showRecommendationFields.matchedVibes.length > 0 ? (
@@ -237,7 +278,7 @@ export function EventCard({ event, showRecommendationFields, folderOptions = [],
       ) : null}
       {status ? <InlineNotice tone="success">{status}</InlineNotice> : null}
       {error ? <InlineNotice tone="error">{error}</InlineNotice> : null}
-      </div>
+      </article>
     </Card>
   );
 }

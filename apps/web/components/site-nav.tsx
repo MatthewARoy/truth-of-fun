@@ -11,7 +11,10 @@ const links = [
   { href: "/recommendations", label: "For You" },
 ];
 
-const authedLinks = [{ href: "/folders", label: "Folders" }];
+const authedLinks = [
+  { href: "/folders", label: "Folders" },
+  { href: "/shared-plans", label: "Shared plans" },
+];
 
 export function SiteNav() {
   const pathname = usePathname();
@@ -45,7 +48,7 @@ export function SiteNav() {
           </>
         ) : (
           <Link
-            href="/login"
+            href={pathname === "/login" ? "/login" : `/login?next=${encodeURIComponent(pathname)}`}
             className={cn(
               "rounded-ui px-3 py-2 text-sm transition",
               pathname === "/login" ? "bg-brand-500/30 text-brand-100" : "text-slate-300 hover:bg-slate-900"

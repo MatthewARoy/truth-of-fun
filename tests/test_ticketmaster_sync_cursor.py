@@ -1,9 +1,7 @@
-"""The incremental sync cursor must not advance past events we never read.
+"""Only durably processed complete Ticketmaster searches get a completion marker.
 
-Ticketmaster is the tier-1 source and its fetch is paginated with a
-``modifiedDate`` cursor. If a page fails and the cursor still advances, every
-event on the pages we did not reach is filtered out of the next run — and every
-run after that. The loss is silent and permanent.
+The Discovery API has no documented modifiedDate filter, so searches replay.
+Partial reads must remain visibly incomplete rather than advance the marker.
 """
 
 from __future__ import annotations
@@ -53,7 +51,7 @@ def _raw_event(event_id: str) -> dict[str, Any]:
     }
 
 
-async def test_cursor_advances_when_every_page_succeeds(sync_state, monkeypatch) -> None:
+async def test_completion_marker_advances_only_after_durable_acknowledgement(sync_state, monkeypatch) -> None:
     source = TicketmasterSource(api_key="test-key")
 
     async def _fetch_page(params: dict[str, Any]) -> dict[str, Any]:
@@ -65,6 +63,8 @@ async def test_cursor_advances_when_every_page_succeeds(sync_state, monkeypatch)
 
     assert len(events) == 2
     assert source.last_fetch_error is None
+    assert tm_module._load_last_sync_timestamp() is None
+    source.acknowledge_persisted()
     assert tm_module._load_last_sync_timestamp() is not None
 
 

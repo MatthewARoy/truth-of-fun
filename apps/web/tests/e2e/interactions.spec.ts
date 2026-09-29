@@ -38,9 +38,11 @@ test("explore: searching degrades gracefully with no backend", async ({ page }) 
   await search.fill("jazz");
   await page.getByRole("button", { name: "Search", exact: true }).click();
 
-  // The typed query is preserved and the empty state renders instead of crashing.
+  // An unavailable API must not look like a successful search with zero matches.
   await expect(search).toHaveValue("jazz");
-  await expect(page.getByText(/No events found/i)).toBeVisible();
+  await expect(page.getByText(/Could not load events:/i)).toBeVisible();
+  await expect(page.getByText(/No events found/i)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
 });
 
 test("planner: 'Build itinerary' is disabled until a prompt is entered", async ({ page }) => {

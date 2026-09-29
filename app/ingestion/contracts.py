@@ -99,6 +99,10 @@ class CanonicalEvent(BaseModel):
     start_time: datetime
     end_time: datetime | None = None
     all_day: bool = False
+    # True when the calendar date is real but the wall-clock time is a
+    # connector default (some listing pages publish a date and no time).
+    # Downstream code must not present or filter on such a time as fact.
+    start_time_is_estimated: bool = False
     location: LocationModel
     offers: OffersModel = Field(default_factory=OffersModel)
     organizer: OrganizerModel = Field(default_factory=OrganizerModel)
@@ -116,6 +120,7 @@ class CanonicalEvent(BaseModel):
             "title": self.title,
             "description": self.description,
             "start_at": self.start_time,
+            "start_time_is_estimated": self.start_time_is_estimated,
             "end_at": self.end_time,
             "source_name": self.source.source_id,
             "source_tier": source_tier,
@@ -123,6 +128,7 @@ class CanonicalEvent(BaseModel):
             "external_url": str(self.source.source_url),
             "venue_name": self.location.venue_name,
             "raw_address": self.location.address_line1,
+            "city": self.location.city,
             "location": location,
             "categories": self.category_tags,
             "tags": self.vibe_tags,

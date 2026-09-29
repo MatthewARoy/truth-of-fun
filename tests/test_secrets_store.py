@@ -38,6 +38,34 @@ class _FakeRedis:
         return 1 if self._hashes.get(key) else 0
 
 
+    def eval(self, script, numkeys, key, *args):
+        """Transport double; actual script/concurrency tests use TEST_REDIS_URL."""
+        from app.services.secrets_store import _REPORT_USAGE_LUA, _RESET_EXHAUSTED_LUA
+        assert numkeys == 1
+        if script == _REPORT_USAGE_LUA:
+            if not self.exists(key):
+                return 0
+            calls, default_quota, disable, last_status, last_error, now = args
+            usage = self.hincrby(key, 'usage_count', int(calls))
+            quota = int(self.hget(key, 'quota_limit') or default_quota)
+            status = self.hget(key, 'status') or 'active'
+            if disable == '1' or status == 'disabled':
+                status = 'disabled'
+            elif quota > 0 and usage >= quota:
+                status = 'exhausted'
+            self.hset(key, {'status':status, 'last_status':last_status,
+                'last_error':last_error, 'updated_at_epoch':now})
+            return 1
+        assert script == _RESET_EXHAUSTED_LUA
+        now, window = args
+        if self.hget(key, 'status') != 'exhausted':
+            return 0
+        if int(now) - int(self.hget(key, 'updated_at_epoch') or 0) < int(window):
+            return 0
+        self.hset(key, {'usage_count':0, 'status':'active', 'last_error':'', 'updated_at_epoch':now})
+        return 1
+
+
 def _settings(**overrides: object) -> Settings:
     payload = {
         "aaim_fallback_to_env": True,
@@ -80,6 +108,18 @@ def test_env_fallback_used_when_redis_empty() -> None:
 
     assert lease.source == "env"
     assert lease.api_key == "fallback-key"
+
+
+def test_targeted_health_does_not_enumerate_other_keys(monkeypatch):
+    redis = _FakeRedis()
+    store = SecretsStore(settings=_settings(), redis_client=redis)
+    store.seed_key(provider='ticketmaster', key_id='key-a', api_key='fixture-a')
+    store.seed_key(provider='ticketmaster', key_id='key-b', api_key='fixture-b')
+    def no_inventory_scan(*args):
+        raise AssertionError('Targeted telemetry must not scan the key inventory')
+    monkeypatch.setattr(redis, 'smembers', no_inventory_scan)
+    assert [item.key_id for item in store.health('ticketmaster', key_id=' key-a ')] == ['key-a']
+    assert store.health('ticketmaster', key_id='missing') == []
 
 
 class _SpyRedis(_FakeRedis):
@@ -170,3 +210,50 @@ def test_reset_exhausted_keys_leaves_disabled_keys_untouched() -> None:
 
     assert reset == []
     assert {h.key_id: h.status for h in store.health("ticketmaster")}["key-a"] == "disabled"
+
+
+def test_delayed_usage_cannot_reenable_an_intentionally_disabled_key():
+    store = SecretsStore(settings=_settings(), redis_client=_FakeRedis())
+    store.seed_key(provider='ticketmaster', key_id='key-a', api_key='fixture', quota_limit=3)
+    store.report_usage(provider='ticketmaster', key_id='key-a', calls=1, disable=True)
+    store.report_usage(provider='ticketmaster', key_id='key-a', calls=2)
+    row = store.health('ticketmaster')[0]
+    assert row.status == 'disabled'
+    assert store.reset_exhausted_keys('ticketmaster', window_seconds=1, now=row.updated_at_epoch+2) == []
+
+
+def test_disabled_inventory_does_not_fall_back_to_unmetered_environment_key():
+    import pytest
+    store = SecretsStore(settings=_settings(), redis_client=_FakeRedis())
+    store.seed_key(provider='ticketmaster', key_id='key-a', api_key='fixture')
+    store.report_usage(provider='ticketmaster', key_id='key-a', disable=True)
+    with pytest.raises(RuntimeError, match='No active API keys'):
+        store.get_active_key('ticketmaster')
+
+
+def test_failed_store_initialization_recovers_after_bounded_retry(monkeypatch):
+    from redis.exceptions import ConnectionError
+    from app.services import secrets_store as module
+    clock = [100.0]
+    redis = _FakeRedis()
+    pings = []
+    def ping():
+        pings.append(1)
+        if len(pings) == 1:
+            raise ConnectionError('fixture outage')
+        return True
+    redis.ping = ping
+    monkeypatch.setattr(module, 'get_settings', lambda: _settings())
+    monkeypatch.setattr(module.Redis, 'from_url', lambda *args, **kwargs: redis)
+    monkeypatch.setattr(module.time, 'monotonic', lambda: clock[0])
+    clear_cache = getattr(module, '_cached_secrets_store', module.get_secrets_store).cache_clear
+    clear_cache()
+    try:
+        assert isinstance(module.get_secrets_store(), module.NoopSecretsStore)
+        assert isinstance(module.get_secrets_store(), module.NoopSecretsStore)
+        assert len(pings) == 1
+        clock[0] += 31
+        assert not isinstance(module.get_secrets_store(), module.NoopSecretsStore)
+        assert len(pings) == 2
+    finally:
+        clear_cache()

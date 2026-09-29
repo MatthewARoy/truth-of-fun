@@ -22,6 +22,8 @@ from app.models.event import Event
 from app.models.source_health import SourceHealthRecord
 from app.services.alerting import send_alert
 from app.services.data_pipeline import DataPipelineService
+from app.services.geocoding import build_geocoder
+from app.services.key_usage_snapshots import snapshot_key_health
 from app.services.secrets_store import get_secrets_store
 
 logger = logging.getLogger(__name__)
@@ -83,7 +85,9 @@ class IngestionWorker:
         quota_window_hours: int | None = None,
     ) -> None:
         self._run_interval_seconds = run_interval_seconds
-        self._pipeline_service = pipeline_service or DataPipelineService()
+        self._pipeline_service = pipeline_service or DataPipelineService(
+            geocoder=build_geocoder()
+        )
         self._session_factory = session_factory or (lambda: Session(engine))
         self._registry = source_registry or registry
         self._source_count_history: dict[str, deque[int]] = defaultdict(
@@ -102,13 +106,20 @@ class IngestionWorker:
             self._run_interval_seconds,
         )
         while True:
-            await self.run_once()
+            try:
+                await self.run_once()
+            except Exception:
+                # A failed transaction or temporary dependency outage must not
+                # terminate the scheduler. Cancellation (BaseException) still
+                # exits promptly; retry only after the normal interval.
+                logger.exception("Ingestion cycle failed; retrying after the configured interval.")
             await asyncio.sleep(self._run_interval_seconds)
 
     async def run_once(self) -> WorkerRunResult:
         started_at = datetime.now(timezone.utc)
         all_events: list[dict[str, Any]] = []
         per_source_counts: dict[str, int] = {}
+        source_runs: list[tuple[str, SourceLike | None, str | None]] = []
 
         # Roll over quota windows before fetching so a key whose daily cap has
         # reset is available again for this run.
@@ -143,11 +154,11 @@ class IngestionWorker:
                     if fetch_error is None:
                         partial = getattr(source, "last_fetch_error", None)
                         if partial:
-                            fetch_error = str(partial)[:1000]
+                            fetch_error = redact_secrets(str(partial))[:1000]
                             logger.warning(
                                 "Source '%s' completed with a partial failure: %s",
                                 source_name,
-                                partial,
+                                fetch_error,
                                 extra={
                                     "source_name": source_name,
                                     "outcome": "partial_fetch",
@@ -158,27 +169,56 @@ class IngestionWorker:
 
             per_source_counts[source_name] = len(fetched_events)
             all_events.extend(fetched_events)
+            source_runs.append((source_name, source, fetch_error))
+            self._record_quota_health(
+                source_name=source_name, used_key_id=getattr(source, "usage_key_id", None)
+            )
+
+        try:
+            with self._session_factory() as session:
+                pipeline_summary = await self._pipeline_service.process_raw_events(
+                    session=session,
+                    raw_events=all_events,
+                )
+        except Exception as exc:
+            failure = f"Pipeline {type(exc).__name__}: {redact_secrets(str(exc))}"[:1000]
+            for source_name, _source, fetch_error in source_runs:
+                self._log_canary_metrics(
+                    source_name=source_name,
+                    current_count=per_source_counts[source_name],
+                    error=f"{fetch_error}; {failure}"[:1000] if fetch_error else failure,
+                )
+            logger.exception("Ingestion pipeline failed; source checkpoints retained for replay.")
+            self._pending_alerts.append(("Ingestion pipeline failed", failure, "critical"))
+            self._persist_source_health()
+            await self._flush_alerts()
+            raise
+
+        rejected = pipeline_summary.get("rejected", 0)
+        for source_name, source, fetch_error in source_runs:
+            if rejected and fetch_error is None:
+                # Batch rejection attribution is not available: conservatively
+                # retain every checkpoint rather than skipping an invalid row.
+                fetch_error = f"Pipeline rejected {rejected} event(s); checkpoint retained for replay"
+            acknowledge = getattr(source, "acknowledge_persisted", None)
+            if fetch_error is None and callable(acknowledge):
+                try:
+                    acknowledge()
+                except Exception as exc:
+                    fetch_error = f"Checkpoint {type(exc).__name__}: {redact_secrets(str(exc))}"[:1000]
+                    logger.exception("Could not save source '%s' checkpoint.", source_name)
             self._log_canary_metrics(
                 source_name=source_name,
-                current_count=len(fetched_events),
+                current_count=per_source_counts[source_name],
                 error=fetch_error,
+                empty_is_success=bool(getattr(source, "last_fetch_was_incremental", False)),
             )
-            self._log_quota_health(source_name=source_name)
-
-        with self._session_factory() as session:
-            pipeline_summary = await self._pipeline_service.process_raw_events(
-                session=session,
-                raw_events=all_events,
-            )
+            if fetch_error:
+                self._pending_alerts.append((f"Source {source_name} incomplete", fetch_error, "warning"))
 
         self._mark_past_events()
         self._persist_source_health()
-
-        # Flush pending alerts (never blocks the pipeline)
-        for title, message, severity in self._pending_alerts:
-            with suppress(Exception):
-                await send_alert(title=title, message=message, severity=severity)
-        self._pending_alerts.clear()
+        await self._flush_alerts()
 
         finished_at = datetime.now(timezone.utc)
         result = WorkerRunResult(
@@ -196,6 +236,12 @@ class IngestionWorker:
             int((finished_at - started_at).total_seconds() * 1000),
         )
         return result
+
+    async def _flush_alerts(self) -> None:
+        pending, self._pending_alerts = self._pending_alerts, []
+        for title, message, severity in pending:
+            with suppress(Exception):
+                await send_alert(title=title, message=message, severity=severity)
 
     def _mark_past_events(self) -> None:
         """Transition scheduled events to 'past' when they ended more than 24 hours ago."""
@@ -236,10 +282,11 @@ class IngestionWorker:
                     session.merge(record)
                 session.commit()
         except Exception:
-            logger.debug("Source health persistence skipped (no database session).")
+            logger.warning("Source health could not be persisted.", exc_info=True)
 
     def _log_canary_metrics(
-        self, *, source_name: str, current_count: int, error: str | None = None
+        self, *, source_name: str, current_count: int, error: str | None = None,
+        empty_is_success: bool = False,
     ) -> None:
         history = self._source_count_history[source_name]
         historic_avg = (sum(history) / len(history)) if history else 0.0
@@ -256,7 +303,7 @@ class IngestionWorker:
             },
         )
 
-        if history and historic_avg > 10 and current_count == 0:
+        if history and historic_avg > 10 and current_count == 0 and not empty_is_success:
             logger.critical(
                 "CANARY ALERT source=%s returned 0 events but historic average is %.2f (>10).",
                 source_name,
@@ -273,7 +320,7 @@ class IngestionWorker:
         # Update module-level source health state
         prev = _source_health_state.get(source_name, {})
         consecutive_zeros = prev.get("consecutive_zeros", 0)
-        if current_count == 0:
+        if current_count == 0 and not (empty_is_success and error is None):
             consecutive_zeros += 1
         else:
             consecutive_zeros = 0
@@ -303,7 +350,8 @@ class IngestionWorker:
             "last_error": error,
             "last_error_at": now_iso if error is not None else prev.get("last_error_at"),
             "last_success_at": (
-                now_iso if error is None and current_count > 0 else prev.get("last_success_at")
+                now_iso if error is None and (current_count > 0 or empty_is_success)
+                else prev.get("last_success_at")
             ),
         }
 
@@ -313,7 +361,7 @@ class IngestionWorker:
         Replaces the manual redis-cli recovery: exhausted keys come back on
         their own once ``aaim_quota_window_hours`` have passed.
         """
-        if self._quota_window_hours <= 0:
+        if not get_settings().aaim_enabled or self._quota_window_hours <= 0:
             return
         window_seconds = self._quota_window_hours * 3600
         try:
@@ -330,8 +378,8 @@ class IngestionWorker:
                 ", ".join(reset_ids),
             )
 
-    def _log_quota_health(self, *, source_name: str) -> None:
-        if source_name != "ticketmaster":
+    def _record_quota_health(self, *, source_name: str, used_key_id: str | None = None) -> None:
+        if source_name != "ticketmaster" or not get_settings().aaim_enabled:
             return
         try:
             key_health = get_secrets_store().health("ticketmaster")
@@ -340,6 +388,16 @@ class IngestionWorker:
         if not key_health:
             logger.warning("AAIM quota health: no ticketmaster keys in secrets store.")
             return
+
+        # Provider calls were already spent even if event persistence fails.
+        # Reuse the cycle's quota read, recording only the key this source used.
+        used_health = [item for item in key_health if getattr(item, "key_id", None) == used_key_id]
+        if used_key_id and used_health:
+            try:
+                with self._session_factory() as session:
+                    snapshot_key_health(provider=source_name, health_items=used_health, session=session)
+            except Exception:
+                logger.warning("Worker API-key usage snapshot could not be recorded.", exc_info=True)
 
         active_count = sum(1 for item in key_health if item.status == "active")
         exhausted_count = sum(1 for item in key_health if item.status == "exhausted")

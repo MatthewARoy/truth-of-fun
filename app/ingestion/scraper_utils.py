@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import html
 import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
+
+import httpx
 
 SF_TZ = ZoneInfo("America/Los_Angeles")
 DEFAULT_SF_LAT = 37.7749
@@ -24,6 +28,35 @@ def strip_html_tags(value: str) -> str:
     without_tags = re.sub(r"<[^>]+>", " ", value)
     collapsed = re.sub(r"\s+", " ", without_tags).strip()
     return collapsed
+
+
+_REL_NEXT_TAG_RE = re.compile(
+    r"<(?:a|link)\b[^>]*\brel=[\"'][^\"']*\bnext\b[^\"']*[\"'][^>]*>", re.IGNORECASE
+)
+_HREF_RE = re.compile(r"\bhref=[\"']([^\"']+)[\"']", re.IGNORECASE)
+
+
+def find_next_page_url(markup: str, page_url: str) -> str | None:
+    """Absolute URL of a listing page's ``rel="next"`` link, or None on its last page.
+
+    Paginated calendars mark the following page with ``rel="next"`` on an
+    ``<a>`` or ``<link>``; its absence is a crawl's natural stop. Callers still
+    check the URL stays on the listing they are walking.
+    """
+    for tag in _REL_NEXT_TAG_RE.finditer(markup):
+        href = _HREF_RE.search(tag.group(0))
+        if href:
+            return urljoin(page_url, html.unescape(href.group(1).strip()))
+    return None
+
+
+def describe_fetch_error(exc: httpx.HTTPError) -> str:
+    """Short, surfaceable reason a listing page failed: error type and URL."""
+    try:
+        url = str(exc.request.url)
+    except RuntimeError:
+        return type(exc).__name__
+    return f"{type(exc).__name__} fetching {url}"
 
 
 def parse_12h_to_24h(hour: int, meridiem: str) -> int:

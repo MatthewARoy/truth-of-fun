@@ -118,6 +118,23 @@ _KEYWORD_CATEGORY_RULES: list[tuple[tuple[str, ...], str]] = [
         FITNESS,
     ),
     (
+        # Bare "stand-up" also names paddleboarding and bare "improv" matches
+        # jazz "improvisation", so those only count with comedy context.
+        (
+            "comedy",
+            "comedian",
+            "comedic",
+            "stand-up comic",
+            "standup comic",
+            "improv show",
+            "improv night",
+            "improv jam",
+            "sketch show",
+            "roast battle",
+        ),
+        COMEDY,
+    ),
+    (
         (
             "meditation",
             "sound bath",

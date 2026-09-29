@@ -12,32 +12,42 @@ import { Input } from "@/components/ui/input";
 
 export default function FoldersPage() {
   const { ready, token } = useAuth();
+  if (!ready) return <InlineNotice>Loading folders...</InlineNotice>;
+  if (!token) return (
+    <section className="space-y-4">
+      <h2 className="text-xl font-semibold">Vibe Folders</h2>
+      <InlineNotice tone="info">Sign in to create and share vibe folders.</InlineNotice>
+    </section>
+  );
+  return <SignedInFolders key={token} />;
+}
+
+function SignedInFolders() {
   const [folders, setFolders] = useState<FolderResponse[]>([]);
   const [newName, setNewName] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  async function loadFolders() {
+  async function loadFolders(signal?: AbortSignal) {
     setLoading(true);
     setError(null);
     try {
-      const response = await apiClient.listFolders();
+      const response = await apiClient.listFolders({ signal });
+      if (signal?.aborted) return;
       setFolders(response);
     } catch (err) {
+      if (signal?.aborted) return;
       setError(err instanceof Error ? err.message : "Unknown error");
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
   }
 
   useEffect(() => {
-    if (!ready) return;
-    if (!token) {
-      setLoading(false);
-      return;
-    }
-    void loadFolders();
-  }, [ready, token]);
+    const controller = new AbortController();
+    void loadFolders(controller.signal);
+    return () => controller.abort();
+  }, []);
 
   async function createFolder() {
     if (!newName.trim()) {
@@ -69,12 +79,9 @@ export default function FoldersPage() {
           Create
         </Button>
       </Card>
-      {ready && !token ? (
-        <InlineNotice tone="info">Sign in to create and share vibe folders.</InlineNotice>
-      ) : null}
-      {loading && token ? <InlineNotice>Loading folders...</InlineNotice> : null}
+      {loading ? <InlineNotice>Loading folders...</InlineNotice> : null}
       {error ? <InlineNotice tone="error">Error: {error}</InlineNotice> : null}
-      {ready && token && !loading && !error && folders.length === 0 ? (
+      {!loading && !error && folders.length === 0 ? (
         <InlineNotice>No folders yet — create one above.</InlineNotice>
       ) : null}
       <ul className="space-y-2">

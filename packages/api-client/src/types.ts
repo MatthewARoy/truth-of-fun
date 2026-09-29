@@ -3,6 +3,9 @@ export type EventResponse = {
   title: string;
   description: string | null;
   start_at: string;
+  /** The calendar date is real, but the clock time is a source placeholder.
+   * Render the day and say the time isn't published — never a precise time. */
+  start_time_is_estimated: boolean;
   end_at: string | null;
   external_url: string | null;
   venue_name: string | null;
@@ -65,6 +68,10 @@ export type InterestResponse = {
   preferred_vibes: string[];
 };
 
+export type PreferencesRequest = {
+  preferred_vibes: string[];
+};
+
 export type ConciergeRequest = {
   query: string;
   limit?: number;
@@ -88,6 +95,8 @@ export type ItineraryStopResponse = {
   event_id: number;
   title: string;
   start_at: string;
+  /** See `EventResponse.start_time_is_estimated`. */
+  start_time_is_estimated: boolean;
   end_at: string | null;
   venue_name: string | null;
   external_url: string | null;
@@ -120,7 +129,8 @@ export type ShareItineraryStop = {
 };
 
 export type ShareItineraryRequest = {
-  query?: string;
+  /** Link lifetime in days. The API defaults to 14 and allows 1–30. */
+  expires_in_days?: number;
   intent?: string;
   timeframe?: string;
   geography?: string | null;
@@ -133,14 +143,24 @@ export type PortableItineraryResponse = {
   /** Relative path to the public page, e.g. "/itinerary/<token>". */
   share_url: string;
   title: string;
-  query: string;
   intent: string;
   timeframe: string;
   geography: string | null;
   anchor_event_id: number | null;
   created_at: string;
+  expires_at: string;
   itinerary: ItineraryStopResponse[];
   text: string;
+};
+
+export type SharedItinerarySummary = {
+  share_token: string;
+  share_url: string;
+  title: string;
+  created_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+  status: "active" | "expired" | "revoked";
 };
 
 export type FolderResponse = {

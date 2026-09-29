@@ -31,3 +31,9 @@ Next.js (App Router) frontend for the Truth of Fun event aggregator.
 - `npm run web:lint` — run lint checks
 - `npm run web:typecheck` — run TypeScript checks
 - `npm run web:test:e2e` — run Playwright tests
+
+The browser suite covers route rendering, mocked successful API interactions,
+request races, authentication navigation, logout cleanup, and unavailable-API
+recovery. Run it with the backend stopped; it is not a full-stack acceptance
+test. Shared HTTP retry/deadline behavior is covered separately with
+`npm test --workspace @truth-of-fun/api-client`.

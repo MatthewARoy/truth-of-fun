@@ -9,16 +9,18 @@ export function useRecommendations() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const loadRecommendations = useCallback(async () => {
+  const loadRecommendations = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     setError(null);
     try {
-      const result = await apiClient.getRecommendations();
+      const result = await apiClient.getRecommendations(25, 0, { signal });
+      if (signal?.aborted) return;
       setItems(result);
     } catch (err) {
+      if (signal?.aborted) return;
       setError(err instanceof Error ? err.message : "Unknown error");
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
   }, []);
 

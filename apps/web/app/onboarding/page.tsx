@@ -7,8 +7,14 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { InlineNotice } from "@/components/ui/inline-notice";
 import { Textarea } from "@/components/ui/textarea";
+import { useAuth } from "@/lib/auth-context";
 
 export default function OnboardingPage() {
+  const { token } = useAuth();
+  return <OnboardingContent key={token ?? "anonymous"} />;
+}
+
+function OnboardingContent() {
   const router = useRouter();
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);

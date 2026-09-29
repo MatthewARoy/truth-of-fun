@@ -1,3 +1,5 @@
+import pytest
+
 from app.services.recommender import RecommenderService
 
 
@@ -12,10 +14,19 @@ def test_score_event_uses_explicit_preference_and_profile_weights() -> None:
         profile_scores={"#jazz": 2.0, "#datenight": 1.0},
     )
 
-    # An explicit like (100) plus profile weight (3.0 * 10) saturates the cap.
-    assert score == 100.0
+    assert score == pytest.approx(100 * 130 / 230)
     assert "#Jazz" in matched
     assert "#DateNight" in matched
+
+
+def test_more_preferences_and_behavior_can_improve_an_existing_match():
+    def score(tags, profile):
+        return _score(event_tags=tags, preferred_vibes={"#jazz", "#date"}, profile_scores=profile)[0]
+
+    one = score(["#jazz"], {})
+    two = score(["#jazz", "#date"], {})
+    learned = score(["#jazz", "#date"], {"#jazz": 4.0})
+    assert 0 < one < two < learned < 100
 
 
 def test_score_event_returns_zero_for_unmatched_event() -> None:

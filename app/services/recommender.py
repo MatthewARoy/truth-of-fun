@@ -45,6 +45,7 @@ class RecommenderService:
         user: User | None,
         user_vibe_scores: dict[str, float],
         popularity_counts: dict[int, int],
+        apply_diversity: bool = True,
     ) -> list[ScoredEvent]:
         """Score and rank a list of events for the given user.
 
@@ -90,7 +91,8 @@ class RecommenderService:
 
         # Phase 2: sort by raw total then apply diversity penalty in-order.
         raw_scored.sort(key=lambda s: (-s.total_score, s.event.start_at))
-        self._apply_diversity_penalty(raw_scored)
+        if apply_diversity:
+            self._apply_diversity_penalty(raw_scored)
 
         # Re-sort after penalties.
         raw_scored.sort(key=lambda s: (-s.total_score, s.event.start_at))
@@ -147,8 +149,9 @@ class RecommenderService:
 
         # Raw score: explicit likes drive relevance, then decayed behavioural weight.
         raw = (len(matched_keys) * 100.0) + (weighted_score * 10.0)
-        # Normalise into the 0-100 range.
-        return min(raw, 100.0), matched
+        # Keep headroom for additional preferences and learned behavior. One
+        # explicit preference must not saturate every matching event at 100.
+        return 100.0 * raw / (raw + 100.0), matched
 
     @staticmethod
     def _popularity_score(interaction_count: int) -> float:

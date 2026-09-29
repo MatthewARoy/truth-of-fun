@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import threading
 import time
 from dataclasses import dataclass
 from functools import lru_cache
@@ -9,6 +11,36 @@ from redis import Redis
 from redis.exceptions import RedisError
 
 from app.core.config import Settings, get_settings
+
+logger = logging.getLogger(__name__)
+_REDIS_RETRY_SECONDS = 30.0
+_store_lock = threading.Lock()
+
+# Each transition is atomic with respect to usage reporters and quota resets.
+# An ordinary HGET/HSET sequence can overwrite an operator's concurrent disable.
+_REPORT_USAGE_LUA = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+local usage = redis.call('HINCRBY', KEYS[1], 'usage_count', ARGV[1])
+local quota = tonumber(redis.call('HGET', KEYS[1], 'quota_limit')) or tonumber(ARGV[2])
+local status = redis.call('HGET', KEYS[1], 'status') or 'active'
+if ARGV[3] == '1' or status == 'disabled' then
+    status = 'disabled'
+elseif quota > 0 and usage >= quota then
+    status = 'exhausted'
+end
+redis.call('HSET', KEYS[1], 'status', status, 'last_status', ARGV[4],
+    'last_error', ARGV[5], 'updated_at_epoch', ARGV[6])
+return 1
+"""
+
+_RESET_EXHAUSTED_LUA = """
+if redis.call('HGET', KEYS[1], 'status') ~= 'exhausted' then return 0 end
+local updated = tonumber(redis.call('HGET', KEYS[1], 'updated_at_epoch')) or 0
+if tonumber(ARGV[1]) - updated < tonumber(ARGV[2]) then return 0 end
+redis.call('HSET', KEYS[1], 'usage_count', 0, 'status', 'active',
+    'last_error', '', 'updated_at_epoch', ARGV[1])
+return 1
+"""
 
 
 @dataclass
@@ -39,7 +71,10 @@ class SecretsStore:
     def __init__(self, *, settings: Settings | None = None, redis_client: Redis | None = None) -> None:
         self._settings = settings or get_settings()
         self._prefix = self._settings.aaim_redis_prefix
-        self._redis = redis_client or Redis.from_url(self._settings.redis_url, decode_responses=True)
+        self._redis = redis_client or Redis.from_url(
+            self._settings.redis_url, decode_responses=True,
+            socket_connect_timeout=2, socket_timeout=2,
+        )
 
     def _ids_key(self, provider: str) -> str:
         return f"{self._prefix}:keys:{provider}:ids"
@@ -133,9 +168,12 @@ class SecretsStore:
             lease_candidates.sort(key=lambda item: (item.usage_count, item.key_id))
             return lease_candidates[0]
 
-        fallback = self._fallback_env_key(normalized_provider)
-        if fallback is not None:
-            return fallback
+        # A configured inventory with disabled/exhausted keys must fail closed;
+        # using the environment key here would bypass the same quota/disable.
+        if not key_ids:
+            fallback = self._fallback_env_key(normalized_provider)
+            if fallback is not None:
+                return fallback
         raise RuntimeError(f"No active API keys available for provider '{normalized_provider}'.")
 
     def report_usage(
@@ -156,31 +194,15 @@ class SecretsStore:
             return
 
         key_hash = self._key_hash(normalized_provider, normalized_key_id)
-        if not self._redis.exists(key_hash):
+        updated = self._redis.eval(
+            _REPORT_USAGE_LUA, 1, key_hash,
+            max(0, int(calls)), self._default_quota(normalized_provider),
+            "1" if disable else "0",
+            "" if last_status is None else str(last_status),
+            last_error or "", int(time.time()),
+        )
+        if not updated:
             raise KeyError(f"Unknown key_id '{normalized_key_id}' for provider '{normalized_provider}'.")
-
-        # HINCRBY is atomic, so concurrent reporters (worker + API bots) never
-        # lose increments the way a read-modify-write would.
-        next_usage = int(self._redis.hincrby(key_hash, "usage_count", max(0, int(calls))))
-        quota_limit = self._coerce_int(
-            self._redis.hget(key_hash, "quota_limit"), self._default_quota(normalized_provider)
-        )
-        next_status = self._redis.hget(key_hash, "status") or "active"
-
-        if disable:
-            next_status = "disabled"
-        elif quota_limit > 0 and next_usage >= quota_limit:
-            next_status = "exhausted"
-
-        self._redis.hset(
-            key_hash,
-            mapping={
-                "status": next_status,
-                "last_status": "" if last_status is None else str(last_status),
-                "last_error": last_error or "",
-                "updated_at_epoch": int(time.time()),
-            },
-        )
 
     def reset_exhausted_keys(
         self, provider: str, *, window_seconds: int, now: int | None = None
@@ -201,27 +223,18 @@ class SecretsStore:
         reset_ids: list[str] = []
         for key_id in sorted(self._redis.smembers(self._ids_key(normalized_provider))):
             key_hash = self._key_hash(normalized_provider, key_id)
-            payload = self._redis.hgetall(key_hash)
-            if not payload or payload.get("status") != "exhausted":
-                continue
-            exhausted_at = self._coerce_int(payload.get("updated_at_epoch"), 0)
-            if current - exhausted_at < window_seconds:
-                continue
-            self._redis.hset(
-                key_hash,
-                mapping={
-                    "usage_count": 0,
-                    "status": "active",
-                    "last_error": "",
-                    "updated_at_epoch": current,
-                },
-            )
-            reset_ids.append(key_id)
+            if self._redis.eval(_RESET_EXHAUSTED_LUA, 1, key_hash, current, window_seconds):
+                reset_ids.append(key_id)
         return reset_ids
 
-    def health(self, provider: str) -> list[KeyHealth]:
+    def health(self, provider: str, *, key_id: str | None = None) -> list[KeyHealth]:
         normalized_provider = provider.strip().lower()
-        key_ids = sorted(self._redis.smembers(self._ids_key(normalized_provider)))
+        # Usage telemetry needs only its reported key; avoid one Redis read per
+        # inventory entry on every API report. Operator/cycle health reads all.
+        key_ids = (
+            [key_id.strip()] if key_id is not None
+            else sorted(self._redis.smembers(self._ids_key(normalized_provider)))
+        )
         results: list[KeyHealth] = []
         for key_id in key_ids:
             payload = self._redis.hgetall(self._key_hash(normalized_provider, key_id))
@@ -253,6 +266,7 @@ class NoopSecretsStore(SecretsStore):
         self._settings = settings or get_settings()
         self._prefix = self._settings.aaim_redis_prefix
         self._redis = None
+        self.retry_at = time.monotonic() + _REDIS_RETRY_SECONDS
 
     def seed_key(self, *, provider: str, key_id: str, api_key: str, quota_limit: int | None = None) -> None:
         raise RuntimeError("Cannot seed keys: Redis is unavailable.")
@@ -280,16 +294,28 @@ class NoopSecretsStore(SecretsStore):
     ) -> list[str]:
         return []
 
-    def health(self, provider: str) -> list[KeyHealth]:
+    def health(self, provider: str, *, key_id: str | None = None) -> list[KeyHealth]:
         return []
 
 
 @lru_cache(maxsize=1)
-def get_secrets_store() -> SecretsStore:
+def _cached_secrets_store() -> SecretsStore:
     settings = get_settings()
     try:
         store = SecretsStore(settings=settings)
         store._redis.ping()
         return store
     except RedisError:
+        logger.warning("Redis secrets store unavailable; retrying initialization in 30 seconds.")
         return NoopSecretsStore(settings=settings)
+
+
+def get_secrets_store() -> SecretsStore:
+    # Serialize failed initialization retries across API threads. Successful
+    # clients reconnect normally through redis-py's connection pool.
+    with _store_lock:
+        store = _cached_secrets_store()
+        if isinstance(store, NoopSecretsStore) and time.monotonic() >= store.retry_at:
+            _cached_secrets_store.cache_clear()
+            store = _cached_secrets_store()
+        return store

@@ -8,9 +8,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
 import anthropic
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.core.config import get_settings
-from app.core.localtime import LOCAL_TZ
+from app.core.localtime import LOCAL_TZ, tonight_end, weekend_window
 from app.services.categories import FITNESS, query_targets_fitness
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,7 @@ class EventLike(Protocol):
     id: int | None
     title: str
     start_at: datetime
+    start_time_is_estimated: bool
     end_at: datetime | None
     source_tier: int
     venue_name: str | None
@@ -44,6 +46,8 @@ class SequencedStop:
     event_id: int
     title: str
     start_at: datetime
+    # The stop's clock time is a connector placeholder; only the day is real.
+    start_time_is_estimated: bool
     end_at: datetime | None
     venue_name: str | None
     external_url: str | None
@@ -91,16 +95,30 @@ def sequence_itinerary(
     anchor: EventLike,
     support_events: list[EventLike],
 ) -> list[SequencedStop]:
-    sorted_support = sorted(support_events, key=lambda e: e.start_at)
+    # An unpublished clock time cannot support a precise multi-stop schedule.
+    if anchor.start_time_is_estimated:
+        return [_build_stop(kind="main_event", event=anchor, travel_buffer_minutes_before=0)]
+    buffer = timedelta(minutes=30)
+    # Treat the small hours as part of the previous outing, not the next day.
+    outing = (anchor.start_at.astimezone(LOCAL_TZ) - timedelta(hours=4)).date()
+    sorted_support = sorted(
+        (event for event in support_events
+         if event.id != anchor.id and not event.start_time_is_estimated
+         and (event.end_at is None or event.end_at >= event.start_at)
+         and (event.start_at.astimezone(LOCAL_TZ) - timedelta(hours=4)).date() == outing),
+        key=lambda e: e.start_at,
+    )
     pre_candidates = [
         event
         for event in sorted_support
-        if event.start_at <= (anchor.start_at - timedelta(minutes=30))
+        if event.end_at is not None and event.end_at >= event.start_at
+        and event.end_at + buffer <= anchor.start_at
     ]
     post_candidates = [
         event
         for event in sorted_support
-        if event.start_at >= (anchor.start_at + timedelta(minutes=30))
+        if anchor.end_at is not None and anchor.end_at >= anchor.start_at
+        and event.start_at >= anchor.end_at + buffer
     ]
 
     pre_event = pre_candidates[-1] if pre_candidates else None
@@ -110,18 +128,18 @@ def sequence_itinerary(
     if pre_event is not None:
         stops.append(
             _build_stop(
-                kind="pre_event_drink", event=pre_event, travel_buffer_minutes_before=0
+                kind="before_event", event=pre_event, travel_buffer_minutes_before=0
             )
         )
 
     stops.append(
-        _build_stop(kind="main_event", event=anchor, travel_buffer_minutes_before=30)
+        _build_stop(kind="main_event", event=anchor, travel_buffer_minutes_before=30 if pre_event else 0)
     )
 
     if post_event is not None:
         stops.append(
             _build_stop(
-                kind="late_night_snack",
+                kind="after_event",
                 event=post_event,
                 travel_buffer_minutes_before=30,
             )
@@ -138,7 +156,8 @@ def _build_stop(
         event_id=int(event.id or 0),
         title=event.title,
         start_at=event.start_at,
-        end_at=event.end_at,
+        start_time_is_estimated=event.start_time_is_estimated,
+        end_at=event.end_at if event.end_at is not None and event.end_at >= event.start_at else None,
         venue_name=event.venue_name,
         external_url=event.external_url,
         travel_buffer_minutes_before=travel_buffer_minutes_before,
@@ -261,6 +280,13 @@ class IntentParser(Protocol):
         """Return a ParsedIntent or None if the parser could not handle the prompt."""
 
 
+class _IntentPayload(BaseModel):
+    model_config = ConfigDict(strict=True)
+    intent: str
+    timeframe: str
+    geography: str | None = None
+
+
 class ClaudeIntentParser:
     """LLM-backed intent parser. Returns None on any failure so callers can fall back."""
 
@@ -302,24 +328,28 @@ class ClaudeIntentParser:
             )
             return None
 
-        content = response.content[0].text if response.content else ""
+        content = getattr(response.content[0], "text", "") if response.content else ""
+        if not isinstance(content, str):
+            return None
         payload = self._extract_json(content)
-        if payload is None:
+        try:
+            validated = _IntentPayload.model_validate(payload)
+        except ValidationError:
             return None
 
-        intent = payload.get("intent")
+        intent = validated.intent
         if intent not in _KNOWN_INTENTS:
-            intent = "general_night_out"
+            return None
         # Deterministic safety net: an unmistakably fitness-oriented request
         # maps to active_day even if the model classified it otherwise.
         if query_targets_fitness(prompt):
             intent = "active_day"
 
-        timeframe = payload.get("timeframe")
+        timeframe = validated.timeframe
         if timeframe not in _KNOWN_TIMEFRAMES:
-            timeframe = "upcoming_week"
+            return None
 
-        geography_raw = payload.get("geography")
+        geography_raw = validated.geography
         geography = (
             geography_raw.strip().lower()
             if isinstance(geography_raw, str) and geography_raw.strip()
@@ -424,9 +454,10 @@ def _resolve_timeframe_window(
         return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
 
     if label == "tonight":
-        return _to_utc(
-            day_start.replace(hour=18), day_start + timedelta(days=1, hours=3)
-        )
+        evening = day_start.replace(hour=18)
+        if local_now.hour < 3:
+            evening -= timedelta(days=1)
+        return max(now, evening.astimezone(timezone.utc)), tonight_end(now)
     if label == "tomorrow":
         tomorrow = day_start + timedelta(days=1)
         return _to_utc(tomorrow.replace(hour=10), tomorrow + timedelta(days=1, hours=2))
@@ -434,14 +465,10 @@ def _resolve_timeframe_window(
     if weekday is not None:
         days_until = (weekday - day_start.weekday()) % 7
         target = day_start + timedelta(days=days_until)
-        return _to_utc(target.replace(hour=10), target + timedelta(days=1, hours=2))
+        start, end = _to_utc(target.replace(hour=10), target + timedelta(days=1, hours=2))
+        return max(now, start), end
     if label == "this_weekend":
-        days_until_sat = (5 - day_start.weekday()) % 7
-        saturday = day_start + timedelta(days=days_until_sat)
-        return _to_utc(
-            saturday.replace(hour=10),
-            saturday + timedelta(days=1, hours=23, minutes=59),
-        )
+        return weekend_window(now)
     return now, now + timedelta(days=7)
 
 

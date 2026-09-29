@@ -35,3 +35,36 @@ async def test_onboarding_tag_extraction_normalizes_tags() -> None:
     assert tags
     assert all(tag.startswith("#") for tag in tags)
     assert all(" " not in tag for tag in tags)
+
+
+def test_profile_streams_joined_tags_without_per_signal_event_queries():
+    from sqlalchemy import event, text
+    from sqlmodel import Session, SQLModel, create_engine
+    from app.models.user import User
+    from app.models.user_signal import UserSignal
+
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine, tables=[User.__table__, UserSignal.__table__])
+    # Geometry is irrelevant to this read path; only the projected columns exist.
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE events (id INTEGER PRIMARY KEY, tags TEXT)"))
+        connection.execute(text("INSERT INTO events VALUES (1, '[\"#Jazz\"]')"))
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        for _ in range(100):
+            session.add(UserSignal(user_id=1, event_id=1, signal_type="click", weight=1, created_at=now))
+        session.add(UserSignal(user_id=1, vibe_tag="#Chill", signal_type="like", weight=4, created_at=now))
+        session.add(UserSignal(user_id=2, event_id=1, signal_type="save", weight=5, created_at=now))
+        session.commit()
+    queries = []
+
+    def capture(_conn, _cursor, statement, _params, _context, _many):
+        if statement.lstrip().upper().startswith("SELECT"):
+            queries.append(statement)
+
+    event.listen(engine, "before_cursor_execute", capture)
+    with Session(engine) as session:
+        scores = UserProfileService().compute_vibe_scores_for_user(session=session, user_id=1, now=now)
+    assert scores == {"#jazz": 100.0, "#chill": 4.0}
+    assert len(queries) == 1
+    engine.dispose()

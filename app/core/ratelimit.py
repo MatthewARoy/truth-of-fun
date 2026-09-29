@@ -1,7 +1,7 @@
 """Inbound per-client rate limiting for abuse-prone endpoints.
 
 The limits guard three things: LLM spend (concierge/onboarding call Anthropic
-per request), credential stuffing (login/register), and unauthenticated row
+per request), credential stuffing (login/register), and excessive snapshot row
 creation (itinerary sharing). Windows are in-process, so the caps apply per
 API replica — the reference deployment runs one. Behind a reverse proxy the
 client address is only correct when uvicorn runs with --proxy-headers.

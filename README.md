@@ -137,6 +137,8 @@ All runtime config is read from environment variables — see [`.env.example`](.
 | `JWT_SECRET_KEY` | yes for non-dev | Generate with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Startup refuses to boot in non-`development` `APP_ENV` if unset. |
 | `TICKETMASTER_API_KEY` | optional | Disables Ticketmaster ingestion if blank |
 | `ANTHROPIC_API_KEY` | optional | Disables LLM vibe tagging and falls the concierge back to keyword intent parsing if blank |
+| `GEOCODING_PROVIDER` | optional | `nominatim` geocodes venues missing from the static table (free, no key, 1 req/s). Unset means the static table only — the previous behaviour. Google/Mapbox need billing and are not implemented. |
+| `GEOCODING_MAX_LOOKUPS_PER_RUN` / `GEOCODING_FAILURE_RETRY_DAYS` | optional | Per-cycle lookup ceiling (default 200) and how long a failed lookup stays cached (default 30 days) |
 | `REDIS_URL` | optional | Required only if `AAIM_ENABLED=true` — see [Enabling AAIM key rotation](./docs/architecture.md#enabling-aaim-key-rotation) |
 | `PROXY_URL` / `PROXY_ROTATION` | optional | For scrapers behind aggressive bot protection |
 | `RATE_LIMIT_LLM_PER_HOUR` etc. | optional | Per-client inbound rate limits on the LLM-backed, share, and auth endpoints (defaults 30/60/20; `0` disables). Behind a reverse proxy, run uvicorn with `--proxy-headers` so limits key on the real client IP. |
@@ -164,7 +166,7 @@ npm run web:test                   # web route + interaction tests (Playwright; 
 npm run mcp-server:typecheck       # MCP server type check
 ```
 
-The backend suite is hermetic except for the database integration tests
+Backend integration tests need PostGIS; Redis concurrency tests use `TEST_REDIS_URL`. Run against a disposable loopback database whose name ends in `_test`, set `DATABASE_URL` and `TEST_DATABASE_URL` to that database, and apply `alembic upgrade head` before pytest. The isolated event-ranking fixture refuses ordinary application databases and connection query overrides. Without Postgres, database tests skip; a skipped suite does not validate migrations or SQL behavior. CI supplies PostGIS and Redis. See [the stabilization inventory](docs/stabilization-2026-09-29.md) for the reviewed branch dispositions.
 (`tests/test_health_db.py`, `tests/test_event_detail_api.py`), which skip
 automatically when Postgres isn't running (`make db-up` to include them). Those
 two need a real Postgres because the events table carries a PostGIS geometry

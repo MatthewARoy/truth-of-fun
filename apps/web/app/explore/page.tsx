@@ -1,14 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import dynamic from "next/dynamic";
-import type { EventResponse, EventsQuery } from "@truth-of-fun/api-client";
-import { apiClient } from "@/lib/api/client";
+import type { EventsQuery } from "@truth-of-fun/api-client";
+import { useEventSearch } from "@/hooks/use-event-search";
 import { EventCard } from "@/components/event-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { InlineNotice } from "@/components/ui/inline-notice";
 import { cn } from "@/lib/cn";
 
 const EventMap = dynamic(
@@ -37,63 +38,28 @@ const CATEGORY_FILTERS = [
 ];
 
 export default function ExplorePage() {
-  const [events, setEvents] = useState<EventResponse[]>([]);
-  const [loading, setLoading] = useState(true);
   const [searchText, setSearchText] = useState("");
+  const [appliedSearch, setAppliedSearch] = useState("");
   const [timePreset, setTimePreset] = useState("");
   const [locationPreset, setLocationPreset] = useState("");
   const [activeCategory, setActiveCategory] = useState("");
-  const [page, setPage] = useState(0);
-  const [hasMore, setHasMore] = useState(true);
   const [view, setView] = useState<View>("list");
   const [selectedId, setSelectedId] = useState<number | null>(null);
-  const PAGE_SIZE = 20;
-
-  const fetchEvents = useCallback(async (reset: boolean) => {
-    setLoading(true);
-    const offset = reset ? 0 : page * PAGE_SIZE;
-    try {
-      const query: EventsQuery = { limit: PAGE_SIZE, offset };
-      if (searchText.trim()) query.q = searchText.trim();
-      if (timePreset) query.time_preset = timePreset as EventsQuery["time_preset"];
-      if (locationPreset) query.location_preset = locationPreset as EventsQuery["location_preset"];
-      if (activeCategory) query.category = activeCategory;
-
-      const data = await apiClient.getEvents(query);
-      if (reset) {
-        setEvents(data);
-        setPage(0);
-      } else {
-        setEvents((prev) => [...prev, ...data]);
-      }
-      setHasMore(data.length === PAGE_SIZE);
-    } catch (err) {
-      console.error("Failed to load events", err);
-    } finally {
-      setLoading(false);
-    }
-  }, [searchText, timePreset, locationPreset, activeCategory, page]);
-
-  useEffect(() => {
-    fetchEvents(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timePreset, locationPreset, activeCategory]);
+  const query = useMemo<EventsQuery>(() => ({
+    q: appliedSearch || undefined,
+    time_preset: (timePreset || undefined) as EventsQuery["time_preset"],
+    location_preset: (locationPreset || undefined) as EventsQuery["location_preset"],
+    category: activeCategory || undefined,
+  }), [appliedSearch, timePreset, locationPreset, activeCategory]);
+  const { events, loading, error, hasMore, loadMore } = useEventSearch(query);
 
   function handleSearch(e: React.FormEvent) {
     e.preventDefault();
-    fetchEvents(true);
+    setAppliedSearch(searchText.trim());
+    setSelectedId(null);
   }
 
-  function loadMore() {
-    setPage((p) => p + 1);
-  }
-
-  useEffect(() => {
-    if (page > 0) fetchEvents(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page]);
-
-  // Category filtering is applied server-side (see fetchEvents), so pagination
+  // Category filtering is applied server-side, so pagination
   // stays correct — render whatever the API returned.
   const displayed = events;
 
@@ -107,7 +73,7 @@ export default function ExplorePage() {
             onChange={(e) => setSearchText(e.target.value)}
           />
         </div>
-        <Button type="submit" disabled={loading}>Search</Button>
+        <Button type="submit">Search</Button>
       </form>
 
       <div className="flex flex-wrap gap-4">
@@ -216,6 +182,12 @@ export default function ExplorePage() {
         </div>
       </div>
 
+      {error ? (
+        <InlineNotice tone="error">
+          Could not load events: {error}{" "}
+          <Button variant="ghost" size="sm" onClick={loadMore} disabled={loading}>Retry</Button>
+        </InlineNotice>
+      ) : null}
       {loading && events.length === 0 ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 6 }).map((_, i) => (
@@ -229,7 +201,7 @@ export default function ExplorePage() {
       ) : view === "map" ? (
         <EventMap
           events={displayed}
-          selectedId={selectedId}
+          selectedId={displayed.some((event) => event.id === selectedId) ? selectedId : null}
           onSelect={(id) => setSelectedId(id)}
         />
       ) : (
@@ -239,19 +211,19 @@ export default function ExplorePage() {
               <EventCard key={event.id} event={event} />
             ))}
           </div>
-          {displayed.length === 0 && !loading && (
+          {displayed.length === 0 && !loading && !error && (
             <Card className="py-12 text-center">
               <p className="text-slate-400">No events found. Try adjusting your filters.</p>
             </Card>
           )}
-          {hasMore && (
-            <div className="flex justify-center pt-2">
-              <Button variant="secondary" onClick={loadMore} disabled={loading}>
-                {loading ? "Loading..." : "Load more"}
-              </Button>
-            </div>
-          )}
         </>
+      )}
+      {hasMore && !error && (
+        <div className="flex justify-center pt-2">
+          <Button variant="secondary" onClick={loadMore} disabled={loading}>
+            {loading ? "Loading..." : "Load more"}
+          </Button>
+        </div>
       )}
     </div>
   );

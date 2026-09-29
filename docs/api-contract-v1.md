@@ -33,11 +33,14 @@ Abuse-prone endpoints enforce per-client sliding windows and return **429** with
 | GET | `/events` | none |
 | GET | `/events/{event_id}` | none |
 | GET | `/recommendations` | user JWT |
+| PUT | `/users/me/preferences` | user JWT |
 | POST | `/users/me/onboarding` | user JWT |
 | POST | `/users/me/interests` | user JWT |
 | POST | `/concierge/itinerary` | none |
-| POST | `/concierge/itinerary/share` | optional |
+| POST | `/concierge/itinerary/share` | user JWT |
 | GET | `/shared/itineraries/{token}` | none |
+| GET | `/users/me/itineraries` | user JWT |
+| DELETE | `/users/me/itineraries/{token}` | user JWT (owner) |
 | GET | `/folders` | user JWT |
 | POST | `/folders` | user JWT |
 | GET | `/folders/{folder_id}` | user JWT (owner or member) |
@@ -145,11 +148,11 @@ Query parameters:
 | `category` | string | Filter by activity category (e.g. `Fitness`, `Music`). Synonyms like `gym`/`workout`/`yoga` resolve to `Fitness` |
 | `time_preset` | `"tonight"` \| `"this_weekend"` | Friendly time window (computed in SF local time) |
 | `location_preset` | `"sf"` \| `"oakland"` \| `"san_jose"` | Friendly location filter |
-| `start_at` | datetime | Start-time lower bound (overrides preset start) |
+| `start_at` | datetime | Window lower bound, including ongoing events (overrides preset start) |
 | `end_at` | datetime | Start-time upper bound (overrides preset end) |
 | `include_past` | bool (default `false`) | Include past events |
 | `sort_by` | `"date"` (default) \| `"distance"` | `distance` requires `lat`/`lng` |
-| `status` | string | Filter by event status |
+| `status` | string | Filter by event status; defaults to scheduled when `include_past=false` |
 | `limit` | int 1–200 (default 25) | |
 | `offset` | int ≥ 0 (default 0) | |
 
@@ -184,7 +187,7 @@ not present it as one.
 
 ### GET /recommendations
 
-Auth: user bearer JWT. Personalized upcoming events scored from explicit vibe likes plus decayed behavioral signals. Returns `[]` for users with no preferences or signals.
+Auth: user bearer JWT. Scheduled, upcoming or ongoing events scored from explicit vibe likes plus decayed behavioral signals. Users with no matching preferences/signals receive a popularity, freshness, and diversity fallback. Ranking and diversity are applied in SQL before pagination; only the requested page is hydrated. `match_score` is a heuristic ranking score, not a calibrated match probability.
 
 Query parameters: `limit` (int 1–200, default 25), `offset` (int ≥ 0, default 0).
 
@@ -196,6 +199,16 @@ Response: list of `RecommendationResponse` = `EventResponse` plus:
   "matched_vibes": "string[]"
 }
 ```
+
+### PUT /users/me/preferences
+
+Auth: user bearer JWT. Replaces explicit choices with a canonical list from the supported vibe vocabulary. `[]` clears explicit choices. Unknown tags return `422`. Previous explicit like/onboarding signals are removed; event engagement signals are retained.
+
+Request: `{"preferred_vibes": ["#livemusic", "#art"]}` (at most 50 entries).
+
+Response: `{"user_id": 1, "saved_event_ids": [], "preferred_vibes": ["#livemusic", "#art"]}`.
+
+Use this endpoint for structured pickers; the free-text endpoint below is a separate extraction flow.
 
 ### POST /users/me/onboarding
 
@@ -251,12 +264,16 @@ Auth: none. Parses a natural-language query into an intent/time window, picks an
 
 `intent` is one of `date_night`, `out_of_town_guests`, `bar_crawl`, `active_day`, `general_night_out`. An `active_day` request (gyms, workout classes, climbing, yoga, run clubs, etc.) sets `category_focus: "Fitness"` and restricts anchor selection to that category.
 
+`limit` is accepted but has no effect. An itinerary is at most three stops by construction, so the field never sized the response; it only ever truncated the candidate pools, which decided the anchor and the post-anchor stop by start time before ranking and sequencing ran.
+
+New stops use `before_event`, `main_event`, and `after_event`; existing shared snapshots retain their old labels. All candidates must be scheduled. Sequencing stays within one outing night and requires a published predecessor end plus a 30-minute travel buffer. Unknown or estimated timing reduces the number of stops. Low-confidence anchor coordinates produce a standalone event instead of an asserted nearby route. The fixed buffer is not a live travel-time estimate.
+
 Request:
 
 ```json
 {
   "query": "string",
-  "limit": "int (default 25, clamped to 3–100)"
+  "limit": "int (accepted for compatibility; ignored — see below)"
 }
 ```
 
@@ -307,15 +324,15 @@ Response:
 
 ### POST /concierge/itinerary/share
 
-Auth: optional (associates the itinerary with the caller when a JWT is present). Freezes an itinerary and returns a public link.
+Auth: user bearer JWT. Freezes an owned itinerary and returns an expiring public link. Anonymous creation returns `401`; public reading still needs no sign-in. This is an intentional privacy change from the earlier optional-auth contract.
 
-Callers send the stops they are looking at rather than the original query — re-planning server-side could return a different night than the one being shared. Only `kind`, `event_id`, and ordering are taken from the request; every display field is re-read from `events` when the snapshot is written, so a shared page can never render caller-supplied text. `422` if `stops` is empty or longer than 20, `404` if any `event_id` is unknown.
+Callers send the selected stops, without the private planning prompt. Event titles, venues, coordinates, and times are re-read from `events`; plan metadata and ordering come from the caller. `422` if `stops` is empty or longer than 20, `404` if any `event_id` is unknown. Creating a link is a separate, explicit publication action; building or copying a plan does not publish it.
 
 Request:
 
 ```json
 {
-  "query": "string",
+  "expires_in_days": "int (1–30, default 14)",
   "intent": "string (default \"general_night_out\")",
   "timeframe": "string (default \"upcoming_week\")",
   "geography": "string | null",
@@ -330,15 +347,15 @@ Request:
 }
 ```
 
-`stops` holds 1–20 entries. Unauthenticated callers may share, so `query` is capped at 2000 characters.
+`stops` holds 1–20 entries. The legacy `query` input is accepted for compatibility but ignored and not stored on new snapshots. The TypeScript client and MCP sharing tool do not accept it. All sharing and owner-management responses use `Cache-Control: private, no-store`.
 
 Response: `PortableItinerary` (below).
 
 ### GET /shared/itineraries/{token}
 
-Auth: none — the link is the credential. `404` for an unknown or malformed token.
+Auth: none — anyone holding a live link can read the itinerary. Unknown, malformed, expired, and revoked links all return the same `404`. Public responses omit `query` entirely, including snapshots written before this change. Legacy query text may remain in the private database; it is never serialized by these endpoints.
 
-The stored stops are a snapshot, so the page keeps rendering after the underlying events are re-deduped, repriced, or dropped from the feed. Links are recomputed from the snapshot on every read rather than stored, so improvements to URL building reach itineraries shared before the change.
+The stored stops are a snapshot, so an active link keeps rendering after the underlying events are re-deduped, repriced, or dropped from the feed. It becomes unavailable at `expires_at` or on owner revocation. Links are recomputed from the snapshot on every read rather than stored. Migration `202609290002` gives existing links a 14-day grace period from migration time and preserves their existing ownership.
 
 `PortableItinerary`:
 
@@ -347,16 +364,35 @@ The stored stops are a snapshot, so the page keeps rendering after the underlyin
   "share_token": "string",
   "share_url": "string (relative, e.g. \"/itinerary/<token>\")",
   "title": "string",
-  "query": "string",
   "intent": "string",
   "timeframe": "string",
   "geography": "string | null",
   "anchor_event_id": "int | null",
   "created_at": "datetime",
+  "expires_at": "datetime",
   "itinerary": ["ItineraryStop"],
   "text": "string"
 }
 ```
+
+### GET /users/me/itineraries
+
+Auth: user bearer JWT. Lists only the caller's published links, newest first.
+Accepts `limit` (1–100, default 25) and `offset` (default 0). Includes expired
+and revoked links so owners can inspect prior outcomes. Anonymous legacy links
+are not assigned to a new owner.
+
+Response: a list of `{share_token, share_url, title, created_at, expires_at,
+revoked_at, status}`, where `status` is `active`, `expired`, or `revoked`.
+No original prompt is included.
+
+### DELETE /users/me/itineraries/{token}
+
+Auth: user bearer JWT, matching the stored owner. Marks the share revoked and
+returns `204` without a body. Repeating the owner's request is idempotent.
+Unknown tokens and another user's tokens return the same `404`; knowing a
+public token does not grant revocation authority. Revocation prevents future
+reads but cannot erase copies a recipient already made.
 
 ## Social
 
@@ -590,7 +626,7 @@ Response:
 
 ### POST /internal/secrets/{provider}/usage
 
-Scope: `internal:secrets:write`. Reports usage against a leased key and snapshots provider health. `404` for an unknown key, `400` on other store errors.
+Scope: `internal:secrets:write`. Reports usage against a leased key and samples that key's health at most hourly or on a state change. Sampling is best effort and skips a busy sampler. Snapshots retain at most 30 days and 1,000 rows per key. `404` for an unknown key, `400` on store errors before usage is accepted.
 
 Request:
 
@@ -616,7 +652,7 @@ Response:
 
 ### GET /internal/secrets/{provider}/health
 
-Scope: `internal:secrets:read`. Per-key health for a provider (also persists a usage snapshot).
+Scope: `internal:secrets:read`. Read-only per-key health for a provider.
 
 Response:
 

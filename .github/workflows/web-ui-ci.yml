@@ -9,6 +9,13 @@ on:
       - ".github/workflows/web-ui-ci.yml"
       - "package.json"
       - "package-lock.json"
+      - "app/**"
+      - "alembic/**"
+      - "alembic.ini"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "tests/browser/**"
+      - "playwright.integration.config.ts"
   pull_request:
     paths:
       - "apps/web/**"
@@ -17,10 +24,35 @@ on:
       - ".github/workflows/web-ui-ci.yml"
       - "package.json"
       - "package-lock.json"
+      - "app/**"
+      - "alembic/**"
+      - "alembic.ini"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "tests/browser/**"
+      - "playwright.integration.config.ts"
 
 jobs:
   web-checks:
     runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_DB: truth_sharing_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - "5433:5432"
+        options: >-
+          --health-cmd "pg_isready -U postgres -d truth_sharing_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SHARING_E2E_DATABASE_URL: postgresql+psycopg2://postgres:postgres@127.0.0.1:5433/truth_sharing_test
+      # Next embeds this at build time; the real API test server uses the same port.
+      NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8168
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -29,6 +61,16 @@ jobs:
           cache: "npm"
       - name: Install dependencies
         run: npm ci
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install locked API dependencies for sharing acceptance
+        run: uv sync --frozen
+      - name: Test shared API client
+        run: npm test --workspace @truth-of-fun/api-client
       - name: Audit JavaScript dependencies
         run: npm audit --audit-level=high
       - name: Build shared api client
@@ -38,14 +80,19 @@ jobs:
         # MCP server ships green. It imports the api-client's dist, so it has
         # to run after that build.
         run: npm run mcp-server:build
+      - name: Test MCP sharing authority and lifecycle
+        run: npm test --workspace @truth-of-fun/mcp-server
       - name: Lint web app
         run: npm run web:lint
       - name: Typecheck web app
         run: npm run web:typecheck
+      - name: Build production web app
+        run: npm run web:build
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
-      # The Playwright suite is route-level smoke tests: it auto-starts the
-      # Next.js dev server and asserts static page content only. No backend
-      # or database is required (and none is provided here).
-      - name: Run web smoke tests (no backend)
+      # Route smoke, mocked API interactions, and unavailable-API recovery.
+      # This checks browser behavior, not a live full-stack deployment.
+      - name: Run browser regression tests (no backend)
         run: npm run web:test
+      - name: Run sharing acceptance (production web, real API and PostGIS)
+        run: npm run web:test:integration

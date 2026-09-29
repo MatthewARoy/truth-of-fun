@@ -23,6 +23,7 @@ class _Event:
     source_tier: int
     venue_name: str | None = None
     external_url: str | None = None
+    start_time_is_estimated: bool = False
 
 
 def test_parse_intent_extracts_fields() -> None:
@@ -59,13 +60,14 @@ def test_parse_intent_resolves_multiword_neighborhood() -> None:
 
 def test_itinerary_sequencing_with_travel_buffers() -> None:
     base = datetime(2026, 3, 7, 20, 0, tzinfo=timezone.utc)
-    anchor = _Event(id=10, title="Main Concert", start_at=base, end_at=None, source_tier=1)
+    anchor = _Event(id=10, title="Main Concert", start_at=base,
+                    end_at=base + timedelta(hours=1), source_tier=1)
     support = [
         _Event(
             id=1,
             title="Pre Drinks",
             start_at=base - timedelta(hours=1),
-            end_at=None,
+            end_at=base - timedelta(minutes=30),
             source_tier=3,
         ),
         _Event(
@@ -79,9 +81,9 @@ def test_itinerary_sequencing_with_travel_buffers() -> None:
 
     itinerary = sequence_itinerary(anchor=anchor, support_events=support)
     assert [stop.kind for stop in itinerary] == [
-        "pre_event_drink",
+        "before_event",
         "main_event",
-        "late_night_snack",
+        "after_event",
     ]
     assert itinerary[1].travel_buffer_minutes_before == 30
     assert itinerary[2].travel_buffer_minutes_before == 30
