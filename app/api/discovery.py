@@ -4,12 +4,16 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field, field_validator
 from geoalchemy2 import Geography
-from sqlalchemy import and_, case, cast, delete, func, literal, or_, text
+from sqlalchemy import and_, case, cast, delete, func, literal, or_, text, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Session, select
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.database import get_session
 from app.core.localtime import LOCAL_TZ, tonight_end, weekend_window
@@ -153,9 +157,10 @@ class ShareItineraryStopRequest(BaseModel):
 
 
 class ShareItineraryRequest(BaseModel):
-    # Bounded because this endpoint writes a row for an unauthenticated caller:
-    # a real night out is a handful of stops, and the prompt is a sentence.
+    # Accepted only for older clients. A raw planning prompt is never persisted
+    # by this endpoint or included in the public response.
     query: str = Field(default="", max_length=2000)
+    expires_in_days: int = Field(default=14, ge=1, le=30)
     intent: str = Field(default="general_night_out", max_length=100)
     timeframe: str = Field(default="upcoming_week", max_length=100)
     geography: str | None = Field(default=None, max_length=255)
@@ -167,14 +172,47 @@ class PortableItineraryResponse(BaseModel):
     share_token: str
     share_url: str
     title: str
-    query: str
     intent: str
     timeframe: str
     geography: str | None
     anchor_event_id: int | None
     created_at: datetime
+    expires_at: datetime
     itinerary: list[ItineraryStopResponse]
     text: str
+
+
+class OwnedItineraryResponse(BaseModel):
+    share_token: str
+    share_url: str
+    title: str
+    created_at: datetime
+    expires_at: datetime
+    revoked_at: datetime | None
+    status: Literal["active", "expired", "revoked"]
+
+
+class _NoStoreShareRoute(APIRoute):
+    """Revocable links and owner inventories must not outlive access in caches."""
+
+    def get_route_handler(self):
+        original = super().get_route_handler()
+
+        async def handler(request: Request) -> Response:
+            try:
+                response = await original(request)
+            except StarletteHTTPException as exc:
+                exc.headers = {**(exc.headers or {}), "Cache-Control": "private, no-store"}
+                raise
+            except RequestValidationError as exc:
+                response = await request_validation_exception_handler(request, exc)
+            response.headers["Cache-Control"] = "private, no-store"
+            return response
+
+        return handler
+
+
+_sharing_router = APIRouter(route_class=_NoStoreShareRoute)
 
 
 class InterestRequest(BaseModel):
@@ -1063,6 +1101,17 @@ def _share_url_for(token: str) -> str:
     return f"/itinerary/{token}"
 
 
+def _utc_datetime(value: datetime) -> datetime:
+    # SQLite fixtures return naive timestamps; PostgreSQL stores timestamptz.
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def _itinerary_share_status(saved: SavedItinerary, now: datetime) -> Literal["active", "expired", "revoked"]:
+    if saved.revoked_at is not None:
+        return "revoked"
+    return "expired" if _utc_datetime(saved.expires_at) <= now else "active"
+
+
 def _portable_response(itinerary: SavedItinerary) -> PortableItineraryResponse:
     """Rehydrate a stored snapshot, recomputing links from the stored facts.
 
@@ -1110,12 +1159,12 @@ def _portable_response(itinerary: SavedItinerary) -> PortableItineraryResponse:
         share_token=itinerary.share_token,
         share_url=share_url,
         title=itinerary.title,
-        query=itinerary.query,
         intent=itinerary.intent,
         timeframe=itinerary.timeframe,
         geography=itinerary.geography,
         anchor_event_id=itinerary.anchor_event_id,
-        created_at=itinerary.created_at,
+        created_at=_utc_datetime(itinerary.created_at),
+        expires_at=_utc_datetime(itinerary.expires_at),
         itinerary=stops,
         text=render_itinerary_text(
             title=itinerary.title, stops=stops, share_url=share_url
@@ -1123,7 +1172,7 @@ def _portable_response(itinerary: SavedItinerary) -> PortableItineraryResponse:
     )
 
 
-@router.post(
+@_sharing_router.post(
     "/concierge/itinerary/share",
     response_model=PortableItineraryResponse,
     dependencies=[Depends(share_rate_limit)],
@@ -1132,9 +1181,9 @@ def share_concierge_itinerary(
     *,
     payload: ShareItineraryRequest,
     session: Session = Depends(get_session),
-    user: User | None = Depends(get_optional_user),
+    user: User = Depends(get_current_user),
 ) -> PortableItineraryResponse:
-    """Freeze an itinerary and hand back a link you can send to someone.
+    """Freeze an owned itinerary and return a public link with a bounded lifetime.
 
     Takes the stops the caller is looking at rather than re-running the
     concierge: re-planning here would quietly hand back a different night than
@@ -1184,20 +1233,23 @@ def share_concierge_itinerary(
     first_start = min(
         events_by_id[stop.event_id].start_at for stop in payload.stops
     )
+    now = datetime.now(timezone.utc)
     saved = SavedItinerary(
         share_token=generate_share_token(),
-        user_id=int(user.id) if user is not None and user.id is not None else None,
+        user_id=int(user.id),
         title=itinerary_title(
             intent=payload.intent,
             geography=payload.geography,
             starts_at=first_start,
         ),
-        query=payload.query,
+        query="",
         intent=payload.intent,
         timeframe=payload.timeframe,
         geography=payload.geography,
         anchor_event_id=payload.anchor_event_id,
         stops=snapshot,
+        created_at=now,
+        expires_at=now + timedelta(days=payload.expires_in_days),
     )
     session.add(saved)
     session.commit()
@@ -1205,7 +1257,7 @@ def share_concierge_itinerary(
     return _portable_response(saved)
 
 
-@router.get("/shared/itineraries/{token}", response_model=PortableItineraryResponse)
+@_sharing_router.get("/shared/itineraries/{token}", response_model=PortableItineraryResponse)
 def get_shared_itinerary(
     *,
     token: str,
@@ -1217,6 +1269,58 @@ def get_shared_itinerary(
     saved = session.exec(
         select(SavedItinerary).where(SavedItinerary.share_token == token)
     ).first()
-    if saved is None:
+    if saved is None or _itinerary_share_status(saved, datetime.now(timezone.utc)) != "active":
         raise HTTPException(status_code=404, detail="Itinerary not found")
     return _portable_response(saved)
+
+
+@_sharing_router.get("/users/me/itineraries", response_model=list[OwnedItineraryResponse])
+def list_owned_itineraries(
+    *,
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    session: Session = Depends(get_session),
+    user: User = Depends(get_current_user),
+) -> list[OwnedItineraryResponse]:
+    saved = session.exec(
+        select(SavedItinerary).where(SavedItinerary.user_id == user.id)
+        .order_by(SavedItinerary.created_at.desc(), SavedItinerary.id.desc())
+        .offset(offset).limit(limit)
+    ).all()
+    now = datetime.now(timezone.utc)
+    return [OwnedItineraryResponse(
+        share_token=item.share_token,
+        share_url=_share_url_for(item.share_token),
+        title=item.title,
+        created_at=_utc_datetime(item.created_at),
+        expires_at=_utc_datetime(item.expires_at),
+        revoked_at=_utc_datetime(item.revoked_at) if item.revoked_at is not None else None,
+        status=_itinerary_share_status(item, now),
+    ) for item in saved]
+
+
+@_sharing_router.delete("/users/me/itineraries/{token}", status_code=204)
+def revoke_owned_itinerary(
+    *,
+    token: str,
+    session: Session = Depends(get_session),
+    user: User = Depends(get_current_user),
+) -> Response:
+    if not is_valid_share_token(token):
+        raise HTTPException(status_code=404, detail="Itinerary not found")
+    saved = session.exec(select(SavedItinerary).where(
+        SavedItinerary.share_token == token, SavedItinerary.user_id == user.id
+    )).first()
+    if saved is None:
+        raise HTTPException(status_code=404, detail="Itinerary not found")
+    # Repeated/concurrent revocation leaves the original timestamp intact.
+    session.execute(update(SavedItinerary).where(
+        SavedItinerary.id == saved.id,
+        SavedItinerary.user_id == user.id,
+        SavedItinerary.revoked_at.is_(None),
+    ).values(revoked_at=datetime.now(timezone.utc)))
+    session.commit()
+    return Response(status_code=204)
+
+
+router.include_router(_sharing_router)

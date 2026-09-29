@@ -15,8 +15,10 @@ from datetime import datetime, timedelta, timezone
 from fastapi.testclient import TestClient
 from sqlalchemy import event as sa_event, text
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
+from app.api.auth import _create_access_token
+from app.core.config import get_settings
 from app.core.database import get_session
 from app.main import app
 from app.models.event import Event
@@ -37,7 +39,7 @@ def _ewkb_hex(lat: float, lng: float) -> str:
 
 
 @contextmanager
-def _build_client() -> Generator[tuple[TestClient, Session], None, None]:
+def _build_client(*, authenticated: bool = True) -> Generator[tuple[TestClient, Session], None, None]:
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -65,9 +67,20 @@ def _build_client() -> Generator[tuple[TestClient, Session], None, None]:
     with Session(engine) as session:
         app.dependency_overrides[get_session] = lambda: session
         try:
-            yield TestClient(app), session
+            headers = _user_headers(session, "owner@example.com") if authenticated else {}
+            yield TestClient(app, headers=headers), session
         finally:
             app.dependency_overrides.pop(get_session, None)
+
+
+def _user_headers(session: Session, email: str) -> dict[str, str]:
+    user = session.exec(select(User).where(User.email == email)).first()
+    if user is None:
+        user = User(email=email)
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+    return {"Authorization": f"Bearer {_create_access_token(user=user, settings=get_settings())}"}
 
 
 def _insert_event(
@@ -187,6 +200,7 @@ def test_shared_link_opens_without_auth() -> None:
             "/concierge/itinerary/share", json=_share_payload(drinks_id, show_id)
         ).json()["share_token"]
 
+        client.headers.pop("Authorization")
         response = client.get(f"/shared/itineraries/{token}")
         assert response.status_code == 200, response.text
         body = response.json()
@@ -264,7 +278,7 @@ def test_sharing_an_empty_itinerary_is_rejected() -> None:
 
 
 def test_an_absurd_number_of_stops_is_rejected() -> None:
-    """The endpoint writes a row for anonymous callers, so the input is bounded."""
+    """A share remains bounded even when its owner is authenticated."""
     with _build_client() as (client, session):
         _, show_id = _seed_night(session)
         response = client.post(
@@ -311,3 +325,170 @@ def test_low_confidence_coordinates_fall_back_to_the_address(confidence) -> None
         assert "@37.8044,-122.2712" in body["itinerary"][0]["links"]["parking_url"]
         shared = client.get(f"/shared/itineraries/{body['share_token']}").json()
         assert shared["itinerary"][0]["links"]["directions_url"] == directions
+
+
+def test_anonymous_creation_requires_auth_without_writing_a_snapshot():
+    with _build_client(authenticated=False) as (client, session):
+        drinks_id, show_id = _seed_night(session)
+        response = client.post('/concierge/itinerary/share', json=_share_payload(drinks_id, show_id))
+        assert response.status_code == 401
+        assert 'no-store' in response.headers['Cache-Control']
+        assert session.exec(select(SavedItinerary)).all() == []
+
+
+def test_new_and_legacy_queries_never_reach_public_json_or_text():
+    with _build_client() as (client, session):
+        drinks_id, show_id = _seed_night(session)
+        payload = _share_payload(drinks_id, show_id)
+        private_query = 'Private surprise for Alex after their medical appointment'
+        payload['query'] = private_query
+        response = client.post('/concierge/itinerary/share', json=payload)
+        assert response.status_code == 200
+        assert 'query' not in response.json()
+        assert private_query not in response.text
+        assert 'no-store' in response.headers['Cache-Control']
+        saved = session.exec(select(SavedItinerary)).one()
+        assert saved.query == ''
+        saved.query = private_query  # A record written before this rollout.
+        session.add(saved)
+        session.commit()
+        client.headers.pop('Authorization')
+        public = client.get(f'/shared/itineraries/{saved.share_token}')
+        assert public.status_code == 200
+        assert 'query' not in public.json()
+        assert private_query not in public.text
+        assert 'no-store' in public.headers['Cache-Control']
+
+
+@pytest.mark.parametrize('days', [0, 31, -1, 1.5])
+def test_share_expiry_is_bounded(days):
+    with _build_client() as (client, session):
+        drinks_id, show_id = _seed_night(session)
+        payload = _share_payload(drinks_id, show_id) | {'expires_in_days': days}
+        response = client.post('/concierge/itinerary/share', json=payload)
+        assert response.status_code == 422
+        assert 'no-store' in response.headers['Cache-Control']
+        assert session.exec(select(SavedItinerary)).all() == []
+
+
+def test_default_and_custom_expiry_and_exact_boundary(monkeypatch):
+    from app.api import discovery
+    instant = datetime(2030, 5, 1, 12, 0, tzinfo=timezone.utc)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant
+    monkeypatch.setattr(discovery, 'datetime', Clock)
+    with _build_client() as (client, session):
+        drinks_id, show_id = _seed_night(session)
+        payload = _share_payload(drinks_id, show_id)
+        default = client.post('/concierge/itinerary/share', json=payload).json()
+        custom = client.post('/concierge/itinerary/share', json=payload | {'expires_in_days': 30}).json()
+        assert datetime.fromisoformat(default['expires_at']) == instant + timedelta(days=14)
+        assert datetime.fromisoformat(custom['expires_at']) == instant + timedelta(days=30)
+        token = default['share_token']
+        instant += timedelta(days=14, microseconds=-1)
+        assert client.get(f'/shared/itineraries/{token}').status_code == 200
+        instant += timedelta(microseconds=1)
+        expired = client.get(f'/shared/itineraries/{token}')
+        unknown = client.get('/shared/itineraries/' + 'z' * 32)
+        assert expired.status_code == unknown.status_code == 404
+        assert expired.json() == unknown.json() == {'detail': 'Itinerary not found'}
+        assert 'no-store' in expired.headers['Cache-Control']
+        assert 'no-store' in unknown.headers['Cache-Control']
+
+
+def test_owners_can_list_and_revoke_only_their_own_links():
+    with _build_client() as (client, session):
+        drinks_id, show_id = _seed_night(session)
+        token = client.post('/concierge/itinerary/share', json=_share_payload(drinks_id, show_id)).json()['share_token']
+        other = _user_headers(session, 'other@example.com')
+        assert client.get('/users/me/itineraries', headers=other).json() == []
+        denied = client.delete(f'/users/me/itineraries/{token}', headers=other)
+        assert denied.status_code == 404
+        assert client.get(f'/shared/itineraries/{token}').status_code == 200
+        listed = client.get('/users/me/itineraries')
+        assert 'private' in listed.headers['Cache-Control']
+        assert 'no-store' in listed.headers['Cache-Control']
+        assert [item['share_token'] for item in listed.json()] == [token]
+        assert listed.json()[0]['status'] == 'active'
+        assert 'query' not in listed.json()[0]
+        first = client.delete(f'/users/me/itineraries/{token}')
+        assert first.status_code == 204 and first.content == b''
+        revoked_at = client.get('/users/me/itineraries').json()[0]['revoked_at']
+        assert client.delete(f'/users/me/itineraries/{token}').status_code == 204
+        item = client.get('/users/me/itineraries').json()[0]
+        assert item['status'] == 'revoked' and item['revoked_at'] == revoked_at
+        client.headers.pop('Authorization')
+        assert client.get('/users/me/itineraries').status_code == 401
+        assert client.delete(f'/users/me/itineraries/{token}').status_code == 401
+        public = client.get(f'/shared/itineraries/{token}')
+        assert public.status_code == 404
+        assert 'no-store' in public.headers['Cache-Control']
+
+
+def test_owner_list_paginates_and_includes_expired_records():
+    with _build_client() as (client, session):
+        drinks_id, show_id = _seed_night(session)
+        payload = _share_payload(drinks_id, show_id)
+        first = client.post('/concierge/itinerary/share', json=payload).json()['share_token']
+        second = client.post('/concierge/itinerary/share', json=payload).json()['share_token']
+        expired = session.exec(select(SavedItinerary).where(SavedItinerary.share_token == first)).one()
+        expired.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        session.add(expired)
+        session.commit()
+        assert [row['share_token'] for row in client.get('/users/me/itineraries?limit=1').json()] == [second]
+        rows = client.get('/users/me/itineraries?limit=1&offset=1').json()
+        assert rows[0]['share_token'] == first and rows[0]['status'] == 'expired'
+        assert client.get('/users/me/itineraries?limit=101').status_code == 422
+        assert client.get('/users/me/itineraries?offset=-1').status_code == 422
+
+
+def test_legacy_anonymous_link_is_readable_but_cannot_be_claimed_or_revoked():
+    with _build_client() as (client, session):
+        drinks_id, show_id = _seed_night(session)
+        token = client.post('/concierge/itinerary/share', json=_share_payload(drinks_id, show_id)).json()['share_token']
+        saved = session.exec(select(SavedItinerary)).one()
+        saved.user_id = None  # Legacy snapshots predate required ownership.
+        session.add(saved)
+        session.commit()
+        assert client.get('/users/me/itineraries').json() == []
+        assert client.delete(f'/users/me/itineraries/{token}').status_code == 404
+        client.headers.pop('Authorization')
+        assert client.get(f'/shared/itineraries/{token}').status_code == 200
+
+
+def test_share_rate_limit_keeps_retry_header_and_never_caches_failure():
+    from app.core.ratelimit import get_share_limiter
+    limiter = get_share_limiter()
+    previous = limiter.limit
+    limiter.limit = 1
+    limiter.reset()
+    try:
+        with _build_client() as (client, session):
+            drinks_id, show_id = _seed_night(session)
+            payload = _share_payload(drinks_id, show_id)
+            assert client.post('/concierge/itinerary/share', json=payload).status_code == 200
+            limited = client.post('/concierge/itinerary/share', json=payload)
+            assert limited.status_code == 429
+            assert int(limited.headers['Retry-After']) >= 1
+            assert 'no-store' in limited.headers['Cache-Control']
+            assert len(session.exec(select(SavedItinerary)).all()) == 1
+    finally:
+        limiter.limit = previous
+        limiter.reset()
+
+
+def test_snapshot_retains_end_time_after_source_event_changes():
+    with _build_client() as (client, session):
+        _, show_id = _seed_night(session)
+        event = session.get(Event, show_id)
+        event.end_at = event.start_at + timedelta(hours=2)
+        session.add(event)
+        session.commit()
+        shared = client.post('/concierge/itinerary/share', json={'stops': [{'kind':'main_event', 'event_id':show_id}]}).json()
+        original_end = shared['itinerary'][0]['end_at']
+        event.end_at += timedelta(hours=1)
+        session.add(event)
+        session.commit()
+        assert client.get(f"/shared/itineraries/{shared['share_token']}").json()['itinerary'][0]['end_at'] == original_end

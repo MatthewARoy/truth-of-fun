@@ -52,8 +52,8 @@ app = FastAPI(
     version=API_VERSION,
     lifespan=lifespan,
     description=(
-        "Truth of Fun event discovery API. The v1 contract is documented in "
-        "docs/api-contract-v1.md; changes are additive. This OpenAPI schema is "
+        "Truth of Fun event discovery API. The current v1 contract and privacy "
+        "changes are documented in docs/api-contract-v1.md. This OpenAPI schema is "
         "the source of truth for the TypeScript client (packages/api-client) "
         "and the MCP server (packages/mcp-server)."
     ),

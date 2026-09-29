@@ -12,7 +12,8 @@ class SavedItinerary(SQLModel, table=True):
     a shared link is an artifact someone reads on their phone hours or days
     later, and it should still say what it said when it was sent — even if the
     underlying event was re-deduped into another row, repriced, or dropped from
-    the feed. ``user_id`` is nullable because the planner is usable signed out.
+    the feed. ``user_id`` remains nullable for legacy anonymous links; new
+    shares require an owner and expire unless revoked sooner.
     """
 
     __tablename__ = "saved_itineraries"
@@ -43,4 +44,8 @@ class SavedItinerary(SQLModel, table=True):
     )
     created_at: datetime = Field(
         sa_column=Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    )
+    expires_at: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
+    revoked_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
     )
