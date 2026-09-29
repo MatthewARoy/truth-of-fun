@@ -1,6 +1,45 @@
 from __future__ import annotations
 
 from app.ingestion.sources.meetup import MeetupSource
+import pytest
+import httpx
+
+
+@pytest.mark.anyio
+async def test_missing_token_is_explicit_and_does_not_call_provider(monkeypatch):
+    monkeypatch.delenv("MEETUP_API_TOKEN", raising=False)
+    source = MeetupSource()
+    def no_client():
+        raise AssertionError("Disabled source must not make requests")
+    monkeypatch.setattr(source, "_get_client", no_client)
+    assert await source.fetch_events() == []
+    assert "disabled" in source.last_fetch_error.lower()
+    assert "MEETUP_API_TOKEN" in source.last_fetch_error
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("payload", [
+    {"errors": [{"message": "private secret error"}]},
+    {"data": {"keywordSearch": None}},
+])
+async def test_graphql_errors_and_schema_failures_do_not_look_empty(payload):
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json=payload)
+    )) as client:
+        source = MeetupSource(api_token="fixture", client=client)
+        with pytest.raises(ValueError):
+            await source.fetch_events()
+
+
+@pytest.mark.anyio
+async def test_empty_graphql_edges_report_a_quiet_result():
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"data": {"keywordSearch": {"edges": []}}})
+    )) as client:
+        source = MeetupSource(api_token="fixture", client=client)
+        assert await source.fetch_events() == []
+        assert source.last_fetch_error is None
+        assert "empty" in source.last_empty_reason.lower()
 
 
 def test_meetup_normalize_raw_to_canonical_payload() -> None:

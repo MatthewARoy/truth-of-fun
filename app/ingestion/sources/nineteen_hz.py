@@ -57,6 +57,14 @@ class NineteenHzSource(InputAgentSource):
             return None
 
         venue_name = raw_item.get("venue_name")
+        # Preserve the source's published genres separately from the venue.
+        # Keep the city suffix for compatibility with venue/city lookup.
+        genres: list[str] = []
+        if isinstance(venue_name, str):
+            city_match = re.search(r"\([^)]+\)", venue_name)
+            if city_match:
+                genres = [value.strip() for value in venue_name[city_match.end():].split(",") if value.strip()]
+                venue_name = venue_name[:city_match.end()].strip()
         location_is_private = (
             isinstance(venue_name, str) and venue_name.upper() == "TBA"
         )
@@ -112,8 +120,8 @@ class NineteenHzSource(InputAgentSource):
                 currency="USD" if price_min is not None else None,
                 price_text=cost_text or None,
             ),
-            category_tags=raw_item.get("tags", []),
-            vibe_tags=["#highenergy"],
+            category_tags=genres,
+            vibe_tags=[],
         )
 
     def _extract_rows(self, html: str) -> list[dict[str, Any]]:

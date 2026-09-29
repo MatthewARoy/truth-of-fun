@@ -212,6 +212,7 @@ class IngestionWorker:
                 current_count=per_source_counts[source_name],
                 error=fetch_error,
                 empty_is_success=bool(getattr(source, "last_fetch_was_incremental", False)),
+                empty_reason=getattr(source, "last_empty_reason", None),
             )
             if fetch_error:
                 self._pending_alerts.append((f"Source {source_name} incomplete", fetch_error, "warning"))
@@ -287,6 +288,7 @@ class IngestionWorker:
     def _log_canary_metrics(
         self, *, source_name: str, current_count: int, error: str | None = None,
         empty_is_success: bool = False,
+        empty_reason: str | None = None,
     ) -> None:
         history = self._source_count_history[source_name]
         historic_avg = (sum(history) / len(history)) if history else 0.0
@@ -339,6 +341,10 @@ class IngestionWorker:
 
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
+        diagnostic = error
+        if current_count == 0 and not empty_is_success:
+            diagnostic = error or redact_secrets(empty_reason) or "Empty result: source returned no events and no specific diagnostic"
+            logger.warning("Source '%s' yielded zero events: %s", source_name, diagnostic)
         _source_health_state[source_name] = {
             "last_run_at": now_iso,
             "last_event_count": current_count,
@@ -347,7 +353,7 @@ class IngestionWorker:
             # A successful run clears the error so a recovered source doesn't
             # keep displaying a stale failure; last_error_at/last_success_at
             # preserve the history either way.
-            "last_error": error,
+            "last_error": diagnostic,
             "last_error_at": now_iso if error is not None else prev.get("last_error_at"),
             "last_success_at": (
                 now_iso if error is None and (current_count > 0 or empty_is_success)
@@ -386,7 +392,12 @@ class IngestionWorker:
         except Exception:
             return
         if not key_health:
-            logger.warning("AAIM quota health: no ticketmaster keys in secrets store.")
+            if used_key_id == "env-ticketmaster":
+                logger.warning("AAIM: environment Ticketmaster key used; shared quota telemetry unavailable (check Redis).")
+            elif used_key_id:
+                logger.warning("AAIM: Ticketmaster key '%s' used but quota telemetry unavailable.", used_key_id)
+            else:
+                logger.warning("AAIM quota health: no usable Ticketmaster key was selected.")
             return
 
         # Provider calls were already spent even if event persistence fails.

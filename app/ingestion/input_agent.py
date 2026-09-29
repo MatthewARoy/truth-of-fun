@@ -33,6 +33,7 @@ class InputAgentSource(BaseSource):
 
     async def fetch_events(self, **kwargs: Any) -> list[dict[str, Any]]:
         self.last_fetch_error = None
+        self.last_empty_reason = None
         candidates = await self.discover_candidates(**kwargs)
         failure_types: dict[str, int] = {}
         canonical_events: list[CanonicalEvent] = []
@@ -60,6 +61,13 @@ class InputAgentSource(BaseSource):
                 reason for reason in (self.last_fetch_error, extraction_error) if reason
             )[:1000]
             logger.warning("Source %s partial extraction: %s", self.source_name, self.last_fetch_error)
+
+        if not canonical_events:
+            self.last_empty_reason = self.last_fetch_error or (
+                f"No usable events from {len(candidates)} discovered candidates (extraction/validation rejected them)"
+                if candidates else "Empty discovery result: no candidates returned"
+            )
+            logger.warning("Source %s yielded zero events: %s", self.source_name, self.last_empty_reason)
 
         return [
             event.to_legacy_event_payload(source_tier=self.source_tier)

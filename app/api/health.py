@@ -175,7 +175,8 @@ def health_summary(session: Session = Depends(get_session)) -> dict[str, Any]:
             )
             problems.append(f"source {source['name']}: failing — {detail}"[:300])
         elif source["status"] == "degraded":
-            problems.append(f"source {source['name']}: degraded — returned 0 events last run")
+            detail = redact_secrets(source.get("last_error")) or "returned 0 events last run"
+            problems.append(f"source {source['name']}: degraded — {detail}"[:300])
         if source.get("is_stale") and not worker_is_down:
             problems.append(
                 f"source {source['name']}: stale — no completed run since "

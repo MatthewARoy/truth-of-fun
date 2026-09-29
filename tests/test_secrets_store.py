@@ -23,6 +23,12 @@ class _FakeRedis:
     def hset(self, key: str, mapping: dict[str, str | int]) -> None:
         self._hashes[key].update(mapping)
 
+    def hsetnx(self, key, field, value):
+        if field not in self._hashes[key]:
+            self._hashes[key][field] = value
+            return 1
+        return 0
+
     def hgetall(self, key: str) -> dict[str, str | int]:
         return dict(self._hashes.get(key, {}))
 
@@ -108,6 +114,25 @@ def test_env_fallback_used_when_redis_empty() -> None:
 
     assert lease.source == "env"
     assert lease.api_key == "fallback-key"
+
+
+def test_environment_usage_is_metered_without_storing_the_credential():
+    import pytest
+    redis = _FakeRedis()
+    store = SecretsStore(settings=_settings(), redis_client=redis)
+    lease = store.get_active_key("ticketmaster")
+    store.report_usage(provider="ticketmaster", key_id=lease.key_id, calls=10, last_status=200)
+    row = store.health("ticketmaster")[0]
+    assert row.key_id == "env-ticketmaster"
+    assert row.usage_count == 10
+    assert row.status == "exhausted"
+    assert row.last_status == 200
+    assert "env-key" not in repr(redis._hashes)
+    assert redis.smembers(store._ids_key("ticketmaster")) == set()
+    with pytest.raises(RuntimeError):
+        store.get_active_key("ticketmaster")
+    assert store.reset_exhausted_keys("ticketmaster", window_seconds=1, now=row.updated_at_epoch+2) == ["env-ticketmaster"]
+    assert store.get_active_key("ticketmaster").usage_count == 0
 
 
 def test_targeted_health_does_not_enumerate_other_keys(monkeypatch):

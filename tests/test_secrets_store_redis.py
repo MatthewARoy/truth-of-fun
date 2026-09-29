@@ -61,3 +61,17 @@ def test_unknown_key_does_not_create_a_partial_inventory_record(store):
     with pytest.raises(KeyError):
         store.report_usage(provider='fixture', key_id='missing', calls=1)
     assert not store._redis.exists(store._key_hash('fixture', 'missing'))
+
+
+def test_concurrent_environment_usage_is_durable_and_never_copies_secret(store):
+    store._settings = store._settings.model_copy(update={"aaim_fallback_to_env": True, "ticketmaster_api_key": "private-environment-fixture"})
+    def report(index):
+        lease = store.get_active_key('ticketmaster')
+        store.report_usage(provider='ticketmaster', key_id=lease.key_id, calls=1)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(report, range(80)))
+    health = store.health('ticketmaster')[0]
+    assert health.key_id == 'env-ticketmaster'
+    assert health.usage_count == 80
+    assert store._redis.smembers(store._ids_key('ticketmaster')) == set()
+    assert 'private-environment-fixture' not in str(store._redis.hgetall(store._key_hash('ticketmaster', 'env-ticketmaster')))

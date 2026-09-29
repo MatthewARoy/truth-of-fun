@@ -314,12 +314,34 @@ async def test_usage_errors_do_not_store_credential_bearing_request_urls(monkeyp
         def report_usage(self, **kwargs):
             reports.append(kwargs)
     monkeypatch.setattr(tm_module, "get_secrets_store", lambda: Store())
-    async def failed_request(*args, **kwargs):
-        request = httpx.Request("GET", "https://example.test/events?apikey=SUPERSECRET")
-        httpx.Response(401, request=request).raise_for_status()
-    monkeypatch.setattr(source, "_get_json", failed_request)
+    source._client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(401, request=request)
+    ))
     with pytest.raises(httpx.HTTPStatusError):
         await source._fetch_page({"page": 0})
     assert reports[0]["last_status"] == 401
     assert reports[0]["last_error"] == "HTTPStatusError"
     assert "SUPERSECRET" not in str(reports)
+    await source.close()
+
+
+@pytest.mark.anyio
+async def test_usage_counts_each_http_retry(monkeypatch):
+    import httpx
+    reports = []
+    statuses = iter([429, 503, 200])
+    class Store:
+        def report_usage(self, **kwargs):
+            reports.append(kwargs)
+    monkeypatch.setattr(tm_module, "get_secrets_store", lambda: Store())
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(next(statuses), json={}, request=request)
+    )) as client:
+        source = TicketmasterSource(api_key="private", client=client)
+        source._aaim_enabled = True
+        source.BACKOFF_BASE_SECONDS = 0
+        assert await source._fetch_page({}) == {}
+    assert len(reports) == 3
+    assert [r["last_status"] for r in reports] == [429, 503, 200]
+    assert all(r["calls"] == 1 for r in reports)
+    assert "private" not in str(reports)

@@ -70,7 +70,15 @@ class BaseSource(ABC):
         attempt = 0
         while True:
             await self._limiter.acquire()
-            response = await self._get_client().get(url, params=params, headers=headers)
+            try:
+                response = await self._get_client().get(url, params=params, headers=headers)
+            except Exception as exc:
+                self._record_request_usage(status_code=None, error_type=type(exc).__name__)
+                raise
+            self._record_request_usage(
+                status_code=response.status_code,
+                error_type="HTTPStatusError" if response.is_error else None,
+            )
             if (
                 response.status_code == 429 or response.status_code >= 500
             ) and attempt < self.MAX_RETRIES:
@@ -79,6 +87,9 @@ class BaseSource(ABC):
                 continue
             response.raise_for_status()
             return response
+
+    def _record_request_usage(self, *, status_code: int | None, error_type: str | None) -> None:
+        """Optional provider telemetry, once per attempted HTTP request (including retries)."""
 
     async def _get_json(
         self,

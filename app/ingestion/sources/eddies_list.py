@@ -119,6 +119,7 @@ class EddiesListSource(InputAgentSource):
         messages = kwargs.get("messages")
         if messages is None:
             if not (self._imap_host and self._imap_user and self._imap_password):
+                self.last_fetch_error = "Disabled: set IMAP_HOST, IMAP_USER and IMAP_PASSWORD to enable Eddie's List"
                 return []
             messages = await asyncio.to_thread(self._fetch_imap_messages)
 
@@ -136,7 +137,9 @@ class EddiesListSource(InputAgentSource):
         connection = imaplib.IMAP4_SSL(self._imap_host, self._imap_port)
         try:
             connection.login(self._imap_user, self._imap_password)
-            connection.select(self._imap_mailbox, readonly=True)
+            status, _ = connection.select(self._imap_mailbox, readonly=True)
+            if status != "OK":
+                raise RuntimeError("Eddie's List IMAP mailbox selection failed")
             since = (
                 datetime.now(timezone.utc) - timedelta(days=_IMAP_LOOKBACK_DAYS)
             ).strftime("%d-%b-%Y")
@@ -144,10 +147,14 @@ class EddiesListSource(InputAgentSource):
                 status, data = connection.search(
                     None, "FROM", f'"{sender}"', "SINCE", since
                 )
-                if status != "OK" or not data or not data[0]:
+                if status != "OK":
+                    raise RuntimeError("Eddie's List IMAP search failed")
+                if not data or not data[0]:
                     continue
                 for message_id in data[0].split()[-_MAX_ISSUES:]:
                     status, payload = connection.fetch(message_id, "(RFC822)")
+                    if status != "OK":
+                        raise RuntimeError("Eddie's List IMAP message fetch failed")
                     if status == "OK" and payload and isinstance(payload[0], tuple):
                         messages.append(payload[0][1])
         finally:

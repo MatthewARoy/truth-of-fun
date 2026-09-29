@@ -98,6 +98,8 @@ class SecretsStore:
         normalized_key_id = key_id.strip()
         if not normalized_provider or not normalized_key_id or not api_key:
             raise ValueError("provider, key_id, and api_key are required")
+        if normalized_key_id.startswith("env-"):
+            raise ValueError("env- key identifiers are reserved for environment telemetry")
 
         quota = quota_limit if quota_limit is not None else self._default_quota(normalized_provider)
         now = int(time.time())
@@ -120,11 +122,25 @@ class SecretsStore:
         if not self._settings.aaim_fallback_to_env:
             return None
         if provider == "ticketmaster" and self._settings.ticketmaster_api_key:
+            usage, status = 0, "active"
+            if self._redis is not None:
+                # Track fallback usage without copying the environment secret
+                # into Redis or adding it to the rotation inventory. HSETNX
+                # leaves concurrent reporters and deliberate disables intact.
+                key_hash = self._key_hash(provider, "env-ticketmaster")
+                for field, value in {"usage_count": 0, "quota_limit": self._default_quota(provider), "status": "active"}.items():
+                    self._redis.hsetnx(key_hash, field, value)
+                payload = self._redis.hgetall(key_hash)
+                usage = self._coerce_int(payload.get("usage_count"))
+                status = payload.get("status", "active")
+                quota = self._coerce_int(payload.get("quota_limit"), self._default_quota(provider))
+                if status != "active" or (quota > 0 and usage >= quota):
+                    return None
             return KeyLease(
                 provider=provider,
                 key_id="env-ticketmaster",
                 api_key=self._settings.ticketmaster_api_key,
-                usage_count=0,
+                usage_count=usage,
                 quota_limit=self._default_quota(provider),
                 status="active",
                 source="env",
@@ -190,9 +206,6 @@ class SecretsStore:
         normalized_key_id = key_id.strip()
         if not normalized_provider or not normalized_key_id:
             raise ValueError("provider and key_id are required")
-        if normalized_key_id.startswith("env-"):
-            return
-
         key_hash = self._key_hash(normalized_provider, normalized_key_id)
         updated = self._redis.eval(
             _REPORT_USAGE_LUA, 1, key_hash,
@@ -221,7 +234,10 @@ class SecretsStore:
         normalized_provider = provider.strip().lower()
         current = now if now is not None else int(time.time())
         reset_ids: list[str] = []
-        for key_id in sorted(self._redis.smembers(self._ids_key(normalized_provider))):
+        key_ids = set(self._redis.smembers(self._ids_key(normalized_provider)))
+        if self._redis.exists(self._key_hash(normalized_provider, "env-ticketmaster")):
+            key_ids.add("env-ticketmaster")
+        for key_id in sorted(key_ids):
             key_hash = self._key_hash(normalized_provider, key_id)
             if self._redis.eval(_RESET_EXHAUSTED_LUA, 1, key_hash, current, window_seconds):
                 reset_ids.append(key_id)
@@ -235,6 +251,8 @@ class SecretsStore:
             [key_id.strip()] if key_id is not None
             else sorted(self._redis.smembers(self._ids_key(normalized_provider)))
         )
+        if key_id is None and self._redis.exists(self._key_hash(normalized_provider, "env-ticketmaster")):
+            key_ids = sorted(set(key_ids) | {"env-ticketmaster"})
         results: list[KeyHealth] = []
         for key_id in key_ids:
             payload = self._redis.hgetall(self._key_hash(normalized_provider, key_id))
