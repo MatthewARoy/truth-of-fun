@@ -41,23 +41,23 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-      # Mirrors the db service in docker-compose.yml (host port 5433).
+      # Disposable test database; never point ranking fixtures at the dev DB.
       db:
         image: postgis/postgis:16-3.4
         env:
-          POSTGRES_DB: truth_of_fun
+          POSTGRES_DB: truth_of_fun_test
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
         ports:
           - "5433:5432"
         options: >-
-          --health-cmd "pg_isready -U postgres -d truth_of_fun"
+          --health-cmd "pg_isready -U postgres -d truth_of_fun_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
     env:
-      DATABASE_URL: postgresql+psycopg2://postgres:postgres@127.0.0.1:5433/truth_of_fun
-      TEST_DATABASE_URL: postgresql+psycopg2://postgres:postgres@127.0.0.1:5433/truth_of_fun
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@127.0.0.1:5433/truth_of_fun_test
+      TEST_DATABASE_URL: postgresql+psycopg2://postgres:postgres@127.0.0.1:5433/truth_of_fun_test
       TEST_REDIS_URL: redis://127.0.0.1:6379/0
     steps:
       - uses: actions/checkout@v4
