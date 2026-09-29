@@ -20,6 +20,8 @@ baseline was `bdf444b`; local main at `b6bcca2` held 16 unpublished commits.
 - Recover the dirty `unruffled-goodall-fa6b05` work: bounded date-partitioned
   Ticketmaster retrieval, per-day/per-category calendar crawling, JSON-LD
   extraction, source category evidence, and comedy inference.
+- Update only locked PyJWT from 2.13.0 to patched 2.15.1 after the CI audit
+  reported CVE-2026-102274; validate authentication and the complete suite.
 - Extract `513f733` navigation fixes: uncertain coordinates do not anchor
   nearby searches or directions when no venue/address is available.
 - Correct integration defects: capped/repeated/failed crawls report incomplete
