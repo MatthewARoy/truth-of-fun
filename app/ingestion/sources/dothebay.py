@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
+
+import httpx
 
 from app.ingestion.contracts import CanonicalEvent
 from app.ingestion.contracts import LocationModel
@@ -17,6 +19,8 @@ from app.ingestion.scraper_utils import (
     DEFAULT_SF_LAT,
     DEFAULT_SF_LON,
     SF_TZ,
+    describe_fetch_error,
+    find_next_page_url,
     parse_12h_to_24h,
     parse_price,
     strip_html_tags,
@@ -33,7 +37,33 @@ class DoTheBaySource(InputAgentSource):
     source_name = "dothebay"
     source_tier = 2
     base_url = "https://dothebay.com"
-    events_url = "https://dothebay.com/events"
+    # The source spec asks for an unaggressive cadence; a run walks a week of pages.
+    default_max_requests_per_second = 1
+
+    #: /events shows today only. Each dated day page lists that day's events,
+    #: 25 cards a page, paginated with rel="next".
+    day_path = "/events/{year}/{month}/{day}"
+    horizon_days = 7
+    max_pages_per_day = 3
+    #: Hard caps per run, across every day.
+    max_requests = 21
+    max_candidates = 600
+
+    #: DoTheBay's own card category (``ds-event-category-<slug>``) mapped onto
+    #: canonical categories (see app/services/categories.py). Slugs with no
+    #: clear canonical home (dance, variety, shopping) stay unmapped rather
+    #: than guessed.
+    CARD_CATEGORIES: dict[str, str] = {
+        "comedy": "Comedy",
+        "music": "Music",
+        "dj-parties": "Nightlife",
+        "film": "Film",
+        "food-drink": "Food",
+        "sports": "Sports",
+        "outdoor-recreation": "Outdoors",
+        "the-arts": "Arts & Theatre",
+        "theatre-performing-arts": "Arts & Theatre",
+    }
 
     # DoTheBay serves a normal anti-bot-friendly UA the same markup, but send a
     # browser UA so we are a well-behaved client and not silently rate-limited.
@@ -52,10 +82,44 @@ class DoTheBaySource(InputAgentSource):
         if isinstance(html, str):
             return self._extract_candidates(html)
 
-        await self._limiter.acquire()
-        response = await self._get_client().get(self.events_url, headers=self.REQUEST_HEADERS)
-        response.raise_for_status()
-        return self._extract_candidates(response.text)
+        today = kwargs.get("today") or datetime.now(SF_TZ).date()
+        return await self._crawl_day_pages(today)
+
+    async def _crawl_day_pages(self, today: date) -> list[dict[str, Any]]:
+        """Follow each day's rel="next" pages, merging cards by event URL."""
+        merged: dict[str, dict[str, Any]] = {}
+        requests_made = 0
+        try:
+            for offset in range(self.horizon_days):
+                day = today + timedelta(days=offset)
+                day_url = self.base_url + self.day_path.format(
+                    year=day.year, month=day.month, day=day.day
+                )
+                url = day_url
+                for _ in range(self.max_pages_per_day):
+                    if requests_made >= self.max_requests:
+                        self.last_fetch_error = "Request cap reached; crawl incomplete"
+                        break
+                    requests_made += 1
+                    html = await self._get_text(url, headers=self.REQUEST_HEADERS)
+                    for candidate in self._extract_candidates(html):
+                        # Ongoing events repeat on every day they run.
+                        merged.setdefault(candidate["source_url"], candidate)
+                    next_url = find_next_page_url(html, url)
+                    # Only this day's own pages; never wander off via a nav link.
+                    if not next_url or not next_url.startswith(f"{day_url}?"):
+                        break
+                    url = next_url
+                else:
+                    self.last_fetch_error = "Day page cap reached; crawl incomplete"
+        except httpx.HTTPError as exc:
+            if not merged:
+                raise
+            # Keep the pages already read, but report the crawl as partial.
+            self.last_fetch_error = describe_fetch_error(exc)
+        if len(merged) > self.max_candidates:
+            self.last_fetch_error = "Candidate cap reached; crawl incomplete"
+        return list(merged.values())[: self.max_candidates]
 
     async def extract_candidate(self, candidate: Any) -> dict[str, Any] | None:
         return candidate if isinstance(candidate, dict) else None
@@ -159,11 +223,29 @@ class DoTheBaySource(InputAgentSource):
                     "time_text": time_text,
                     "price_text": price_text,
                     "vote_count": vote_count,
-                    "category_tags": [],
+                    "category_tags": self._extract_categories_from_card(card),
                 }
             )
 
-        return candidates[:80]
+        # A day page holds 25 cards; the per-run cap lives in the crawl.
+        return candidates
+
+    def _extract_categories_from_card(self, card: str) -> list[str]:
+        """Canonical categories from the card's own ``ds-event-category-*`` class."""
+        opening = re.search(
+            r"<div\s+class=[\"']ds-listing event-card([^\"']*)[\"']", card
+        )
+        slugs = (
+            re.findall(r"ds-event-category-([a-z0-9-]+)", opening.group(1))
+            if opening
+            else []
+        )
+        categories: list[str] = []
+        for slug in slugs:
+            category = self.CARD_CATEGORIES.get(slug)
+            if category and category not in categories:
+                categories.append(category)
+        return categories
 
     def _resolve_url(self, href: str) -> str:
         """Resolve a possibly-relative event href to an absolute dothebay.com URL."""

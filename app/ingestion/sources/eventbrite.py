@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
+
+import httpx
 
 from app.ingestion.contracts import CanonicalEvent
 from app.ingestion.contracts import ComplianceModel
@@ -13,6 +15,7 @@ from app.ingestion.contracts import OffersModel
 from app.ingestion.contracts import OrganizerModel
 from app.ingestion.contracts import SourceMetadata
 from app.ingestion.input_agent import InputAgentSource
+from app.ingestion.scraper_utils import describe_fetch_error
 from app.ingestion.venue_cache import lookup_venue_coordinates
 
 SF_TZ = ZoneInfo("America/Los_Angeles")
@@ -22,21 +25,108 @@ SF_TZ = ZoneInfo("America/Los_Angeles")
 # downstream mistakes the placeholder hour for a published one.
 DEFAULT_EVENT_HOUR = 19
 
+LISTING_BASE_URL = "https://www.eventbrite.com/d/ca--san-francisco"
+
+# The search results' own pagination block, e.g.
+# "events":{"pagination":{"object_count":218,"page_count":11,...}}
+_PAGE_COUNT_RE = re.compile(r'"pagination"\s*:\s*\{[^{}]*?"page_count"\s*:\s*(\d+)')
+
 
 class EventbriteSource(InputAgentSource):
     source_name = "eventbrite"
     source_tier = 1
-    listing_url = "https://www.eventbrite.com/d/ca--san-francisco/events/"
+    # One run walks many listing pages; keep it to a polite trickle.
+    default_max_requests_per_second = 1
+
+    #: Browse slices crawled in order, each with the canonical category (see
+    #: app/services/categories.py) Eventbrite itself files its events under.
+    #: The unfiltered listing ignores ``?page=`` (page 2 repeats page 1) and
+    #: 301s a date filter to ``/all-events/``, so every slice is a filtered
+    #: path that does paginate. ``performing-visual-arts`` is left out: over the
+    #: same window it reports more events than ``all-events``, so it is not
+    #: filtering what its name says.
+    listing_slices: tuple[tuple[str, str | None], ...] = (
+        ("comedy--events", "Comedy"),
+        ("music--events", "Music"),
+        ("nightlife--events", "Nightlife"),
+        ("food-and-drink--events", "Food"),
+        ("all-events", None),
+    )
+    #: Days covered by every slice, starting today (SF time).
+    horizon_days = 14
+    max_pages_per_slice = 5
+    #: Hard cap on listing requests per run, across all slices.
+    max_requests = 25
 
     async def discover_candidates(self, **kwargs: Any) -> list[Any]:
         html = kwargs.get("html")
         if isinstance(html, str):
             return self._extract_listing_candidates(html)
 
-        await self._limiter.acquire()
-        response = await self._get_client().get(self.listing_url)
-        response.raise_for_status()
-        return self._extract_listing_candidates(response.text)
+        today = kwargs.get("today") or datetime.now(SF_TZ).date()
+        return await self._crawl_listing_slices(today)
+
+    async def _crawl_listing_slices(self, today: date) -> list[dict[str, Any]]:
+        """Walk each slice page by page, merging events listed in several slices."""
+        end = today + timedelta(days=self.horizon_days - 1)
+        merged: dict[str, dict[str, Any]] = {}
+        requests_made = 0
+
+        for slug, category in self.listing_slices:
+            slice_urls: set[str] = set()
+            page = 1
+            while (
+                page <= self.max_pages_per_slice and requests_made < self.max_requests
+            ):
+                url = self._slice_url(slug, start=today, end=end, page=page)
+                requests_made += 1
+                try:
+                    html = await self._get_text(url)
+                except httpx.HTTPError as exc:
+                    if not merged:
+                        raise
+                    # Keep the pages already read, but report the crawl as partial.
+                    self.last_fetch_error = describe_fetch_error(exc)
+                    return list(merged.values())
+
+                added = 0
+                for candidate in self._extract_listing_candidates(html):
+                    source_url = candidate["source_url"]
+                    if source_url not in slice_urls:
+                        slice_urls.add(source_url)
+                        added += 1
+                    event = merged.setdefault(source_url, candidate)
+                    if category and category not in event["categories"]:
+                        event["categories"].append(category)
+
+                page_count = self._page_count(html)
+                # Stop on the slice's last page, and on a page that adds nothing:
+                # a listing that ignores ?page= repeats itself rather than ending.
+                if page_count is None:
+                    self.last_fetch_error = "Pagination metadata missing; crawl coverage unknown"
+                    break
+                if page >= page_count:
+                    break
+                if added == 0:
+                    self.last_fetch_error = "Listing repeated before its last page; crawl incomplete"
+                    break
+                page += 1
+            else:
+                self.last_fetch_error = "Listing page/request cap reached; crawl incomplete"
+
+        return list(merged.values())
+
+    def _slice_url(self, slug: str, *, start: date, end: date, page: int) -> str:
+        url = (
+            f"{LISTING_BASE_URL}/{slug}/"
+            f"?start_date={start.isoformat()}&end_date={end.isoformat()}"
+        )
+        return url if page == 1 else f"{url}&page={page}"
+
+    @staticmethod
+    def _page_count(html: str) -> int | None:
+        match = _PAGE_COUNT_RE.search(html)
+        return int(match.group(1)) if match else None
 
     async def extract_candidate(self, candidate: Any) -> dict[str, Any] | None:
         return candidate if isinstance(candidate, dict) else None
@@ -95,12 +185,15 @@ class EventbriteSource(InputAgentSource):
                 copyright_risk="medium",
                 notes="Scraped listing metadata only; deep-link to Eventbrite source.",
             ),
-            organizer=OrganizerModel(name=self._pick_first_str(raw_item, "organizer_name")),
-            # Only data actually present on the card; semantic tagging happens downstream.
-            category_tags=[],
+            organizer=OrganizerModel(
+                name=self._pick_first_str(raw_item, "organizer_name")
+            ),
+            # Only what Eventbrite itself says: the browse categories it listed
+            # the event under. Semantic tagging happens downstream.
+            category_tags=list(raw_item.get("categories") or []),
         )
 
-    def _extract_listing_candidates(self, html: str) -> list[dict[str, str]]:
+    def _extract_listing_candidates(self, html: str) -> list[dict[str, Any]]:
         """Parse the schema.org ItemList embedded as JSON-LD on the listing page.
 
         Eventbrite server-renders the search results into an
@@ -108,7 +201,7 @@ class EventbriteSource(InputAgentSource):
         explicit title, URL, start date, venue and geo coordinates. This is far
         more stable than scraping the React-rendered event cards.
         """
-        candidates: list[dict[str, str]] = []
+        candidates: list[dict[str, Any]] = []
         for event in self._iter_ldjson_events(html):
             candidate = self._candidate_from_event(event)
             if candidate is not None:
@@ -147,7 +240,7 @@ class EventbriteSource(InputAgentSource):
                     found.extend(self._collect_events(node[key]))
         return found
 
-    def _candidate_from_event(self, event: dict[str, Any]) -> dict[str, str] | None:
+    def _candidate_from_event(self, event: dict[str, Any]) -> dict[str, Any] | None:
         title = self._clean_text(event.get("name"))
         source_url = self._clean_url(event.get("url"))
         if not title or not source_url or "/e/" not in source_url:
@@ -190,6 +283,8 @@ class EventbriteSource(InputAgentSource):
             "lat": lat,
             "lon": lon,
             "organizer_name": self._extract_organizer_name(event.get("organizer")),
+            # Filled in by the listing crawl with the slices this event was in.
+            "categories": [],
         }
 
     def _extract_organizer_name(self, organizer: Any) -> str:

@@ -14,7 +14,16 @@
 
 ## Ingestion Strategy
 - Primary mode: partner/API ingestion for permitted scopes
-- Fallback mode: listing-page scrape (`/d/ca--san-francisco/events/`)
+- Fallback mode: filtered browse listings over a 14-day window
+  (`/d/ca--san-francisco/<slice>/?start_date=…&end_date=…&page=N`)
+  - the bare `/d/ca--san-francisco/events/` listing ignores `?page=` (page 2 repeats
+    page 1) and 301s a date filter to `/all-events/`, so it cannot be paginated
+  - slices, in order: `comedy--events`, `music--events`, `nightlife--events`,
+    `food-and-drink--events` (each labels its events with that canonical category),
+    then `all-events`; `performing-visual-arts--events` is skipped because it reports
+    more events than `all-events` for the same window
+  - bounds: stop at the listing's own `page_count` or on a page that adds nothing new;
+    at most 5 pages per slice and 25 requests per run, 1 request/second
 - Parser rules:
   - robust date parsing from formatted strings
   - price text normalization (`Free`, `Starts at $X`)

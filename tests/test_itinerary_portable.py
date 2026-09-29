@@ -86,6 +86,49 @@ def test_low_confidence_coordinates_do_not_drive_navigation() -> None:
     assert params["destination"] == ["Mystery Warehouse, Oakland, CA"]
 
 
+def test_low_confidence_coordinates_do_not_center_a_nearby_search() -> None:
+    """The bug this covers: a Levi's Stadium event carrying the SF centroid
+    produced parking and food searches 40 miles from the stadium, under a
+    heading naming the stadium."""
+    levis = StopLocation(
+        venue_name="Levi's Stadium",
+        address="4900 Marie P. DeBartolo Way, Santa Clara",
+        lat=37.7749,
+        lng=-122.4194,
+        location_confidence=0.4,
+    )
+    links = build_stop_links(location=levis)
+
+    for url in (links.food_url, links.drinks_url, links.parking_url):
+        assert "37.7749" not in url
+        assert "Santa Clara" in _query_params(url)["query"][0]
+    # The address is real data, so it still gets to point people at the venue.
+    assert "Santa Clara" in _query_params(links.directions_url)["destination"][0]
+
+
+def test_a_low_confidence_point_with_no_text_gets_no_links_at_all() -> None:
+    """No address, no venue name, and a guessed coordinate — the honest answer
+    is nothing, not a confident pin on a city centroid."""
+    guess_only = StopLocation(lat=37.7749, lng=-122.4194, location_confidence=0.4)
+    assert not guess_only.is_locatable
+
+    links = build_stop_links(location=guess_only, tickets_url="https://example.com/t")
+    assert links.tickets_url == "https://example.com/t"
+    assert links.map_url is None
+    assert links.directions_url is None
+    assert links.food_url is None
+    assert links.drinks_url is None
+    assert links.parking_url is None
+
+
+def test_a_low_confidence_point_does_not_become_the_next_leg_origin() -> None:
+    """Routing the rest of the night from a guessed point spreads the error."""
+    guess_only = StopLocation(lat=37.7749, lng=-122.4194, location_confidence=0.4)
+    links = build_stop_links(location=CHAPEL, previous_location=guess_only)
+
+    assert "origin" not in _query_params(links.directions_url)
+
+
 def test_precise_coordinates_are_preferred_over_a_partial_address() -> None:
     params = _query_params(directions_url(destination=CHAPEL))
     assert params["destination"] == ["37.7599,-122.4214"]

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
+
+import httpx
 
 from app.ingestion.contracts import CanonicalEvent
 from app.ingestion.contracts import LocationModel
@@ -16,6 +18,8 @@ from app.ingestion.scraper_utils import (
     DEFAULT_SF_LAT,
     DEFAULT_SF_LON,
     SF_TZ,
+    describe_fetch_error,
+    find_next_page_url,
     parse_datetime_flexible,
     parse_price,
     pick_first_str,
@@ -32,17 +36,88 @@ class SFStationSource(InputAgentSource):
     source_name = "sfstation"
     source_tier = 2
     base_url = "https://www.sfstation.com"
-    calendar_url = "https://www.sfstation.com/calendar/bay-area"
+    # One run walks a week of calendar pages; keep to a moderate crawl rate.
+    default_max_requests_per_second = 1
+
+    #: The undated /calendar/bay-area page previews six events per day. Each
+    #: dated day page lists all of them, paginated with rel="next".
+    day_calendar_path = "/calendar/bay-area/{date}"
+    #: Category calendars for the same days, each with the canonical category
+    #: (see app/services/categories.py) it stands for. The day pages already
+    #: list these events; these requests only record the category SF Station
+    #: files them under, which the general listing does not show.
+    category_calendar_paths: tuple[tuple[str, str], ...] = (
+        ("/comedy/calendar/{date}", "Comedy"),
+    )
+    horizon_days = 7
+    max_pages_per_day = 4
+    max_category_pages_per_day = 2
+    #: Hard caps per run, across every day and calendar.
+    max_requests = 45
+    max_candidates = 800
 
     async def discover_candidates(self, **kwargs: Any) -> list[Any]:
         html = kwargs.get("html")
         if isinstance(html, str):
             return self._extract_candidates(html)
 
-        await self._limiter.acquire()
-        response = await self._get_client().get(self.calendar_url)
-        response.raise_for_status()
-        return self._extract_candidates(response.text)
+        today = kwargs.get("today") or datetime.now(SF_TZ).date()
+        return await self._crawl_day_calendars(today)
+
+    async def _crawl_day_calendars(self, today: date) -> list[dict[str, Any]]:
+        merged: dict[str, dict[str, Any]] = {}
+        self._requests_made = 0
+        try:
+            for offset in range(self.horizon_days):
+                day = (today + timedelta(days=offset)).strftime("%m-%d-%Y")
+                await self._crawl_calendar(
+                    self.day_calendar_path.format(date=day),
+                    max_pages=self.max_pages_per_day,
+                    merged=merged,
+                )
+                for path, category in self.category_calendar_paths:
+                    await self._crawl_calendar(
+                        path.format(date=day),
+                        max_pages=self.max_category_pages_per_day,
+                        merged=merged,
+                        category=category,
+                    )
+        except httpx.HTTPError as exc:
+            if not merged:
+                raise
+            # Keep the pages already read, but report the crawl as partial.
+            self.last_fetch_error = describe_fetch_error(exc)
+        if len(merged) > self.max_candidates:
+            self.last_fetch_error = "Candidate cap reached; crawl incomplete"
+        return list(merged.values())[: self.max_candidates]
+
+    async def _crawl_calendar(
+        self,
+        path: str,
+        *,
+        max_pages: int,
+        merged: dict[str, dict[str, Any]],
+        category: str | None = None,
+    ) -> None:
+        """Follow one calendar's rel="next" pages, merging by date + event slug."""
+        calendar_url = f"{self.base_url}{path}"
+        url = calendar_url
+        for _ in range(max_pages):
+            if self._requests_made >= self.max_requests:
+                self.last_fetch_error = "Request cap reached; crawl incomplete"
+                return
+            self._requests_made += 1
+            html = await self._get_text(url)
+            for candidate in self._extract_candidates(html):
+                event = merged.setdefault(candidate["source_record_id"], candidate)
+                if category and category not in event["category_tags"]:
+                    event["category_tags"].append(category)
+            next_url = find_next_page_url(html, url)
+            # Only this calendar's own pages; never wander off via a nav link.
+            if not next_url or not next_url.startswith(f"{calendar_url}?"):
+                return
+            url = next_url
+        self.last_fetch_error = "Calendar page cap reached; crawl incomplete"
 
     async def extract_candidate(self, candidate: Any) -> dict[str, Any] | None:
         return candidate if isinstance(candidate, dict) else None
@@ -183,7 +258,8 @@ class SFStationSource(InputAgentSource):
                 }
             )
 
-        return candidates[:60]
+        # A day page lists ~40 events; the per-run cap lives in the crawl.
+        return candidates
 
     def _parse_datetime(self, date_iso: str | None, time_text: str | None) -> datetime | None:
         """Parse ISO date and time text into UTC datetime."""

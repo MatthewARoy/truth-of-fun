@@ -18,7 +18,7 @@
 - Bay Area filtering: `dmaId=382`
 - Fetch mode: replay `sort=date,asc`, max `size`, using persistent source IDs for idempotent updates.
 - Discovery v2 does not document a modified-date filter. The local sync timestamp is completion metadata, not a delta cursor.
-- Respect `page * size < 1000`. A capped or failed search is incomplete and does not receive a completion timestamp. Date-partitioned coverage beyond this cap remains follow-up work.
+- Respect `page * size < 1000`. A capped or failed search is incomplete and does not receive a completion timestamp. Date partitions now cover the configured 180-day horizon.
 - The worker acknowledges completion only after the database transaction succeeds without rejected records.
 - Backoff: exponential retry on 429/5xx
 
@@ -29,6 +29,12 @@
 - `priceRanges.min/max` -> `offers.price_min/max`
 - `classifications.genre.name` -> `category_tags`
 - `url` -> `source.source_url`
+
+## Coverage and completion
+- Replay the next 180 days using date windows split below the 1,000-result deep-paging boundary. There is no modified-date incremental filter.
+- Read undated TBA events separately, without date bounds, so postponements can update their original listings. Offsale means unavailable ticket sales, not a cancelled show.
+- Limit each run to 80 page requests. Dense minimum windows, failed pages, and exhausted budgets remain visibly incomplete and cannot advance completion metadata.
+- Acknowledge complete fetches only after ingestion commits. Completion describes this bounded horizon, not the whole provider catalog.
 
 ## Quality and Risk Controls
 - Trust tier: highest for time/location precision

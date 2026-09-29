@@ -1,5 +1,8 @@
 """FuncheapSF Tier 2 scraper using Playwright with stealth."""
 
+import asyncio
+import html as html_lib
+import json
 import logging
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -12,6 +15,7 @@ from playwright_stealth import Stealth
 
 from app.core.config import get_settings
 from app.ingestion.base import BaseSource
+from app.ingestion.scraper_utils import find_next_page_url
 from app.ingestion.venue_cache import lookup_venue_coordinates
 
 logger = logging.getLogger(__name__)
@@ -19,6 +23,11 @@ logger = logging.getLogger(__name__)
 SF_TZ = ZoneInfo("America/Los_Angeles")
 DEFAULT_SF_LAT = 37.7749
 DEFAULT_SF_LON = -122.4194
+# What a day index says when nothing is listed, including on a page past the
+# day's last one (which still links rel="next").
+_EMPTY_DAY_RE = re.compile(
+    r"don(?:'|\u2019|&#8217;|&#039;)t have any Funcheap events listed", re.IGNORECASE
+)
 
 
 class FuncheapSFSource(BaseSource):
@@ -27,7 +36,6 @@ class FuncheapSFSource(BaseSource):
     source_name = "funcheap_sf"
     source_tier = 2
     base_url = "https://funcheapsf.com"
-    events_url = "https://funcheapsf.com/events/"
     day_index_url_template = "https://sf.funcheap.com/%Y/%m/%d/"
 
     # Section and nav slugs that share the single-segment shape of event URLs.
@@ -62,11 +70,13 @@ class FuncheapSFSource(BaseSource):
         *,
         headless: bool = True,
         proxy: str | None = None,
+        page_delay_seconds: float = 1.0,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._headless = headless
         self._proxy = proxy
+        self._page_delay_seconds = page_delay_seconds
         self._playwright = None
         self._browser = None
 
@@ -135,14 +145,17 @@ class FuncheapSFSource(BaseSource):
     async def fetch_events(
         self,
         *,
-        max_events: int = 400,
-        max_detail_pages: int = 400,
+        max_events: int = 1000,
+        max_detail_pages: int = 100,
         horizon_days: int = 10,
+        max_index_pages_per_day: int = 3,
     ) -> list[dict[str, Any]]:
         """Crawl per-day index pages over the horizon, return canonical Event payloads.
 
         ``horizon_days`` defaults to 10 so the crawl always spans the next two
-        weekends; the caps scale with it rather than the old homepage-sized 30.
+        weekends. Each day index is paginated (``/page/2/``) and embeds its
+        events as a JSON-LD array, so the horizon costs ~20-30 page loads;
+        detail pages are only visited for an index page without that JSON-LD.
         """
         self._playwright = await async_playwright().start()
 
@@ -166,69 +179,279 @@ class FuncheapSFSource(BaseSource):
         page = await context.new_page()
 
         try:
-            event_links: list[str] = []
-            seen_links: set[str] = set()
-
-            for index_url in self._day_index_urls(horizon_days=horizon_days):
-                try:
-                    await page.goto(
-                        index_url, wait_until="domcontentloaded", timeout=30000
-                    )
-                    # FuncheapSF runs ads/trackers/long-polling that never let the
-                    # network go idle, so we wait for the actual content to appear
-                    # instead of "networkidle" and treat any settle timeout as
-                    # best-effort (proceed, never abort).
-                    await self._wait_for_content(
-                        page, "a[href*='funcheap.com']", timeout=15000
-                    )
-                    hrefs = await page.locator(
-                        "a[href*='sf.funcheap.com']"
-                    ).evaluate_all("els => els.map(a => a.href)")
-                except PlaywrightTimeoutError as exc:
-                    # One bad day page (anti-bot challenge, transient failure) must
-                    # not sink the whole horizon. Skip it; never fabricate events.
-                    logger.warning(
-                        "funcheap_sf: could not load %s (%s); skipping that day.",
-                        index_url,
-                        exc,
-                    )
-                    continue
-
-                for href in hrefs:
-                    if href in seen_links or not self._is_event_url(href):
-                        continue
-                    seen_links.add(href)
-                    event_links.append(href)
-
-                if len(event_links) >= max_detail_pages:
-                    break
-
-            if not event_links:
-                logger.warning(
-                    "funcheap_sf: no event links found across %s day pages.",
-                    horizon_days,
-                )
-                return []
-            event_links = event_links[:max_detail_pages]
-
-            canonical: list[dict[str, Any]] = []
-            seen_urls: set[str] = set()
-
-            for url in event_links:
-                if url in seen_urls or len(canonical) >= max_events:
-                    continue
-                seen_urls.add(url)
-
-                try:
-                    payload = await self._scrape_event_detail(page, url)
-                    if payload:
-                        canonical.append(payload)
-                except Exception:
-                    continue
-
-            return canonical
+            return await self._crawl_day_indexes(
+                page,
+                horizon_days=horizon_days,
+                max_index_pages_per_day=max_index_pages_per_day,
+                max_events=max_events,
+                max_detail_pages=max_detail_pages,
+            )
         finally:
             await context.close()
+
+    async def _crawl_day_indexes(
+        self,
+        page: Any,
+        *,
+        horizon_days: int,
+        max_index_pages_per_day: int,
+        max_events: int,
+        max_detail_pages: int,
+        today: date | None = None,
+    ) -> list[dict[str, Any]]:
+        self.last_fetch_error = None
+        payloads: dict[str, dict[str, Any]] = {}
+        fallback_links: dict[str, None] = {}
+        loads = 0
+
+        for day_url in self._day_index_urls(horizon_days=horizon_days, today=today):
+            url: str | None = day_url
+            for page_number in range(1, max_index_pages_per_day + 1):
+                if url is None:
+                    break
+                if loads:
+                    await self._pause()
+                loads += 1
+                html = await self._load_index_page(page, url)
+                if html is None:
+                    self.last_fetch_error = "Index page failed; crawl incomplete"
+                    # One bad day page (anti-bot challenge, transient failure) must
+                    # not sink the whole horizon. Skip that day; never fabricate.
+                    break
+                events = self._events_from_index_html(html)
+                for payload in events:
+                    # Multi-day listings repeat across a day's pages.
+                    payloads.setdefault(payload["external_url"], payload)
+                if not events:
+                    # Past a day's last page the site serves its "no events listed"
+                    # page, still linking rel="next", so an empty page ends the day.
+                    # Only a first page with no JSON-LD and no such notice means the
+                    # template changed: then fall back to the detail pages rather
+                    # than silently losing the day.
+                    if page_number == 1 and not _EMPTY_DAY_RE.search(html):
+                        for href in self._event_links_from_html(html):
+                            fallback_links.setdefault(href, None)
+                    break
+                url = self._next_index_page_url(html, day_url, page_number)
+            else:
+                if url is not None:
+                    self.last_fetch_error = "Index page cap reached; crawl incomplete"
+
+        if not payloads and not fallback_links:
+            logger.warning(
+                "funcheap_sf: no events found across %s day pages.", horizon_days
+            )
+            return []
+
+        detail_budget = max_detail_pages
+        for href in fallback_links:
+            if href in payloads:
+                continue
+            if len(payloads) >= max_events or detail_budget <= 0:
+                self.last_fetch_error = "Detail/event cap reached; crawl incomplete"
+                logger.warning(
+                    "funcheap_sf: detail-page fallback stopped at its cap (%s pages).",
+                    max_detail_pages,
+                )
+                break
+            detail_budget -= 1
+            await self._pause()
+            try:
+                payload = await self._scrape_event_detail(page, href)
+            except Exception:
+                continue
+            if payload:
+                payloads[href] = payload
+
+        if len(payloads) > max_events:
+            self.last_fetch_error = "Event cap reached; crawl incomplete"
+        return list(payloads.values())[:max_events]
+
+    async def _load_index_page(self, page: Any, url: str) -> str | None:
+        """Return a day index page's HTML, or None when it would not load."""
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            # FuncheapSF runs ads/trackers/long-polling that never let the
+            # network go idle, so we wait for the actual content to appear
+            # instead of "networkidle" and treat any settle timeout as
+            # best-effort (proceed, never abort).
+            await self._wait_for_content(page, "a[href*='funcheap.com']", timeout=15000)
+            return await page.content()
+        except PlaywrightTimeoutError as exc:
+            logger.warning(
+                "funcheap_sf: could not load %s (%s); skipping the rest of that day.",
+                url,
+                exc,
+            )
+            return None
+
+    async def _pause(self) -> None:
+        """Space out page loads; the source spec asks to respect crawl frequency."""
+        if self._page_delay_seconds > 0:
+            await asyncio.sleep(self._page_delay_seconds)
+
+    @staticmethod
+    def _next_index_page_url(html: str, day_url: str, page_number: int) -> str | None:
+        """The day's next index page, only if the page itself links to it."""
+        expected = f"{day_url}page/{page_number + 1}/"
+        return expected if find_next_page_url(html, day_url) == expected else None
+
+    def _event_links_from_html(self, html: str) -> list[str]:
+        links: dict[str, None] = {}
+        for href in re.findall(
+            r"href=[\"'](https?://sf\.funcheap\.com/[^\"'#?]+)[\"']", html
+        ):
+            if self._is_event_url(href):
+                links.setdefault(href, None)
+        return list(links)
+
+    def _events_from_index_html(self, html: str) -> list[dict[str, Any]]:
+        """Event payloads from the JSON-LD array a day index page embeds."""
+        payloads: list[dict[str, Any]] = []
+        for block in re.findall(
+            r"<script[^>]*type=[\"']application/ld\+json[\"'][^>]*>(.*?)</script>",
+            html,
+            flags=re.IGNORECASE | re.DOTALL,
+        ):
+            try:
+                data = json.loads(block.strip())
+            except ValueError:
+                continue
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                if isinstance(item, dict) and item.get("@type") == "Event":
+                    payload = self._payload_from_ld_event(item)
+                    if payload is not None:
+                        payloads.append(payload)
+        return payloads
+
+    _LD_STATUSES: dict[str, str] = {
+        "eventcancelled": "cancelled",
+        "eventpostponed": "postponed",
+    }
+
+    def _payload_from_ld_event(self, item: dict[str, Any]) -> dict[str, Any] | None:
+        title = self._ld_text(item.get("name"))
+        url = self._ld_text(item.get("url"))
+        if not title or not url or not self._is_event_url(url):
+            return None
+
+        start = self._parse_ld_datetime(item.get("startDate"))
+        if start is None:
+            # No real date evidence - never fabricate one, drop the event.
+            return None
+        start_at, start_time_is_estimated = start
+        end = self._parse_ld_datetime(item.get("endDate"))
+        end_at = end[0] if end and not end[1] and end[0] > start_at else None
+
+        location = (
+            item.get("location") if isinstance(item.get("location"), dict) else {}
+        )
+        venue_name = self._ld_text(location.get("name")) or None
+        raw_address = self._ld_address(location.get("address"))
+        if not raw_address and venue_name:
+            raw_address = f"{venue_name}, San Francisco, CA"
+
+        coords = lookup_venue_coordinates(venue_name)
+        lat, lon = coords if coords else (DEFAULT_SF_LAT, DEFAULT_SF_LON)
+
+        status_name = str(item.get("eventStatus") or "").rstrip("/").split("/")[-1]
+        cost_fields = self._ld_offer_fields(item.get("offers"))
+
+        return {
+            "title": title,
+            "description": self._ld_text(item.get("description")) or None,
+            "start_at": start_at,
+            "start_time_is_estimated": start_time_is_estimated,
+            "end_at": end_at,
+            "source_name": self.source_name,
+            "source_tier": self.source_tier,
+            "source_event_id": url.rstrip("/").split("/")[-1] or url,
+            "external_url": url,
+            "venue_name": venue_name,
+            "raw_address": raw_address,
+            "location": f"POINT({lon} {lat})",
+            # Knowing the venue's name doesn't locate it: without a cache hit
+            # this is still the SF centroid, so it must stay below the radius
+            # search threshold rather than claiming 0.5.
+            "location_confidence": 0.9 if coords else 0.4,
+            "categories": [],
+            "tags": [],
+            "price": cost_fields["price"],
+            "currency": cost_fields["currency"],
+            "is_free": cost_fields["is_free"],
+            "image_url": None,
+            "status": self._LD_STATUSES.get(status_name.lower(), "scheduled"),
+        }
+
+    @staticmethod
+    def _ld_text(value: Any) -> str:
+        """JSON-LD strings arrive HTML-escaped (``&#8220;``, ``&#038;``)."""
+        if not isinstance(value, str):
+            return ""
+        return re.sub(r"\s+", " ", html_lib.unescape(value)).strip()
+
+    def _ld_address(self, value: Any) -> str | None:
+        if isinstance(value, dict):
+            parts = (
+                self._ld_text(value.get(key))
+                for key in (
+                    "streetAddress",
+                    "addressLocality",
+                    "addressRegion",
+                    "postalCode",
+                )
+            )
+            return ", ".join(part for part in parts if part) or None
+        return self._ld_text(value) or None
+
+    @staticmethod
+    def _parse_ld_datetime(value: Any) -> tuple[datetime, bool] | None:
+        """Parse a JSON-LD date into (UTC datetime, time_is_estimated).
+
+        The index publishes full offsets (``2026-09-13T19:00:00-07:00``). A bare
+        date is still a real date, so it is kept at SF midnight and flagged as
+        having no published time.
+        """
+        if not isinstance(value, str) or not re.match(
+            r"\d{4}-\d{2}-\d{2}", value.strip()
+        ):
+            return None
+        text = value.strip()
+        if "T" not in text:
+            try:
+                day = date.fromisoformat(text[:10])
+            except ValueError:
+                return None
+            midnight = datetime(day.year, day.month, day.day, tzinfo=SF_TZ)
+            return midnight.astimezone(timezone.utc), True
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=SF_TZ)
+        return parsed.astimezone(timezone.utc), False
+
+    @staticmethod
+    def _ld_offer_fields(offers: Any) -> dict[str, Any]:
+        """price/currency/is_free from JSON-LD ``offers``; an unknown price stays null.
+
+        The index publishes whole dollars here (11 for a "$11.59" listing), which
+        is close enough to rank and filter on, and 0 exactly for its FREE events.
+        """
+        if isinstance(offers, list):
+            offers = next((offer for offer in offers if isinstance(offer, dict)), None)
+        if not isinstance(offers, dict) or offers.get("price") in (None, ""):
+            return {"price": None, "currency": None, "is_free": False}
+        try:
+            value = float(str(offers["price"]).replace("$", "").strip())
+        except ValueError:
+            return {"price": None, "currency": None, "is_free": False}
+        currency = offers.get("priceCurrency")
+        if not isinstance(currency, str) or not currency.strip():
+            currency = "USD"
+        return {"price": value, "currency": currency.strip(), "is_free": value == 0.0}
 
     async def _scrape_event_detail(self, page: Any, url: str) -> dict[str, Any] | None:
         await page.goto(url, wait_until="domcontentloaded", timeout=15000)

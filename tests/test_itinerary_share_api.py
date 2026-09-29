@@ -321,8 +321,9 @@ def test_low_confidence_coordinates_fall_back_to_the_address(confidence) -> None
         ).json()
         directions = body["itinerary"][0]["links"]["directions_url"]
         assert "destination=Undisclosed%20Warehouse%2C%20Oakland%2C%20CA" in directions
-        # The neighborhood is still good enough to look around in.
-        assert "@37.8044,-122.2712" in body["itinerary"][0]["links"]["parking_url"]
+        # Nearby searches use the address rather than the uncertain point.
+        assert "@37.8044,-122.2712" not in body["itinerary"][0]["links"]["parking_url"]
+        assert "Oakland%2C%20CA" in body["itinerary"][0]["links"]["parking_url"]
         shared = client.get(f"/shared/itineraries/{body['share_token']}").json()
         assert shared["itinerary"][0]["links"]["directions_url"] == directions
 

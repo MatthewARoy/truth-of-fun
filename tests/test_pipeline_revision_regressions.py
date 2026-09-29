@@ -308,3 +308,26 @@ async def test_unchanged_alias_cannot_restore_coordinates_from_previous_venue(da
         assert saved.venue_name == "New Venue"
         assert saved.location_confidence == 0.3
         assert (lon, lat) == (-122.42, 37.77)
+
+
+@pytest.mark.anyio
+async def test_unchanged_listing_cannot_revive_a_clock_expired_event(database):
+    service = DataPipelineService(vibe_tagger=NoTags())
+    original = payload()
+    with Session(database) as session:
+        await service.process_raw_events(session=session, raw_events=[original])
+        saved = session.exec(select(Event)).one()
+        saved.status = "past"
+        session.add(saved)
+        session.commit()
+    # New description is a real revision; an unchanged date still must not
+    # override the lifecycle status derived by the worker.
+    with Session(database) as session:
+        await service.process_raw_events(session=session, raw_events=[{**original, "description": "Revised details"}])
+        assert session.exec(select(Event)).one().status == "past"
+    with Session(database) as session:
+        revised = {**original, "start_at": original["start_at"] + timedelta(days=120)}
+        await service.process_raw_events(session=session, raw_events=[revised])
+        saved = session.exec(select(Event)).one()
+        assert saved.status == "scheduled"
+        assert saved.start_at.replace(tzinfo=timezone.utc) == revised["start_at"]

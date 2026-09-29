@@ -1,4 +1,6 @@
 from app.services.categories import (
+    CANONICAL_CATEGORIES,
+    COMEDY,
     FITNESS,
     OUTDOORS,
     WELLNESS,
@@ -76,3 +78,30 @@ def test_query_targets_fitness() -> None:
     assert query_targets_fitness("gym/workout promos near noe downtown in sf") is True
     assert query_targets_fitness("find me a yoga class this weekend") is True
     assert query_targets_fitness("date night in the mission") is False
+
+
+def test_infer_adds_comedy_for_comedy_listings() -> None:
+    assert COMEDY in infer_categories(
+        title="Cheaper Than Therapy, Stand-up Comedy: Sunday FUNday, Sep 13"
+    )
+    assert COMEDY in infer_categories(title="Free Sunday Comedy Night in Downtown SF")
+    assert COMEDY in infer_categories(
+        title="(Still) Better than TV",
+        description="A live sketch show with a rotating cast.",
+    )
+    assert COMEDY in infer_categories(title="Friday night improv show")
+
+
+def test_infer_comedy_needs_comedy_context() -> None:
+    # Bare "stand-up" and "improv" also belong to paddleboarding and jazz.
+    assert COMEDY not in infer_categories(
+        title="Stand-up paddle lesson at Aquatic Park"
+    )
+    assert COMEDY not in infer_categories(title="Jazz improvisation workshop")
+
+
+def test_keyword_rules_only_emit_canonical_categories() -> None:
+    from app.services.categories import _KEYWORD_CATEGORY_RULES
+
+    emitted = {category for _, category in _KEYWORD_CATEGORY_RULES}
+    assert emitted <= set(CANONICAL_CATEGORIES)

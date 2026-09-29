@@ -34,3 +34,6 @@ docs/internal/
 
 # Scratch / working notes (handoffs, etc.)
 tmp/
+
+# Local brainstorming artifacts
+.superpowers/

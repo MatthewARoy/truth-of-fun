@@ -166,7 +166,7 @@ npm run web:test                   # web route + interaction tests (Playwright; 
 npm run mcp-server:typecheck       # MCP server type check
 ```
 
-The backend suite is hermetic except for the database integration tests
+Backend integration tests need PostGIS; Redis concurrency tests use `TEST_REDIS_URL`. Run against a disposable loopback database whose name ends in `_test`, set `DATABASE_URL` and `TEST_DATABASE_URL` to that database, and apply `alembic upgrade head` before pytest. The isolated event-ranking fixture refuses ordinary application databases and connection query overrides. Without Postgres, database tests skip; a skipped suite does not validate migrations or SQL behavior. CI supplies PostGIS and Redis. See [the stabilization inventory](docs/stabilization-2026-09-29.md) for the reviewed branch dispositions.
 (`tests/test_health_db.py`, `tests/test_event_detail_api.py`), which skip
 automatically when Postgres isn't running (`make db-up` to include them). Those
 two need a real Postgres because the events table carries a PostGIS geometry

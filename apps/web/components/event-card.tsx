@@ -5,6 +5,7 @@ import { useMemo, useState } from "react";
 import { ApiClientError, type EventResponse } from "@truth-of-fun/api-client";
 import { apiClient } from "@/lib/api/client";
 import { useAuth } from "@/lib/auth-context";
+import { cn } from "@/lib/cn";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -21,6 +22,19 @@ type Props = {
   folderOptions?: Array<{ id: number; name: string }>;
   onAddToFolder?: (eventId: number, folderId: number) => Promise<void>;
 };
+
+// A postponed or cancelled show keeps the date it was listed for, and that is
+// not a date to plan around: say what happened, and call the time the original.
+function statusNotice(status: string): { label: string; className: string } | null {
+  switch (status) {
+    case "postponed":
+      return { label: "Postponed", className: "border-amber-700 bg-amber-900/40 text-amber-100" };
+    case "cancelled":
+      return { label: "Cancelled", className: "border-rose-700 bg-rose-900/40 text-rose-100" };
+    default:
+      return null;
+  }
+}
 
 export function EventCard(props: Props) {
   const { token } = useAuth();
@@ -45,6 +59,7 @@ function EventCardContent({ event, showRecommendationFields, folderOptions = [],
         : `${formatLocalDay(event.start_at)} · ${formatLocalTime(event.start_at)}`,
     [event.start_at, event.start_time_is_estimated]
   );
+  const notice = statusNotice(event.status);
 
   function isAuthError(err: unknown): boolean {
     return err instanceof ApiClientError && err.status === 401;
@@ -146,10 +161,21 @@ function EventCardContent({ event, showRecommendationFields, folderOptions = [],
           ) : null}
         </div>
       ) : null}
-      <div className="flex flex-1 flex-col gap-3 p-4">
+      <article className="flex flex-1 flex-col gap-3 p-4">
       <div className="space-y-1">
+        {notice ? (
+          <span
+            className={cn(
+              "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold",
+              notice.className
+            )}
+          >
+            {notice.label}
+          </span>
+        ) : null}
         <h3 className="text-lg font-semibold">{event.title}</h3>
         <p className="text-sm text-slate-300">
+          {notice ? "Originally " : null}
           {startLabel} at {event.venue_name || "Unknown venue"}
         </p>
       </div>
@@ -252,7 +278,7 @@ function EventCardContent({ event, showRecommendationFields, folderOptions = [],
       ) : null}
       {status ? <InlineNotice tone="success">{status}</InlineNotice> : null}
       {error ? <InlineNotice tone="error">{error}</InlineNotice> : null}
-      </div>
+      </article>
     </Card>
   );
 }

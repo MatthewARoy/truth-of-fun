@@ -1,5 +1,6 @@
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 from sqlmodel import Session
 
 from app.core.config import get_settings
@@ -16,6 +17,18 @@ def _reset_rate_limits():
     SlidingWindowLimiter.reset_all()
 
 
+def _require_disposable_database(database_url: str) -> None:
+    parsed = make_url(database_url)
+    if (parsed.get_backend_name() != "postgresql"
+        or parsed.host not in {"localhost", "127.0.0.1"}
+        or not (parsed.database or "").endswith("_test")
+        or parsed.query):
+        raise pytest.UsageError(
+            "isolated_events_session requires a loopback PostgreSQL database "
+            "ending in _test without URL query overrides"
+        )
+
+
 @pytest.fixture
 def isolated_events_session():
     """A session whose ``events`` table holds only the rows the test seeds.
@@ -24,8 +37,8 @@ def isolated_events_session():
     test that seeds a handful of rows and asserts on the global winner really
     asserts about whatever was ingested last. This fixture opens a transaction,
     empties ``events`` inside it, hands back a ``Session`` bound to that same
-    connection, and rolls the transaction back afterwards — the dev corpus is
-    never actually touched.
+    connection, and rolls the transaction back afterwards — changes are never committed. The fixture refuses ordinary application
+    databases; DATABASE_URL must name a disposable loopback _test database.
 
     Two things to know:
 
@@ -36,7 +49,9 @@ def isolated_events_session():
     - Seed through the yielded session. Rows written on a second connection
       (``engine.begin()``) commit for real and are invisible in here.
     """
-    engine = create_engine(get_settings().database_url)
+    database_url = get_settings().database_url
+    _require_disposable_database(database_url)
+    engine = create_engine(database_url)
     connection = engine.connect()
     transaction = connection.begin()
     session = Session(bind=connection)

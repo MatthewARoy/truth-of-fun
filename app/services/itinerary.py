@@ -59,7 +59,19 @@ class StopLocation:
 
     @property
     def is_locatable(self) -> bool:
-        return self.has_coordinates or bool(self.address) or bool(self.venue_name)
+        """Whether we know enough to send anyone anywhere.
+
+        A city-centroid fallback deliberately doesn't count. A quarter of the
+        catalogue sits on the exact SF centroid across 181 distinct real
+        venues, so treating that point as a location produces links that are
+        confidently wrong. With no address or venue name to fall back on, no
+        links is the honest answer.
+        """
+        return (
+            self.has_precise_coordinates
+            or bool(self.address)
+            or bool(self.venue_name)
+        )
 
 
 @dataclass(frozen=True)
@@ -81,7 +93,8 @@ def _waypoint(location: StopLocation) -> str | None:
     ("Valencia St" with no number) and would drop a driver on the wrong block,
     while a real geocode is exactly where the venue is. Low-confidence
     coordinates are the reverse — they're a city centroid, so even a vague
-    address string beats navigating someone downtown.
+    address string beats navigating someone downtown, and when there is no
+    text either we return nothing rather than a plausible wrong answer.
     """
     if location.has_precise_coordinates:
         return f"{location.lat},{location.lng}"
@@ -90,8 +103,6 @@ def _waypoint(location: StopLocation) -> str | None:
     )
     if text_waypoint:
         return text_waypoint
-    if location.has_coordinates:
-        return f"{location.lat},{location.lng}"
     return None
 
 
@@ -125,11 +136,15 @@ def directions_url(
 def nearby_search_url(location: StopLocation, term: str) -> str | None:
     """A Maps search for ``term`` centered on the stop.
 
-    With coordinates this uses the ``/@lat,lng,zoom`` form so results are
-    ranked around the venue. Without them it falls back to a "<term> near
+    With trusted coordinates this uses the ``/@lat,lng,zoom`` form so results
+    are ranked around the venue. Otherwise it falls back to a "<term> near
     <venue>" text search, which is looser but still lands in the right area.
+
+    Centring on an untrusted point is the worst of both: a Levi's Stadium
+    event carrying the SF centroid produced a parking search 40 miles from
+    the stadium, under a heading naming the stadium.
     """
-    if location.has_coordinates:
+    if location.has_precise_coordinates:
         return (
             f"{_MAPS_BASE}/search/{quote(term)}/"
             f"@{location.lat},{location.lng},{_NEARBY_ZOOM}z"

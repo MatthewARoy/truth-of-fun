@@ -11,7 +11,12 @@
 - Account strategy: stable deterministic scraping; moderate crawl rate
 
 ## Ingestion Strategy
-- Target event listing pages and detail pages
+- Crawl the dated day calendars `/calendar/bay-area/MM-DD-YYYY` for the next 7 days,
+  following `rel="next"` (at most 4 pages a day); the undated `/calendar/bay-area`
+  only previews six events per day
+- Also read `/comedy/calendar/MM-DD-YYYY` (at most 2 pages a day) to record SF Station's
+  own Comedy category, which the general listing does not show
+- Bounds: 45 requests and 800 events per run, 1 request/second
 - Leverage likely consistent class structures for location/price/ticket link
 - Parse with deterministic selectors first, regex fallback second
 

@@ -794,7 +794,10 @@ class DataPipelineService:
                 merged["location_confidence"] = secondary_confidence
                 merged["city"] = secondary.get("city")
                 merged["_coordinate_revision"] = secondary["location"] != primary["location"]
-            merged["_allow_status_reset"] = True
+            if primary.get("status") == "past" and merged["start_at"] == primary["start_at"]:
+                merged["status"] = "past"
+            else:
+                merged["_allow_status_reset"] = True
 
         if not authoritative_revision and not location_context_matches:
             for key in ("venue_name", "raw_address", "city", "location", "location_confidence"):

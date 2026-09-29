@@ -309,8 +309,8 @@ async def test_worker_samples_the_used_key_once_per_cycle_even_when_event_proces
             snapshots = session.exec(select(ApiKeyUsageSnapshot)).all()
             assert len(snapshots) == 1
             assert snapshots[0].key_id == 'used-key'
-            assert snapshots[0].usage_count == 1
-        assert store.rows[0].usage_count == 2
+            assert snapshots[0].usage_count == 2  # Dated search plus the undated pass.
+        assert store.rows[0].usage_count == 4  # Two requests in each of two cycles.
         assert store.health_calls == 2
     finally:
         engine.dispose()

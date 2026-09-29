@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -17,10 +17,17 @@ logger = logging.getLogger(__name__)
 
 # Pagination / quota safety constants
 _MAX_PAGE_SIZE = 200
-_MAX_PAGES = 25  # 25 pages * 200 = 5000 events; conserves daily quota
+_DEEP_PAGING_LIMIT = 1000
+_DEFAULT_HORIZON_DAYS = 180
+_MIN_WINDOW = timedelta(days=1)
+_MAX_REQUESTS_PER_RUN = 80
 
 # Bay Area DMA ID (San Francisco-Oakland-San Jose)
 _BAY_AREA_DMA_ID = "382"
+
+def _format_api_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
 
 # Sync state persistence
 _SYNC_STATE_PATH = Path(__file__).resolve().parents[2] / ".ticketmaster_sync_state.json"
@@ -150,113 +157,120 @@ class TicketmasterSource(BaseSource):
         city: str | None = None,
         country_code: str = "US",
         size: int = _MAX_PAGE_SIZE,
+        horizon_days: int = _DEFAULT_HORIZON_DAYS,
+        now: datetime | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
+        """Read bounded date partitions plus undated postponements.
+
+        Discovery supports date filters, not a modified-date delta cursor.
+        Completion is acknowledged only after the worker's durable commit.
+        """
         self._pending_sync_timestamp = None
         self.last_fetch_error = None
-        if size < 1:
-            raise ValueError("Ticketmaster page size must be positive.")
+        if size < 1 or horizon_days < 1:
+            raise ValueError("Ticketmaster page size and horizon must be positive.")
         page_size = min(size, _MAX_PAGE_SIZE)
         params: dict[str, Any] = {
-            "apikey": self._api_key,
-            "countryCode": country_code,
-            "dmaId": _BAY_AREA_DMA_ID,
-            "size": page_size,
-            "sort": "date,asc",
+            "apikey": self._api_key, "countryCode": country_code,
+            "dmaId": _BAY_AREA_DMA_ID, "size": page_size, "sort": "date,asc",
         }
         if keyword:
             params["keyword"] = keyword
         if city:
             params["city"] = city
-
-        # Discovery v2 documents no modifiedDate parameter. Do not pretend a
-        # completion timestamp is a supported delta cursor: replay bounded
-        # searches and rely on durable source identity for idempotency.
-        # https://developer.ticketmaster.com/products-and-docs/apis/discovery-api/v2/
-        logger.info("Ticketmaster full search; prior completion metadata does not filter events")
-
-        sync_started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
+        sync_started_at = _format_api_timestamp(datetime.now(timezone.utc))
+        horizon_start = (now or datetime.now(timezone.utc)).replace(microsecond=0)
+        if horizon_start.tzinfo is None:
+            raise ValueError("Ticketmaster now must include a timezone.")
+        pending = [(horizon_start, horizon_start + timedelta(days=horizon_days))]
+        page_limit = (_DEEP_PAGING_LIMIT + page_size - 1) // page_size
         canonical_events: list[dict[str, Any]] = []
-        current_page = 0
-        total_pages = 1  # will be updated after first response
+        seen_event_ids: set[str] = set()
+        requests_made = 0
 
-        # Discovery v2 requires page*size < 1000 (zero-based page number).
-        tm_page_cap = (1000 + page_size - 1) // page_size
-        page_limit = min(_MAX_PAGES, tm_page_cap)
-
-        # A failed page means the window was only partially read. Recorded so the
-        # cursor is not advanced past events we never saw, and so a caller can
-        # tell a half-read window from a legitimately small result.
-        self.last_fetch_error = None
-
-        while current_page < total_pages and current_page < page_limit:
-            params["page"] = current_page
+        async def read_page(page_params: dict[str, Any]) -> dict[str, Any] | None:
+            nonlocal requests_made
+            if requests_made >= _MAX_REQUESTS_PER_RUN:
+                self.last_fetch_error = f"request budget of {_MAX_REQUESTS_PER_RUN} exhausted"
+                return None
+            requests_made += 1
             try:
-                payload = await self._fetch_page(params)
+                return await self._fetch_page(page_params)
             except Exception as exc:
-                # Type and page only: this string is meant to be surfaceable, and
-                # the message can carry the `?apikey=` from the failing request.
-                # The full exception goes to the log via exc_info.
-                self.last_fetch_error = f"{type(exc).__name__} on page {current_page}"
-                logger.warning(
-                    "Ticketmaster page %d failed, stopping pagination.",
-                    current_page,
-                    exc_info=True,
-                )
-                break
+                # Never expose an API key embedded in an exception/request URL.
+                self.last_fetch_error = f"{type(exc).__name__} on page {page_params['page']}"
+                return None
 
-            # Extract pagination metadata
-            page_info = payload.get("page", {})
-            total_pages = page_info.get("totalPages", 1)
-            total_elements = page_info.get("totalElements", 0)
-
-            if current_page == 0:
-                logger.info(
-                    "Ticketmaster: %d total events across %d pages",
-                    total_elements,
-                    total_pages,
-                )
-
-            logger.info(
-                "Fetching page %d/%d",
-                current_page + 1,
-                min(total_pages, _MAX_PAGES),
-            )
-
-            # Parse events from this page
+        def append_events(payload: dict[str, Any]) -> None:
             raw_events = payload.get("_embedded", {}).get("events", [])
             if not isinstance(raw_events, list):
-                raw_events = []
-
-            for raw_event in raw_events:
-                if not isinstance(raw_event, dict):
+                return
+            for raw in raw_events:
+                if not isinstance(raw, dict):
                     continue
-                mapped = self._map_ticketmaster_event(raw_event)
-                if mapped is not None:
-                    canonical_events.append(mapped)
+                mapped = self._map_ticketmaster_event(raw)
+                if mapped is None:
+                    continue
+                event_id = mapped.get("source_event_id")
+                if event_id:
+                    if event_id in seen_event_ids:
+                        continue
+                    seen_event_ids.add(event_id)
+                canonical_events.append(mapped)
 
-            current_page += 1
+        while pending and self.last_fetch_error is None:
+            window_start, window_end = pending.pop()
+            current_page, total_pages = 0, 1
+            split = False
+            while current_page < total_pages and current_page < page_limit:
+                payload = await read_page({
+                    **params, "startDateTime": _format_api_timestamp(window_start),
+                    "endDateTime": _format_api_timestamp(window_end), "page": current_page,
+                    "includeTBA": "no", "includeTBD": "no",
+                })
+                if payload is None:
+                    break
+                page_info = payload.get("page", {})
+                total_pages = page_info.get("totalPages", 1)
+                total_elements = page_info.get("totalElements", 0)
+                if current_page == 0 and (total_elements > _DEEP_PAGING_LIMIT or total_pages > page_limit):
+                    if window_end - window_start > _MIN_WINDOW:
+                        midpoint = (window_start + (window_end - window_start) / 2).replace(microsecond=0)
+                        # Read earlier dates first; inclusive boundaries dedupe by ID.
+                        pending.extend([(midpoint, window_end), (window_start, midpoint)])
+                        split = True
+                        break
+                    logger.warning("Ticketmaster dense window: only the first 1000 are reachable")
+                append_events(payload)
+                current_page += 1
+            if not split and self.last_fetch_error is None and (
+                current_page < total_pages or total_elements > _DEEP_PAGING_LIMIT
+            ):
+                self.last_fetch_error = "Pagination cap reached in minimum date window; search incomplete"
 
-        if self.last_fetch_error is None and current_page < total_pages:
-            self.last_fetch_error = (
-                f"Pagination cap reached: read {current_page} of {total_pages} pages; "
-                "search remains incomplete and will be replayed"
-            )
+        # Date filters exclude undated events. Read them separately without
+        # a horizon filter, so a postponement reaches the original stored row.
+        if self.last_fetch_error is None:
+            current_page, total_pages = 0, 1
+            total_elements = 0
+            while current_page < total_pages and current_page < page_limit:
+                payload = await read_page({**params, "includeTBA": "only", "page": current_page})
+                if payload is None:
+                    break
+                page_info = payload.get("page", {})
+                total_pages = page_info.get("totalPages", 1)
+                total_elements = page_info.get("totalElements", 0)
+                append_events(payload)
+                current_page += 1
+            if self.last_fetch_error is None and (current_page < total_pages or total_elements > _DEEP_PAGING_LIMIT):
+                self.last_fetch_error = "Pagination cap reached in undated pass; search incomplete"
 
-        # A bounded search that hits the provider/quota cap is incomplete. A
-        # partitioned crawl is a separate concern; never advertise a cap as a
-        # complete sync or skip unseen events behind a fabricated cursor.
         if self.last_fetch_error is None and not keyword and not city and country_code == "US":
             self._pending_sync_timestamp = sync_started_at
         elif self.last_fetch_error:
             logger.warning("Ticketmaster incomplete fetch: %s", self.last_fetch_error)
-        logger.info(
-            "Ticketmaster fetch complete: %d canonical events from %d pages",
-            len(canonical_events),
-            current_page,
-        )
-
+        logger.info("Ticketmaster fetched %d events in %d requests", len(canonical_events), requests_made)
         return canonical_events
 
     def acknowledge_persisted(self) -> None:
@@ -286,12 +300,31 @@ class TicketmasterSource(BaseSource):
         end = dates.get("end", {}) if isinstance(dates, dict) else {}
         timezone_name = event.get("dates", {}).get("timezone")
 
+        status_code = (
+            dates.get("status", {}).get("code", "onsale")
+            if isinstance(dates.get("status"), dict)
+            else "onsale"
+        )
+
         start_at = self._parse_datetime(
             date_time=start.get("dateTime"),
             local_date=start.get("localDate"),
             local_time=start.get("localTime"),
             timezone_name=timezone_name,
         )
+        if start_at is None and status_code.lower() == "postponed":
+            # Postponing without a new date blanks dates.start. The date the show
+            # was postponed from is still published, and storing it alongside
+            # status=postponed is true; dropping the event instead left the
+            # stored row claiming the show was on.
+            initial = dates.get("initialStartDate", {})
+            if isinstance(initial, dict):
+                start_at = self._parse_datetime(
+                    date_time=initial.get("dateTime"),
+                    local_date=initial.get("localDate"),
+                    local_time=initial.get("localTime"),
+                    timezone_name=timezone_name,
+                )
         if start_at is None:
             return None
 
@@ -308,12 +341,6 @@ class TicketmasterSource(BaseSource):
         tags = self._extract_tags(event)
         categories = self._extract_categories(event)
         raw_address = self._format_address(venue)
-
-        status_code = (
-            dates.get("status", {}).get("code", "onsale")
-            if isinstance(dates.get("status"), dict)
-            else "onsale"
-        )
 
         return {
             "title": event.get("name", "Untitled Event"),
@@ -385,12 +412,16 @@ class TicketmasterSource(BaseSource):
         return ", ".join(parts) if parts else None
 
     def _normalize_status(self, source_status: str) -> str:
+        # Ticketmaster's dates.status.code. Only cancelled and postponed mean the
+        # show is not happening as listed: a rescheduled event carries its new
+        # date in dates.start, and offsale only means Ticketmaster isn't selling
+        # tickets right now (sold out, sales closed, box office only).
         mapping = {
             "onsale": "scheduled",
-            "offsale": "cancelled",
+            "offsale": "scheduled",
             "cancelled": "cancelled",
             "rescheduled": "scheduled",
-            "postponed": "scheduled",
+            "postponed": "postponed",
         }
         return mapping.get(source_status.lower(), "scheduled")
 

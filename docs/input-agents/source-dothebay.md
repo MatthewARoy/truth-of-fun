@@ -11,7 +11,11 @@
 - Account strategy: standard proxy rotation; avoid aggressive crawl cadence
 
 ## Ingestion Strategy
-- Crawl event listings and event detail pages
+- Crawl the dated day pages `/events/YYYY/M/D` for the next 7 days, following
+  `rel="next"` (at most 3 pages a day, 21 requests per run, 1 request/second);
+  `/events` alone shows only today
+- Map each card's own `ds-event-category-*` class onto canonical categories; slugs
+  without a clear canonical home (dance, variety, shopping) are not guessed
 - Extract popularity/vote indicators (e.g., editorial picks / vote count)
 - Filter sponsorship modules and promoted placements from event body text
 
