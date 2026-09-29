@@ -33,6 +33,7 @@ Abuse-prone endpoints enforce per-client sliding windows and return **429** with
 | GET | `/events` | none |
 | GET | `/events/{event_id}` | none |
 | GET | `/recommendations` | user JWT |
+| PUT | `/users/me/preferences` | user JWT |
 | POST | `/users/me/onboarding` | user JWT |
 | POST | `/users/me/interests` | user JWT |
 | POST | `/concierge/itinerary` | none |
@@ -145,11 +146,11 @@ Query parameters:
 | `category` | string | Filter by activity category (e.g. `Fitness`, `Music`). Synonyms like `gym`/`workout`/`yoga` resolve to `Fitness` |
 | `time_preset` | `"tonight"` \| `"this_weekend"` | Friendly time window (computed in SF local time) |
 | `location_preset` | `"sf"` \| `"oakland"` \| `"san_jose"` | Friendly location filter |
-| `start_at` | datetime | Start-time lower bound (overrides preset start) |
+| `start_at` | datetime | Window lower bound, including ongoing events (overrides preset start) |
 | `end_at` | datetime | Start-time upper bound (overrides preset end) |
 | `include_past` | bool (default `false`) | Include past events |
 | `sort_by` | `"date"` (default) \| `"distance"` | `distance` requires `lat`/`lng` |
-| `status` | string | Filter by event status |
+| `status` | string | Filter by event status; defaults to scheduled when `include_past=false` |
 | `limit` | int 1–200 (default 25) | |
 | `offset` | int ≥ 0 (default 0) | |
 
@@ -184,7 +185,7 @@ not present it as one.
 
 ### GET /recommendations
 
-Auth: user bearer JWT. Personalized upcoming events scored from explicit vibe likes plus decayed behavioral signals. Returns `[]` for users with no preferences or signals.
+Auth: user bearer JWT. Scheduled, upcoming or ongoing events scored from explicit vibe likes plus decayed behavioral signals. Users with no matching preferences/signals receive a popularity, freshness, and diversity fallback. Ranking and diversity are applied in SQL before pagination; only the requested page is hydrated. `match_score` is a heuristic ranking score, not a calibrated match probability.
 
 Query parameters: `limit` (int 1–200, default 25), `offset` (int ≥ 0, default 0).
 
@@ -196,6 +197,16 @@ Response: list of `RecommendationResponse` = `EventResponse` plus:
   "matched_vibes": "string[]"
 }
 ```
+
+### PUT /users/me/preferences
+
+Auth: user bearer JWT. Replaces explicit choices with a canonical list from the supported vibe vocabulary. `[]` clears explicit choices. Unknown tags return `422`. Previous explicit like/onboarding signals are removed; event engagement signals are retained.
+
+Request: `{"preferred_vibes": ["#livemusic", "#art"]}` (at most 50 entries).
+
+Response: `{"user_id": 1, "saved_event_ids": [], "preferred_vibes": ["#livemusic", "#art"]}`.
+
+Use this endpoint for structured pickers; the free-text endpoint below is a separate extraction flow.
 
 ### POST /users/me/onboarding
 
@@ -252,6 +263,8 @@ Auth: none. Parses a natural-language query into an intent/time window, picks an
 `intent` is one of `date_night`, `out_of_town_guests`, `bar_crawl`, `active_day`, `general_night_out`. An `active_day` request (gyms, workout classes, climbing, yoga, run clubs, etc.) sets `category_focus: "Fitness"` and restricts anchor selection to that category.
 
 `limit` is accepted but has no effect. An itinerary is at most three stops by construction, so the field never sized the response; it only ever truncated the candidate pools, which decided the anchor and the post-anchor stop by start time before ranking and sequencing ran.
+
+New stops use `before_event`, `main_event`, and `after_event`; existing shared snapshots retain their old labels. All candidates must be scheduled. Sequencing stays within one outing night and requires a published predecessor end plus a 30-minute travel buffer. Unknown or estimated timing reduces the number of stops. Low-confidence anchor coordinates produce a standalone event instead of an asserted nearby route. The fixed buffer is not a live travel-time estimate.
 
 Request:
 
@@ -592,7 +605,7 @@ Response:
 
 ### POST /internal/secrets/{provider}/usage
 
-Scope: `internal:secrets:write`. Reports usage against a leased key and snapshots provider health. `404` for an unknown key, `400` on other store errors.
+Scope: `internal:secrets:write`. Reports usage against a leased key and samples that key's health at most hourly or on a state change. Sampling is best effort and skips a busy sampler. Snapshots retain at most 30 days and 1,000 rows per key. `404` for an unknown key, `400` on store errors before usage is accepted.
 
 Request:
 
@@ -618,7 +631,7 @@ Response:
 
 ### GET /internal/secrets/{provider}/health
 
-Scope: `internal:secrets:read`. Per-key health for a provider (also persists a usage snapshot).
+Scope: `internal:secrets:read`. Read-only per-key health for a provider.
 
 Response:
 

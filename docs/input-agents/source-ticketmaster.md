@@ -16,9 +16,10 @@
 ## Ingestion Strategy
 - Endpoint: `GET /discovery/v2/events.json`
 - Bay Area filtering: `dmaId=382`
-- Sync modes:
-  - bootstrap: `sort=date,asc`, max `size`
-  - incremental: `modified_date.ge={last_sync}`
+- Fetch mode: replay `sort=date,asc`, max `size`, using persistent source IDs for idempotent updates.
+- Discovery v2 does not document a modified-date filter. The local sync timestamp is completion metadata, not a delta cursor.
+- Respect `page * size < 1000`. A capped or failed search is incomplete and does not receive a completion timestamp. Date-partitioned coverage beyond this cap remains follow-up work.
+- The worker acknowledges completion only after the database transaction succeeds without rejected records.
 - Backoff: exponential retry on 429/5xx
 
 ## Field Mapping
@@ -35,5 +36,6 @@
 - Compliance: deep-link only; no ticket flow mirroring
 
 ## Operational Metrics
-- Key metrics: rate-limit hit ratio, pages fetched, incremental delta volume
-- Alert: abnormal drop in modified events or sustained 429s
+- Key metrics: rate-limit hit ratio, pages fetched, partial fetches, rejected records, changed canonical events
+- Alert: incomplete pagination, abnormal result drops, or sustained 429s
+- Provider contract: [Ticketmaster Discovery API v2](https://developer.ticketmaster.com/products-and-docs/apis/discovery-api/v2/).

@@ -76,4 +76,3 @@ def snapshot_key_health(
             ApiKeyUsageSnapshot.id.in_(excess)
         ).execution_options(synchronize_session=False))
     session.commit()
-
