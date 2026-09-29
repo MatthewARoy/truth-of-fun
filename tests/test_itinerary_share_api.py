@@ -7,6 +7,7 @@ looking at, then open the resulting public URL cold with no auth.
 from __future__ import annotations
 
 import struct
+import pytest
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -284,7 +285,8 @@ def test_unknown_and_malformed_tokens_are_both_just_not_found() -> None:
         assert client.get("/shared/itineraries/" + "z" * 32).status_code == 404
 
 
-def test_low_confidence_coordinates_fall_back_to_the_address() -> None:
+@pytest.mark.parametrize("confidence", [0.0, 0.3])
+def test_low_confidence_coordinates_fall_back_to_the_address(confidence) -> None:
     """A centroid guess must not become a turn-by-turn destination."""
     with _build_client() as (client, session):
         event_id = _insert_event(
@@ -294,7 +296,7 @@ def test_low_confidence_coordinates_fall_back_to_the_address() -> None:
             venue_name="Undisclosed Warehouse",
             address="Oakland, CA",
             coordinates=(37.8044, -122.2712),
-            location_confidence=0.3,
+            location_confidence=confidence,
         )
         body = client.post(
             "/concierge/itinerary/share",
@@ -307,3 +309,5 @@ def test_low_confidence_coordinates_fall_back_to_the_address() -> None:
         assert "destination=Undisclosed%20Warehouse%2C%20Oakland%2C%20CA" in directions
         # The neighborhood is still good enough to look around in.
         assert "@37.8044,-122.2712" in body["itinerary"][0]["links"]["parking_url"]
+        shared = client.get(f"/shared/itineraries/{body['share_token']}").json()
+        assert shared["itinerary"][0]["links"]["directions_url"] == directions

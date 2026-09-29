@@ -181,8 +181,10 @@ def build_stop_links(
 
 _STOP_KIND_LABELS = {
     "pre_event_drink": "Before",
+    "before_event": "Before",
     "main_event": "Main event",
     "late_night_snack": "After",
+    "after_event": "After",
 }
 
 _INTENT_LABELS = {

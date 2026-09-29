@@ -42,11 +42,8 @@ pytestmark = pytest.mark.skipif(
 def _next_sunday_at(hour: int, minute: int = 0) -> datetime:
     """The Sunday the concierge will target, at ``hour`` SF-local, as UTC.
 
-    On a Sunday that is *today*: the app resolves "Sunday" to the current day
-    (concierge ``_resolve_window`` uses ``% 7`` with no bump), so the fixture
-    must too, or every anchor test goes red on Sundays. The anchor query
-    bounds on the intent window rather than ``now()``, so an event earlier
-    the same day still qualifies whenever CI runs.
+    On a Sunday that is *today*. The parser clock is fixed to that morning
+    below, so evening fixtures stay upcoming even when CI runs Sunday night.
     """
     now_local = datetime.now(LOCAL_TZ)
     days_until = (6 - now_local.weekday()) % 7
@@ -54,6 +51,20 @@ def _next_sunday_at(hour: int, minute: int = 0) -> datetime:
         hour=hour, minute=minute, second=0, microsecond=0
     )
     return target.astimezone(timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _stable_parser_clock(monkeypatch):
+    from app.services import concierge
+
+    morning = _next_sunday_at(8)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return morning.astimezone(tz) if tz else morning.replace(tzinfo=None)
+
+    monkeypatch.setattr(concierge, "datetime", Clock)
 
 
 @pytest.fixture
@@ -68,16 +79,16 @@ def sunday_events():
         for title, start_at in rows:
             connection.execute(
                 text(
-                    "INSERT INTO events (title, start_at, source_name, source_tier,"
+                    "INSERT INTO events (title, start_at, end_at, source_name, source_tier,"
                     " location, categories, tags, status, attendee_count,"
                     " location_confidence, is_free, venue_name, raw_address,"
                     " created_at, updated_at)"
-                    " VALUES (:title, :start_at, 'test-anchor', 2,"
+                    " VALUES (:title, :start_at, :end_at, 'test-anchor', 2,"
                     " ST_SetSRID(ST_MakePoint(-122.4194, 37.7749), 4326), '[]', '[]',"
                     " 'scheduled', 0, 1.0, false, 'Test Venue',"
                     " 'Test Venue, San Francisco, CA', now(), now())"
                 ),
-                {"title": title, "start_at": start_at},
+                {"title": title, "start_at": start_at, "end_at": start_at + timedelta(hours=1)},
             )
     yield
     with engine.begin() as connection:
@@ -116,11 +127,11 @@ def content_rank_and_outer_support_events():
         for title, start_at, source_tier, longitude, tags in rows:
             connection.execute(
                 text(
-                    "INSERT INTO events (title, start_at, source_name, source_tier,"
+                    "INSERT INTO events (title, start_at, end_at, source_name, source_tier,"
                     " location, categories, tags, status, attendee_count,"
                     " location_confidence, is_free, venue_name, raw_address,"
                     " created_at, updated_at)"
-                    " VALUES (:title, :start_at, 'test-concierge-content', :source_tier,"
+                    " VALUES (:title, :start_at, :end_at, 'test-concierge-content', :source_tier,"
                     " ST_SetSRID(ST_MakePoint(:longitude, 37.7749), 4326), '[]',"
                     " CAST(:tags AS json), 'scheduled', 0, 1.0, false,"
                     " 'San Francisco Content Test', 'San Francisco Content Test',"
@@ -129,6 +140,7 @@ def content_rank_and_outer_support_events():
                 {
                     "title": title,
                     "start_at": start_at,
+                    "end_at": start_at + timedelta(hours=1),
                     "source_tier": source_tier,
                     "longitude": longitude,
                     "tags": tags,
@@ -225,17 +237,17 @@ def test_support_search_keeps_half_mile_primary_when_it_has_a_result(
     with engine.begin() as connection:
         connection.execute(
             text(
-                "INSERT INTO events (title, start_at, source_name, source_tier,"
+                "INSERT INTO events (title, start_at, end_at, source_name, source_tier,"
                 " location, categories, tags, status, attendee_count,"
                 " location_confidence, is_free, venue_name, raw_address,"
                 " created_at, updated_at)"
-                " VALUES ('support-inner-radius', :start_at,"
+                " VALUES ('support-inner-radius', :start_at, :end_at,"
                 " 'test-concierge-content', 3,"
                 " ST_SetSRID(ST_MakePoint(-122.415, 37.7749), 4326), '[]', '[]',"
                 " 'scheduled', 0, 1.0, false, 'San Francisco Content Test',"
                 " 'San Francisco Content Test', now(), now())"
             ),
-            {"start_at": _next_sunday_at(18, 30)},
+            {"start_at": _next_sunday_at(18, 30), "end_at": _next_sunday_at(19, 30)},
         )
     client = TestClient(app)
 
@@ -266,6 +278,7 @@ def _sf_event(
     return Event(
         title=title,
         start_at=start_at,
+        end_at=start_at + timedelta(hours=1),
         source_name="test-anchor-candidates",
         source_tier=source_tier,
         location="POINT(-122.4194 37.7749)",
@@ -368,9 +381,9 @@ def test_a_post_anchor_stop_survives_a_small_itinerary_limit(
     assert response.status_code == 200
     payload = response.json()
     assert [stop["kind"] for stop in payload["itinerary"]] == [
-        "pre_event_drink",
+        "before_event",
         "main_event",
-        "late_night_snack",
+        "after_event",
     ]
     assert payload["itinerary"][-1]["title"] == "support-after-2200"
 
@@ -444,3 +457,17 @@ def test_the_api_reports_an_estimated_start_time(
     by_title = {event["title"]: event for event in response.json()}
     assert by_title["anchor-estimated-brunch"]["start_time_is_estimated"] is True
     assert by_title["anchor-real-evening-show"]["start_time_is_estimated"] is False
+
+
+def test_uncertain_anchor_location_does_not_invent_a_nearby_route(isolated_events_session):
+    session = isolated_events_session
+    anchor = _sf_event(title="Unresolved jazz venue", start_at=_next_sunday_at(20), tags=["#date", "#jazz"])
+    anchor.location_confidence = 0.3
+    session.add(anchor)
+    session.add(_sf_event(title="Near the guessed centroid", start_at=_next_sunday_at(18), source_tier=3))
+    session.commit()
+    response = TestClient(app).post(
+        "/concierge/itinerary", json={"query": "date night in San Francisco Sunday", "limit": 10}
+    )
+    assert response.status_code == 200
+    assert [stop["title"] for stop in response.json()["itinerary"]] == ["Unresolved jazz venue"]

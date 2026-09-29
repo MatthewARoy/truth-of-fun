@@ -5,14 +5,14 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from geoalchemy2 import Geography
-from sqlalchemy import and_, cast, func, text
+from sqlalchemy import and_, case, cast, delete, func, literal, or_, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Session, select
 
 from app.core.database import get_session
-from app.core.localtime import LOCAL_TZ
+from app.core.localtime import LOCAL_TZ, tonight_end, weekend_window
 from app.core.ratelimit import llm_rate_limit, share_rate_limit
 from app.core.security import get_current_user, get_optional_user
 from app.models.event import Event
@@ -34,7 +34,7 @@ from app.services.itinerary import (
 )
 from app.services.recommender import RecommenderService, ScoredEvent
 from app.services.social import generate_share_token, is_valid_share_token
-from app.services.tags import stored_forms_for
+from app.services.tags import VIBE_VOCABULARY, resolve_vibe_tag, stored_forms_for
 from app.services.user_profile import UserProfileService
 
 router = APIRouter(tags=["discovery"])
@@ -187,6 +187,22 @@ class InterestResponse(BaseModel):
     user_id: int
     saved_event_ids: list[int]
     preferred_vibes: list[str]
+
+
+class PreferencesRequest(BaseModel):
+    preferred_vibes: list[str] = Field(max_length=50)
+
+    @field_validator("preferred_vibes")
+    @classmethod
+    def known_vibes(cls, values: list[str]) -> list[str]:
+        tags: list[str] = []
+        for value in values:
+            tag = resolve_vibe_tag(value)
+            if tag not in VIBE_VOCABULARY:
+                raise ValueError(f"Unknown vibe: {value[:100]}")
+            if tag not in tags:
+                tags.append(tag)
+        return tags
 
 
 class OnboardingRequest(BaseModel):
@@ -397,22 +413,10 @@ def _apply_time_preset(
     if not time_preset:
         return None, None
     now = now or datetime.now(timezone.utc)
-    local_now = now.astimezone(LOCAL_TZ)
     if time_preset == "tonight":
-        # Ends 3 AM local the next morning so late shows still count as tonight.
-        end_local = (local_now + timedelta(days=1)).replace(
-            hour=3, minute=0, second=0, microsecond=0
-        )
-        return now, end_local.astimezone(timezone.utc)
+        return now, tonight_end(now)
     if time_preset == "this_weekend":
-        days_to_friday = (4 - local_now.weekday()) % 7
-        friday_local = (local_now + timedelta(days=days_to_friday)).replace(
-            hour=17, minute=0, second=0, microsecond=0
-        )
-        monday_local = (friday_local + timedelta(days=3)).replace(
-            hour=6, minute=0, second=0, microsecond=0
-        )
-        return friday_local.astimezone(timezone.utc), monday_local.astimezone(timezone.utc)
+        return weekend_window(now)
     return None, None
 
 
@@ -464,7 +468,7 @@ def search_events(
         default=None,
         description="Friendly location filter for quick UI controls",
     ),
-    start_at: datetime | None = Query(default=None, description="Start time lower bound"),
+    start_at: datetime | None = Query(default=None, description="Window lower bound; includes ongoing events"),
     end_at: datetime | None = Query(default=None, description="Start time upper bound"),
     include_past: bool = Query(False, description="Include past events in results"),
     sort_by: Literal["date", "distance"] = Query(
@@ -506,13 +510,15 @@ def search_events(
         stmt = stmt.where(func.coalesce(Event.end_at, Event.start_at) >= func.now())
     if status is not None:
         stmt = stmt.where(Event.status == status)
+    elif not include_past:
+        stmt = stmt.where(Event.status == "scheduled")
 
     preset_start, preset_end = _apply_time_preset(time_preset=time_preset)
     start_bound = start_at or preset_start
     end_bound = end_at or preset_end
 
     if start_bound is not None:
-        stmt = stmt.where(Event.start_at >= start_bound)
+        stmt = stmt.where(func.coalesce(Event.end_at, Event.start_at) >= start_bound)
     if end_bound is not None:
         stmt = stmt.where(Event.start_at <= end_bound)
     if vibe_tag:
@@ -548,9 +554,9 @@ def search_events(
 
     # Sort order: distance (when geo available) or date (default / fallback).
     if sort_by == "distance" and has_geo:
-        stmt = stmt.order_by(distance_expr.asc())
+        stmt = stmt.order_by(distance_expr.asc(), Event.start_at.asc(), Event.id.asc())
     else:
-        stmt = stmt.order_by(Event.start_at.asc())
+        stmt = stmt.order_by(Event.start_at.asc(), Event.id.asc())
 
     # Total matching rows before pagination, so a client (notably an agent
     # driving this through the MCP server) knows whether to keep paging without
@@ -622,6 +628,33 @@ def get_event(
         source_tier=event.source_tier,
         raw_address=event.raw_address,
     )
+
+
+@router.put(
+    "/users/me/preferences",
+    response_model=InterestResponse,
+    operation_id="setPreferences",
+    summary="Replace the current user's explicit vibe preferences",
+)
+def set_preferences(
+    *,
+    payload: PreferencesRequest,
+    session: Session = Depends(get_session),
+    user: User = Depends(get_current_user),
+) -> InterestResponse:
+    user.preferred_vibes = list(payload.preferred_vibes)
+    # Replacing explicit choices must also remove their old derived weights.
+    # Event engagement remains a separate behavioral signal.
+    session.execute(delete(UserSignal).where(
+        UserSignal.user_id == user.id,
+        UserSignal.signal_type.in_(["like", "onboarding"]),
+        UserSignal.event_id.is_(None),
+    ))
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return InterestResponse(user_id=int(user.id), saved_event_ids=list(user.saved_event_ids),
+                            preferred_vibes=list(user.preferred_vibes))
 
 
 @router.post(
@@ -751,37 +784,92 @@ def get_recommendations(
         user_id=int(user.id or 0),
         now=datetime.now(timezone.utc),
     )
-    if not preferred_vibes and not profile_scores:
-        return []
-
     now_utc = datetime.now(timezone.utc)
-    stmt = select(Event).where(Event.start_at >= now_utc).order_by(Event.start_at.asc())
-    upcoming_events = session.exec(stmt).all()
-
-    # Popularity = distinct users with engagement signals, one aggregated query.
-    pop_rows = session.exec(
+    eligible = and_(
+        func.coalesce(Event.end_at, Event.start_at) >= now_utc,
+        Event.status == "scheduled",
+    )
+    # Rank lightweight scoring inputs in Postgres, including diversity, before
+    # hydrating only the requested page of event descriptions/geometries.
+    popularity = (
         select(UserSignal.event_id, func.count(func.distinct(UserSignal.user_id)))
+        .join(Event, Event.id == UserSignal.event_id)
         .where(
-            UserSignal.event_id.isnot(None),
+            eligible,
             UserSignal.signal_type.in_(["save", "click", "external_ticket_click"]),
         )
         .group_by(UserSignal.event_id)
+    ).subquery()
+    popularity_count = func.coalesce(popularity.c[1], 0)
+    raw_weights: dict[str, float] = {}
+    for tag in {resolve_vibe_tag(v) for v in preferred_vibes} - {None}:
+        raw_weights[tag] = 100.0
+    for tag, value in profile_scores.items():
+        key = resolve_vibe_tag(tag)
+        if key:
+            raw_weights[key] = raw_weights.get(key, 0.0) + value * 10.0
+    raw_vibe = sum(
+        (case((_canonical_tag_filter(tag), weight), else_=0.0) for tag, weight in raw_weights.items()),
+        literal(0.0),
+    )
+    vibe = 100.0 * raw_vibe / (raw_vibe + 100.0)
+    freshness = case(
+        (Event.created_at >= now_utc - timedelta(hours=24), 100.0),
+        (Event.created_at >= now_utc - timedelta(hours=48), 75.0),
+        (Event.created_at >= now_utc - timedelta(days=7), 50.0),
+        else_=25.0,
+    )
+    score = (
+        vibe * _recommender_service.VIBE_WEIGHT
+        + func.least(popularity_count * 10.0, 100.0) * _recommender_service.POPULARITY_WEIGHT
+        + freshness * _recommender_service.FRESHNESS_WEIGHT
+        + 100.0 * _recommender_service.DIVERSITY_WEIGHT
+    )
+    candidates = (
+        select(
+            Event.id, Event.start_at, Event.categories[0].as_string().label("category"),
+            popularity_count.label("popularity"), raw_vibe.label("vibe"), score.label("score"),
+        )
+        .outerjoin(popularity, popularity.c.event_id == Event.id)
+        .where(eligible)
+    ).cte("recommendation_candidates")
+    ranked = select(
+        candidates,
+        func.lag(candidates.c.category).over(
+            order_by=(candidates.c.score.desc(), candidates.c.start_at, candidates.c.id)
+        ).label("previous_category"),
+    )
+    if raw_weights:
+        any_match = select(candidates.c.id).where(candidates.c.vibe > 0).exists()
+        ranked = ranked.where(or_(candidates.c.vibe > 0, ~any_match))
+    ranked = ranked.subquery()
+    final_score = ranked.c.score - case(
+        (and_(ranked.c.category.is_not(None), ranked.c.category == ranked.c.previous_category),
+         _recommender_service.DIVERSITY_PENALTY),
+        else_=0.0,
+    )
+    candidates_page = session.exec(
+        select(Event, ranked.c.popularity, final_score)
+        .join(ranked, ranked.c.id == Event.id)
+        .order_by(final_score.desc(), Event.start_at.asc(), Event.id.asc())
+        .offset(offset).limit(limit)
     ).all()
-    popularity_counts: dict[int, int] = {
-        int(eid): int(cnt) for eid, cnt in pop_rows if eid is not None
-    }
+    upcoming_events = [event for event, _, _ in candidates_page]
+    popularity_counts = {int(event.id): int(count) for event, count, _ in candidates_page}
+    final_scores = {int(event.id): float(value) for event, _, value in candidates_page}
 
     scored_events: list[ScoredEvent] = _recommender_service.score_events(
         events=upcoming_events,
         user=user,
         user_vibe_scores=profile_scores,
         popularity_counts=popularity_counts,
+        apply_diversity=False,
     )
-
-    # Filter out events with no signal at all (vibe_score <= 0 and no matched tags).
-    scored_events = [se for se in scored_events if se.vibe_score > 0 or se.matched_tags]
-
-    paged = scored_events[offset : offset + limit]
+    # SQL already ranked the full eligible corpus; never reapply a diversity
+    # penalty to a page (its previous neighbor may live on the preceding page).
+    for scored in scored_events:
+        scored.total_score = final_scores[int(scored.event.id)]
+    paged = sorted(scored_events, key=lambda item: (-item.total_score, item.event.start_at, item.event.id))
 
     recommendations: list[RecommendationResponse] = []
     counts = _people_interested_counts(
@@ -821,6 +909,7 @@ async def build_concierge_itinerary(
         stmt = select(Event).where(
             overlaps_window(parsed.window_start, parsed.window_end),
             Event.source_tier <= 2,
+            Event.status == "scheduled",
         )
         hours = anchor_hour_range(parsed.intent) if restrict_to_intent_hours else None
         if hours is not None:
@@ -888,7 +977,8 @@ async def build_concierge_itinerary(
         )
 
     anchor_lat, anchor_lng = _extract_lat_lng(anchor)
-    if anchor_lat is None or anchor_lng is None:
+    if (anchor_lat is None or anchor_lng is None
+            or anchor.location_confidence < DEFAULT_MIN_LOCATION_CONFIDENCE):
         support_events = []
     else:
         anchor_point = func.ST_SetSRID(
@@ -902,6 +992,9 @@ async def build_concierge_itinerary(
                     Event.id != anchor.id,
                     overlaps_window(parsed.window_start, parsed.window_end),
                     Event.source_tier >= 3,
+                    Event.status == "scheduled",
+                    Event.start_time_is_estimated.is_(False),
+                    Event.location_confidence >= DEFAULT_MIN_LOCATION_CONFIDENCE,
                     func.ST_DWithin(
                         cast(Event.location, Geography),
                         cast(anchor_point, Geography),
@@ -1004,7 +1097,8 @@ def _portable_response(itinerary: SavedItinerary) -> PortableItineraryResponse:
                     lat=stop.get("lat"),
                     lng=stop.get("lng"),
                     location_confidence=float(
-                        stop.get("location_confidence") or 1.0
+                        stop["location_confidence"]
+                        if stop.get("location_confidence") is not None else 1.0
                     ),
                 ),
             )

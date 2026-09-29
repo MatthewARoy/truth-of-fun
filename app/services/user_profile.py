@@ -86,22 +86,27 @@ class UserProfileService:
         now: datetime | None = None,
     ) -> dict[str, float]:
         scores: dict[str, float] = {}
-        signals = session.exec(select(UserSignal).where(UserSignal.user_id == user_id)).all()
-        for signal in signals:
-            contribution = float(signal.weight) * self.decay_multiplier(
-                created_at=signal.created_at,
+        # Fetch only scoring inputs, with one join rather than one Event lookup
+        # per signal. Stream rows so a long history does not fill the identity map.
+        rows = session.exec(
+            select(UserSignal.vibe_tag, Event.tags, UserSignal.weight, UserSignal.created_at)
+            .outerjoin(Event, Event.id == UserSignal.event_id)
+            .where(UserSignal.user_id == user_id)
+            .execution_options(yield_per=500)
+        )
+        for vibe_tag, event_tags, weight, created_at in rows:
+            contribution = float(weight) * self.decay_multiplier(
+                created_at=created_at,
                 now=now,
             )
             if contribution <= 0:
                 continue
 
             tags: list[str] = []
-            if signal.vibe_tag:
-                tags = [signal.vibe_tag]
-            elif signal.event_id:
-                event = session.get(Event, signal.event_id)
-                if event is not None:
-                    tags = list(event.tags or [])
+            if vibe_tag:
+                tags = [vibe_tag]
+            elif event_tags:
+                tags = list(event_tags)
 
             for tag in self._normalize_tags(tags):
                 key = tag.lower()
