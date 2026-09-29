@@ -410,7 +410,11 @@ class IngestionWorker:
             except Exception:
                 logger.warning("Worker API-key usage snapshot could not be recorded.", exc_info=True)
 
-        active_count = sum(1 for item in key_health if item.status == "active")
+        managed_inventory = any(getattr(item, "key_id", "") != "env-ticketmaster" for item in key_health)
+        active_count = sum(
+            1 for item in key_health if item.status == "active"
+            and not (managed_inventory and getattr(item, "key_id", "") == "env-ticketmaster")
+        )
         exhausted_count = sum(1 for item in key_health if item.status == "exhausted")
         if active_count <= 1:
             logger.warning(

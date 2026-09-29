@@ -362,3 +362,21 @@ async def test_environment_key_with_unavailable_telemetry_is_not_reported_missin
     assert "environment Ticketmaster key used" in caplog.text
     assert "no ticketmaster keys" not in caplog.text
     assert "private" not in caplog.text
+
+
+async def test_historic_env_telemetry_does_not_inflate_leaseable_inventory(monkeypatch, caplog):
+    from app.core.config import Settings
+    from app.services.secrets_store import KeyHealth
+    settings = Settings(_env_file=None, aaim_enabled=True)
+    monkeypatch.setattr("app.worker.get_settings", lambda: settings)
+    class Store:
+        def health(self, provider):
+            return [KeyHealth(key_id="env-ticketmaster", usage_count=1, quota_limit=100,
+                status="active", last_status=200, last_error=None, updated_at_epoch=1),
+                KeyHealth(key_id="managed", usage_count=100, quota_limit=100,
+                status="disabled", last_status=200, last_error=None, updated_at_epoch=1)]
+    monkeypatch.setattr("app.worker.get_secrets_store", lambda: Store())
+    worker = IngestionWorker(pipeline_service=_FakePipeline())
+    with caplog.at_level("WARNING"):
+        worker._record_quota_health(source_name="ticketmaster")
+    assert "active_ticketmaster_keys=0" in caplog.text
