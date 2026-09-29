@@ -682,3 +682,46 @@ Response:
 - All authenticated user endpoints expect `Authorization: Bearer <JWT>` issued by `/auth/register` or `/auth/login`.
 - Validation failures on typed parameters/bodies return FastAPI's standard `422` shape (`{"detail": [...]}`).
 - Contract changes should be additive while web and mobile clients are bootstrapping.
+
+## Scoped agent access (additive, 2026-09-29)
+
+`POST /users/me/tokens` (201) accepts `name` (1–100 plain characters), nonempty
+`scopes` drawn from `events:read`, `profile:read`, `signals:write`, `plans:read`,
+and `expires_in_days` (1–365, default 30). Owner user JWT required; PATs cannot
+manage tokens. At most 50 active tokens per owner. Response includes id, name,
+prefix, scopes, created/expiry/revocation/last-used timestamps, request_count,
+and a one-time `token` secret. Only the hash persists.
+
+`GET /users/me/tokens?limit=50&offset=0` returns owned metadata including revoked
+and expired tokens, newest first (limit max 100); neither hash nor raw secret
+is returned. `DELETE /users/me/tokens/{token_id}` idempotently revokes an owned
+token (204), with 404 for unknown or cross-owner ids. These routes and the new
+`GET /users/me` profile response use `Cache-Control: private, no-store`.
+
+Bearer `tof_pat_<12 hex prefix>_<43 character secret>` is accepted by scoped
+routes through `Actor`. Missing scope returns 403, invalid/expired/revoked token
+401, inactive owner 403. JWT users retain interactive authority. Public event
+read routes remain anonymous when no token is presented; a presented PAT must
+be valid and have events:read. Profile reads require profile:read;
+recommendations need both profile:read and events:read. Signal writes require
+signals:write and profile:read, retaining `created_via=agent:{token_id}` on each
+signal (human writes `user`; pre-migration/old-process writes `legacy`). Events-only planning omits personal
+ranking inputs. Own itinerary-link listing supports plans:read. Token/credential
+management, public publication/revocation, onboarding/preferences and folder
+mutations remain user-JWT-only. Future scopes are rejected until implemented.
+
+`GET /users/me` returns user_id, preferred_vibes, saved_event_ids and learned
+vibe_scores. Password hashes and email are omitted. The MCP get_my_profile tool
+wraps this route; TOF_TOKEN supports PATs without password exchange.
+
+Usage admission atomically rechecks expiry/revocation and increments request_count
+and last_used_at. Count includes successfully authenticated admissions even when
+a route subsequently denies scope or fails, not anonymous traffic. Revocation
+prevents new admissions; in-flight work may complete. PAT requests have a 120/min
+per-token cap per API replica. Existing auth/LLM/share IP caps remain enforced.
+
+Migration `202609290004` creates agent_tokens and adds user_signals.created_via
+with database default `legacy`, preserving existing rows and foreign keys. Apply via normal
+release procedures before serving new code; this task validates only disposable
+databases. Downgrade removes agent credentials/provenance but retains user/event
+and signal rows. Credential rotation/recovery for existing JWTs is separate work.

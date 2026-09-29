@@ -2,7 +2,7 @@
 
 export type ServerConfig = {
   apiUrl: string;
-  /** A user JWT from POST /auth/login. Optional: read tools work without it. */
+  /** A scoped tof_pat_ token (recommended), or legacy user JWT. Optional for public read tools. */
   token: string | null;
   /** Credentials to exchange for a JWT at startup, if no token was supplied. */
   email: string | null;

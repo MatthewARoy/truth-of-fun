@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.agent_tokens import router as agent_tokens_router
 from app.api.auth import router as auth_router
 from app.api.discovery import router as discovery_router
 from app.api.health import router as health_router
@@ -80,6 +81,7 @@ app.add_middleware(RequestContextMiddleware)
 
 app.include_router(health_router)
 app.include_router(auth_router)
+app.include_router(agent_tokens_router)
 app.include_router(discovery_router)
 app.include_router(social_router)
 app.include_router(internal_secrets_router)

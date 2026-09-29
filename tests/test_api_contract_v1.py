@@ -6,6 +6,9 @@ def test_ui_contract_v1_paths_exist() -> None:
     paths = schema["paths"]
 
     expected_paths = [
+        "/users/me",
+        "/users/me/tokens",
+        "/users/me/tokens/{token_id}",
         "/events",
         "/events/{event_id}",
         "/recommendations",

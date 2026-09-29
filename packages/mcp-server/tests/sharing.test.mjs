@@ -142,3 +142,19 @@ test("owner listing and revocation forward the authenticated API contract", asyn
   assert.equal(requests[1].method, "DELETE");
   assert.ok(requests.every((r) => new Headers(r.headers).get("Authorization") === "Bearer test-user-token"));
 });
+
+test("scoped PAT is forwarded by the read-only profile tool and scope denial is actionable", async (t) => {
+  const { client, requests } = await setup(t, { respond: () => new Response(JSON.stringify({
+    user_id: 1, preferred_vibes: ["#calm"], saved_event_ids: [], vibe_scores: {},
+  })) });
+  const result = await client.callTool({ name: "get_my_profile", arguments: {} });
+  assert.equal(result.isError, undefined);
+  assert.equal(JSON.parse(result.content[0].text).user_id, 1);
+  assert.equal(requests[0].url, "https://stub.invalid/users/me");
+  const { tools } = await client.listTools();
+  assert.equal(tools.find((tool) => tool.name === "get_my_profile").annotations.readOnlyHint, true);
+  globalThis.fetch = async () => new Response(JSON.stringify({ detail: "Missing required scope: profile:read" }), { status: 403 });
+  const refused = await client.callTool({ name: "get_my_profile", arguments: {} });
+  assert.equal(refused.isError, true);
+  assert.match(refused.content[0].text, /scopes, expiry, and revocation/);
+});

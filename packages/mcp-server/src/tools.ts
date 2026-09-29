@@ -51,9 +51,8 @@ function describeError(error: unknown, operatorTool = false): string {
     if (apiError.status === 401 || apiError.status === 403) {
       if (operatorTool) return `Operator authorization required (HTTP ${apiError.status}). Configure TOF_OPS_TOKEN for get_platform_status; a user token does not grant operator access.`;
       return (
-        `Not authorized (HTTP ${apiError.status}). This tool needs a signed-in ` +
-        "user. Set TOF_TOKEN (or TOF_EMAIL/TOF_PASSWORD) in the MCP server " +
-        "configuration and restart the client."
+        `Not authorized (HTTP ${apiError.status}). Check TOF_TOKEN scopes, expiry, and revocation. ` +
+        "Public publication and folder mutations require an interactive user JWT; scoped agent tokens cannot grant those actions."
       );
     }
     if (apiError.status === 404) {
@@ -188,6 +187,20 @@ export function registerTools(server: McpServer, client: TruthOfFunApiClient): v
     },
     async ({ event_id }) =>
       guard(async () => ok(await client.getEvent(event_id)))
+  );
+
+  server.registerTool(
+    "get_my_profile",
+    {
+      title: "My activity profile",
+      description: "Read the account's explicit preferences, saved event IDs and learned vibe weights. Requires profile:read on TOF_TOKEN. Never use this to infer private notes or attendance.",
+      inputSchema: {},
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    async () => guard(async () => {
+      if (!client.getToken()) return fail("Set a scoped TOF_TOKEN with profile:read.");
+      return ok(await client.getMyProfile());
+    }),
   );
 
   server.registerTool(

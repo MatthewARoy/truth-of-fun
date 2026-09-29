@@ -18,7 +18,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.core.database import get_session
 from app.core.localtime import LOCAL_TZ, tonight_end, weekend_window
 from app.core.ratelimit import llm_rate_limit, share_rate_limit
-from app.core.security import get_current_user, get_optional_user
+from app.core.security import Actor, get_current_user, get_optional_read_actor, get_optional_planning_user, require_scope
 from app.models.event import Event
 from app.models.itinerary import SavedItinerary
 from app.models.user import User
@@ -473,6 +473,7 @@ def _location_keyword_for_preset(location_preset: str | None) -> str | None:
     response_model=list[EventResponse],
     operation_id="searchEvents",
     summary="Search and filter events",
+    dependencies=[Depends(get_optional_read_actor)],
 )
 def search_events(
     *,
@@ -640,6 +641,7 @@ def search_events(
     response_model=EventDetailResponse,
     operation_id="getEvent",
     summary="Get one event with provenance detail",
+    dependencies=[Depends(get_optional_read_actor)],
 )
 def get_event(
     *,
@@ -705,8 +707,9 @@ def update_me_interests(
     *,
     payload: InterestRequest,
     session: Session = Depends(get_session),
-    user: User = Depends(get_current_user),
+    actor: Actor = Depends(require_scope("signals:write", "profile:read")),
 ) -> InterestResponse:
+    user = actor.user
 
     if payload.action == "save":
         if payload.event_id is None:
@@ -719,6 +722,7 @@ def update_me_interests(
         _user_profile_service.record_signal(
             session=session,
             user_id=int(user.id or 0),
+            created_via=actor.created_via,
             signal_type="save",
             event_id=payload.event_id,
         )
@@ -734,6 +738,7 @@ def update_me_interests(
         _user_profile_service.record_signal(
             session=session,
             user_id=int(user.id or 0),
+            created_via=actor.created_via,
             signal_type="like",
             vibe_tag=tag,
         )
@@ -750,6 +755,7 @@ def update_me_interests(
         _user_profile_service.record_signal(
             session=session,
             user_id=int(user.id or 0),
+            created_via=actor.created_via,
             signal_type=payload.action,
             event_id=payload.event_id,
         )
@@ -812,10 +818,11 @@ async def set_onboarding_profile(
 def get_recommendations(
     *,
     session: Session = Depends(get_session),
-    user: User = Depends(get_current_user),
+    actor: Actor = Depends(require_scope("events:read", "profile:read")),
     limit: int = Query(default=25, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[RecommendationResponse]:
+    user = actor.user
     preferred_vibes = set(v.lower() for v in (user.preferred_vibes or []) if isinstance(v, str))
     profile_scores = _user_profile_service.compute_vibe_scores_for_user(
         session=session,
@@ -939,7 +946,7 @@ async def build_concierge_itinerary(
     *,
     payload: ConciergeRequest,
     session: Session = Depends(get_session),
-    user: User | None = Depends(get_optional_user),
+    user: User | None = Depends(get_optional_planning_user),
 ) -> ConciergeResponse:
     parsed = await parse_intent_async(payload.query)
 
@@ -1280,8 +1287,9 @@ def list_owned_itineraries(
     limit: int = Query(default=25, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     session: Session = Depends(get_session),
-    user: User = Depends(get_current_user),
+    actor: Actor = Depends(require_scope("plans:read")),
 ) -> list[OwnedItineraryResponse]:
+    user = actor.user
     saved = session.exec(
         select(SavedItinerary).where(SavedItinerary.user_id == user.id)
         .order_by(SavedItinerary.created_at.desc(), SavedItinerary.id.desc())

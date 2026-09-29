@@ -1,5 +1,6 @@
 """Database model exports."""
 
+from app.models.agent_token import AgentToken
 from app.models.api_key import ApiKeyInventory, ApiKeyUsageSnapshot
 from app.models.event import Event
 from app.models.geocode_cache import GeocodeCacheEntry
@@ -12,6 +13,7 @@ from app.models.user import User
 from app.models.user_signal import UserSignal
 
 __all__ = [
+    "AgentToken",
     "ApiKeyInventory",
     "ApiKeyUsageSnapshot",
     "Event",

@@ -1,4 +1,5 @@
 import type {
+  AgentToken, MintAgentTokenRequest, MintAgentTokenResponse, MyProfile,
   AuthRequest,
   AuthResponse,
   ConciergeRequest,
@@ -66,6 +67,23 @@ export class TruthOfFunApiClient {
 
   constructor(baseUrl: string) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
+  }
+
+  getMyProfile(options: RequestOptions = {}): Promise<MyProfile> {
+    return this.request<MyProfile>("/users/me", {}, options);
+  }
+
+  /** Management endpoints require a user JWT; a PAT can never manage credentials. */
+  mintAgentToken(payload: MintAgentTokenRequest): Promise<MintAgentTokenResponse> {
+    return this.request<MintAgentTokenResponse>("/users/me/tokens", { method: "POST", body: JSON.stringify(payload) });
+  }
+
+  listAgentTokens(options: RequestOptions = {}): Promise<AgentToken[]> {
+    return this.request<AgentToken[]>("/users/me/tokens", {}, options);
+  }
+
+  revokeAgentToken(id: number): Promise<void> {
+    return this.request<void>(`/users/me/tokens/${id}`, { method: "DELETE" });
   }
 
   setToken(token: string | null) {

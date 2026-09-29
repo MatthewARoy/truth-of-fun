@@ -121,6 +121,7 @@ class UserProfileService:
         signal_type: str,
         event_id: int | None = None,
         vibe_tag: str | None = None,
+        created_via: str = "user",
     ) -> UserSignal | None:
         weight = self.signal_weight(signal_type)
         if weight <= 0:
@@ -132,6 +133,7 @@ class UserProfileService:
             signal_type=signal_type,
             vibe_tag=normalized_tag[0] if normalized_tag else None,
             weight=weight,
+            created_via=created_via,
         )
         session.add(signal)
         return signal
