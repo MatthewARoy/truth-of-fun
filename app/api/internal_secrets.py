@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlmodel import Session
 
 from app.core.database import get_session
 from app.core.security import InternalPrincipal, get_internal_principal, require_internal_scope
-from app.models.api_key import ApiKeyUsageSnapshot
-from app.services.secrets_store import KeyHealth, KeyLease, SecretsStore, get_secrets_store
+from app.services.secrets_store import KeyLease, SecretsStore, get_secrets_store
+from app.services.key_usage_snapshots import snapshot_key_health as _snapshot_health
 
 router = APIRouter(prefix="/internal/secrets", tags=["internal-secrets"])
+logger = logging.getLogger(__name__)
 
 
 def get_secrets_store_dependency() -> SecretsStore:
@@ -57,27 +60,6 @@ class ProviderHealthResponse(BaseModel):
     exhausted_keys: int
     disabled_keys: int
     keys: list[KeyHealthResponse]
-
-
-def _snapshot_health(
-    *,
-    provider: str,
-    health_items: list[KeyHealth],
-    session: Session,
-) -> None:
-    for item in health_items:
-        session.add(
-            ApiKeyUsageSnapshot(
-                provider=provider,
-                key_id=item.key_id,
-                usage_count=item.usage_count,
-                quota_limit=item.quota_limit,
-                status=item.status,
-                last_status=item.last_status,
-                last_error=item.last_error,
-            )
-        )
-    session.commit()
 
 
 @router.get(
@@ -135,7 +117,17 @@ def report_key_usage(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    _snapshot_health(provider=provider.strip().lower(), health_items=store.health(provider), session=session)
+    try:
+        _snapshot_health(
+            provider=provider.strip().lower(),
+            health_items=store.health(provider, key_id=payload.key_id),
+            session=session,
+        )
+    except Exception:
+        # Redis already accepted the usage. A telemetry failure must not make
+        # clients retry and count the provider call twice.
+        session.rollback()
+        logger.warning("API-key usage accepted but its snapshot could not be recorded.", exc_info=True)
     return UsageReportResponse(provider=provider.strip().lower(), key_id=payload.key_id, updated=True)
 
 
@@ -149,11 +141,9 @@ def report_key_usage(
 def get_provider_health(
     provider: str,
     store: SecretsStore = Depends(get_secrets_store_dependency),
-    session: Session = Depends(get_session),
     _: InternalPrincipal = Depends(get_internal_principal),
 ) -> ProviderHealthResponse:
     items = store.health(provider)
-    _snapshot_health(provider=provider.strip().lower(), health_items=items, session=session)
 
     normalized = provider.strip().lower()
     active_count = sum(1 for item in items if item.status == "active")

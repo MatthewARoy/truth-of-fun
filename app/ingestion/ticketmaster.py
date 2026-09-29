@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -25,7 +27,7 @@ _SYNC_STATE_PATH = Path(__file__).resolve().parents[2] / ".ticketmaster_sync_sta
 
 
 def _load_last_sync_timestamp() -> str | None:
-    """Load the last successful sync timestamp from disk."""
+    """Load completion metadata, not a provider-supported incremental cursor."""
     try:
         data = json.loads(_SYNC_STATE_PATH.read_text())
         ts = data.get("last_sync_timestamp")
@@ -35,11 +37,20 @@ def _load_last_sync_timestamp() -> str | None:
 
 
 def _save_last_sync_timestamp(timestamp: str) -> None:
-    """Persist the last successful sync timestamp to disk."""
+    """Atomically record a fetch whose returned events were durably processed."""
+    temporary_path: Path | None = None
     try:
-        _SYNC_STATE_PATH.write_text(json.dumps({"last_sync_timestamp": timestamp}))
-    except OSError:
-        logger.warning("Failed to write sync state to %s", _SYNC_STATE_PATH)
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=_SYNC_STATE_PATH.parent, prefix=".ticketmaster-", delete=False
+        ) as handle:
+            temporary_path = Path(handle.name)
+            json.dump({"last_sync_timestamp": timestamp}, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.replace(_SYNC_STATE_PATH)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 class TicketmasterSource(BaseSource):
@@ -62,21 +73,31 @@ class TicketmasterSource(BaseSource):
     ) -> None:
         super().__init__(**kwargs)
         settings = get_settings()
+        self._aaim_enabled = settings.aaim_enabled
+        self._pending_sync_timestamp: str | None = None
+        self.last_fetch_was_incremental = False
         self._key_id = "explicit"
         self._api_key = api_key
         if self._api_key:
             return
 
-        try:
+        if settings.aaim_enabled:
+            # The store owns fallback policy. Catching a disabled/exhausted
+            # inventory here would silently reuse the environment credential.
             lease = get_secrets_store().get_active_key("ticketmaster")
             self._api_key = lease.api_key
             self._key_id = lease.key_id
-        except Exception:
+        else:
             self._api_key = settings.ticketmaster_api_key
             self._key_id = "env-ticketmaster"
 
         if not self._api_key:
             raise ValueError("Ticketmaster API key is required.")
+
+    @property
+    def usage_key_id(self) -> str:
+        """Non-secret identifier for this run's provider-usage telemetry."""
+        return self._key_id
 
     # ------------------------------------------------------------------
     # Single-page fetch (internal helper)
@@ -103,19 +124,20 @@ class TicketmasterSource(BaseSource):
             last_error = str(exc)
             raise
         finally:
-            try:
-                # 429s are transient (and retried with backoff in _get_json);
-                # quota exhaustion is tracked via usage counts, so never
-                # permanently disable a key here — there is no re-enable path.
-                get_secrets_store().report_usage(
-                    provider="ticketmaster",
-                    key_id=self._key_id,
-                    calls=1,
-                    last_status=status_code,
-                    last_error=last_error,
-                )
-            except Exception:
-                pass
+            if self._aaim_enabled:
+                try:
+                    # 429s are transient (and retried with backoff in _get_json);
+                    # quota exhaustion is tracked via usage counts, so never
+                    # permanently disable a key here — there is no re-enable path.
+                    get_secrets_store().report_usage(
+                        provider="ticketmaster",
+                        key_id=self._key_id,
+                        calls=1,
+                        last_status=status_code,
+                        last_error=last_error,
+                    )
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Public API
@@ -130,11 +152,16 @@ class TicketmasterSource(BaseSource):
         size: int = _MAX_PAGE_SIZE,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
+        self._pending_sync_timestamp = None
+        self.last_fetch_error = None
+        if size < 1:
+            raise ValueError("Ticketmaster page size must be positive.")
+        page_size = min(size, _MAX_PAGE_SIZE)
         params: dict[str, Any] = {
             "apikey": self._api_key,
             "countryCode": country_code,
             "dmaId": _BAY_AREA_DMA_ID,
-            "size": min(size, _MAX_PAGE_SIZE),
+            "size": page_size,
             "sort": "date,asc",
         }
         if keyword:
@@ -142,13 +169,11 @@ class TicketmasterSource(BaseSource):
         if city:
             params["city"] = city
 
-        # Incremental sync: add modifiedDate filter when we have a prior timestamp
-        last_sync = _load_last_sync_timestamp()
-        if last_sync:
-            params["modifiedDate"] = last_sync
-            logger.info("Incremental sync from %s", last_sync)
-        else:
-            logger.info("Full sync (no prior timestamp found)")
+        # Discovery v2 documents no modifiedDate parameter. Do not pretend a
+        # completion timestamp is a supported delta cursor: replay bounded
+        # searches and rely on durable source identity for idempotency.
+        # https://developer.ticketmaster.com/products-and-docs/apis/discovery-api/v2/
+        logger.info("Ticketmaster full search; prior completion metadata does not filter events")
 
         sync_started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -156,8 +181,8 @@ class TicketmasterSource(BaseSource):
         current_page = 0
         total_pages = 1  # will be updated after first response
 
-        # Ticketmaster caps results at page*size <= 1000, so max 5 pages at size=200
-        tm_page_cap = 1000 // min(size, _MAX_PAGE_SIZE)
+        # Discovery v2 requires page*size < 1000 (zero-based page number).
+        tm_page_cap = (1000 + page_size - 1) // page_size
         page_limit = min(_MAX_PAGES, tm_page_cap)
 
         # A failed page means the window was only partially read. Recorded so the
@@ -213,19 +238,19 @@ class TicketmasterSource(BaseSource):
 
             current_page += 1
 
-        # Only advance the incremental cursor when the whole window was read.
-        # Saving it after a partial fetch means the next run filters on
-        # modifiedDate >= this timestamp, so every event on a page we never
-        # reached is skipped permanently — silent data loss on the highest-tier
-        # source. Re-fetching a window is cheap; losing it is not.
-        if self.last_fetch_error is None:
-            _save_last_sync_timestamp(sync_started_at)
-        else:
-            logger.warning(
-                "Ticketmaster sync cursor NOT advanced (%s) — the next run will "
-                "re-read this window so no events are skipped.",
-                self.last_fetch_error,
+        if self.last_fetch_error is None and current_page < total_pages:
+            self.last_fetch_error = (
+                f"Pagination cap reached: read {current_page} of {total_pages} pages; "
+                "search remains incomplete and will be replayed"
             )
+
+        # A bounded search that hits the provider/quota cap is incomplete. A
+        # partitioned crawl is a separate concern; never advertise a cap as a
+        # complete sync or skip unseen events behind a fabricated cursor.
+        if self.last_fetch_error is None and not keyword and not city and country_code == "US":
+            self._pending_sync_timestamp = sync_started_at
+        elif self.last_fetch_error:
+            logger.warning("Ticketmaster incomplete fetch: %s", self.last_fetch_error)
         logger.info(
             "Ticketmaster fetch complete: %d canonical events from %d pages",
             len(canonical_events),
@@ -233,6 +258,17 @@ class TicketmasterSource(BaseSource):
         )
 
         return canonical_events
+
+    def acknowledge_persisted(self) -> None:
+        """Called by the worker only after the pipeline commit succeeded.
+
+        The file records a fully read search, not an incremental API cursor.
+        Failed/partial fetches have no candidate to acknowledge.
+        """
+        if self._pending_sync_timestamp is None or self.last_fetch_error is not None:
+            return
+        _save_last_sync_timestamp(self._pending_sync_timestamp)
+        self._pending_sync_timestamp = None
 
     def _map_ticketmaster_event(self, event: dict[str, Any]) -> dict[str, Any] | None:
         venues = event.get("_embedded", {}).get("venues", [])

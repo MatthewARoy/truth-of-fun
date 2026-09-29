@@ -11,11 +11,14 @@ development database is left untouched.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 from sqlalchemy import create_engine, text
 from sqlmodel import Session
 
 from app.core.config import get_settings
+from app.models.event import Event
 from app.services.geocoding import GeocodeResult
 from scripts.backfill_geocode import GeocodeCandidate, PlannedChange, apply_changes
 
@@ -48,9 +51,13 @@ def test_the_backfill_writes_the_point_and_confidence_it_planned() -> None:
         with Session(engine) as session:
             session.begin()
             try:
-                row = session.execute(text("SELECT id FROM events LIMIT 1")).first()
-                if row is None:
-                    pytest.skip("no events stored; nothing to rewrite")
+                row = Event(
+                    title="Backfill probe", start_at=datetime.now(timezone.utc),
+                    source_name="test-backfill-write", source_tier=3,
+                    location="POINT(-122.4194 37.7749)", location_confidence=0.4,
+                )
+                session.add(row)
+                session.flush()
 
                 apply_changes(
                     session,

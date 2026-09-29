@@ -154,6 +154,10 @@ def _within_norcal(lat: float, lon: float) -> bool:
     return min_lat <= lat <= max_lat and min_lon <= lon <= max_lon
 
 
+class GeocodingUnavailable(RuntimeError):
+    """The provider failed to answer; this is not evidence of an unknown venue."""
+
+
 class NominatimProvider:
     """Geocoder backed by OpenStreetMap's public Nominatim service.
 
@@ -211,15 +215,15 @@ class NominatimProvider:
             )
             response.raise_for_status()
             payload = response.json()
-        except Exception:
-            # Ingestion must survive an unreachable or angry provider: the
-            # caller keeps its centroid fallback and the cycle continues.
-            logger.warning("geocoding lookup failed for %r", query, exc_info=True)
-            return None
+        except (httpx.HTTPError, ValueError) as exc:
+            raise GeocodingUnavailable("Geocoding provider request failed") from exc
 
-        if not isinstance(payload, list) or not payload:
+        if not isinstance(payload, list):
+            raise GeocodingUnavailable("Geocoding provider returned an invalid result list")
+        if not payload:
             return None
-
+        if not isinstance(payload[0], dict):
+            raise GeocodingUnavailable("Geocoding provider returned an invalid place")
         return self._to_result(payload[0])
 
     def _to_result(self, top: dict) -> GeocodeResult | None:
@@ -227,8 +231,8 @@ class NominatimProvider:
             lat = float(top["lat"])
             lon = float(top["lon"])
             place_rank = int(top.get("place_rank", 0))
-        except (KeyError, TypeError, ValueError):
-            return None
+        except (KeyError, TypeError, ValueError) as exc:
+            raise GeocodingUnavailable("Geocoding provider returned invalid coordinates") from exc
 
         if not _within_norcal(lat, lon):
             logger.info("discarding out-of-region geocode result at (%s, %s)", lat, lon)
@@ -271,8 +275,8 @@ def worth_writing(result: GeocodeResult | None, current_confidence: float) -> bo
 
 
 class GeocodeProvider(Protocol):
-    """A geocoder. ``lookup`` never raises: an unavailable provider returns
-    ``None`` so the caller keeps its centroid fallback."""
+    """Return None only for a genuine no-match; raise GeocodingUnavailable
+    for request/protocol failures so the caller can avoid negative caching."""
 
     name: str
 
@@ -379,7 +383,13 @@ class VenueGeocoder:
                 )
                 return None
             self._lookups_this_run += 1
-            result = await self._provider.lookup(query)
+            try:
+                result = await self._provider.lookup(query)
+            except GeocodingUnavailable:
+                # An outage/rate limit says nothing about this venue. Keep its
+                # fallback coordinate, but retry after the provider recovers.
+                logger.warning("geocoding unavailable for %r; lookup deferred", query, exc_info=True)
+                return None
             if result is not None:
                 break
 

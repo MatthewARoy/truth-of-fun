@@ -17,6 +17,7 @@ import httpx
 import pytest
 
 from app.services.geocoding import (
+    GeocodingUnavailable,
     MIN_SEARCHABLE_LOCATION_CONFIDENCE,
     NominatimProvider,
 )
@@ -88,7 +89,7 @@ async def test_empty_result_set_resolves_to_nothing() -> None:
     assert await _provider(_response([])).lookup("Noe Valley Farm") is None
 
 
-async def test_provider_failure_degrades_to_no_result_instead_of_raising() -> None:
+async def test_provider_failure_is_distinct_from_a_genuine_no_match() -> None:
     """Ingestion must survive an unreachable provider: the event keeps its
     centroid rather than the whole cycle dying on a 503."""
 
@@ -96,14 +97,16 @@ async def test_provider_failure_degrades_to_no_result_instead_of_raising() -> No
         raise httpx.ConnectError("nominatim unreachable")
 
     provider = _provider(httpx.MockTransport(handler))
-    assert await provider.lookup("Local Economy, 6028 College Ave, Oakland") is None
+    with pytest.raises(GeocodingUnavailable):
+        await provider.lookup("Local Economy, 6028 College Ave, Oakland")
 
 
-async def test_http_error_status_degrades_to_no_result() -> None:
+async def test_http_error_status_is_reported_as_provider_unavailable() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, text="Too Many Requests")
 
-    assert await _provider(httpx.MockTransport(handler)).lookup("anywhere") is None
+    with pytest.raises(GeocodingUnavailable):
+        await _provider(httpx.MockTransport(handler)).lookup("anywhere")
 
 
 async def test_request_identifies_this_client_and_is_bounded_to_the_bay_area() -> None:

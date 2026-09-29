@@ -115,6 +115,8 @@ async def test_worker_canary_logs_critical_when_drop_to_zero(caplog: Any) -> Non
 
 
 async def test_worker_logs_quota_warning_when_only_one_key_active(caplog: Any, monkeypatch: Any) -> None:
+    from app.core.config import Settings
+    monkeypatch.setattr("app.worker.get_settings", lambda: Settings(_env_file=None, aaim_enabled=True))
     source = _FakeSource(source_name="ticketmaster", events=[_event("x")])
     registry = _FakeRegistry({"ticketmaster": source})
     worker = IngestionWorker(
@@ -141,6 +143,8 @@ async def test_worker_logs_quota_warning_when_only_one_key_active(caplog: Any, m
 
 
 async def test_worker_run_once_resets_quota_exhausted_keys(caplog: Any, monkeypatch: Any) -> None:
+    from app.core.config import Settings
+    monkeypatch.setattr("app.worker.get_settings", lambda: Settings(_env_file=None, aaim_enabled=True))
     source = _FakeSource(source_name="ticketmaster", events=[_event("x")])
     registry = _FakeRegistry({"ticketmaster": source})
     worker = IngestionWorker(
