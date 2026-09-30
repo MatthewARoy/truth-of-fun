@@ -259,6 +259,12 @@ def require_scope(*scopes: str):
     return dependency
 
 
+def scoped_user(*scopes: str):
+    def dependency(actor: Actor = Depends(require_scope(*scopes))) -> User:
+        return actor.user
+    return dependency
+
+
 def get_optional_read_actor(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),

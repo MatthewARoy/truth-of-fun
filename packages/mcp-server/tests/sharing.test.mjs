@@ -12,7 +12,7 @@ const token = "abcdefghijklmnopqrstuvwx";
 const stops = [{ event_id: 42, kind: "main_event", travel_buffer_minutes_before: 0 }];
 const share = { publish_publicly: true, stops };
 
-async function setup(t, { authenticated = true, respond } = {}) {
+async function setup(t, { authenticated = true, respond, tokenValue = "test-user-token" } = {}) {
   const requests = [];
   globalThis.fetch = async (url, init) => {
     requests.push({ url, ...init });
@@ -21,7 +21,7 @@ async function setup(t, { authenticated = true, respond } = {}) {
     }));
   };
   const api = new TruthOfFunApiClient("https://stub.invalid");
-  if (authenticated) api.setToken("test-user-token");
+  if (authenticated) api.setToken(tokenValue);
   else api.setOpsToken("test-operator-token");
   const server = new McpServer({ name: "sharing-test", version: "0.0.0" });
   registerTools(server, api);
@@ -144,13 +144,15 @@ test("owner listing and revocation forward the authenticated API contract", asyn
 });
 
 test("scoped PAT is forwarded by the read-only profile tool and scope denial is actionable", async (t) => {
-  const { client, requests } = await setup(t, { respond: () => new Response(JSON.stringify({
+  const pat = "tof_pat_abcdef123456_" + "x".repeat(43);
+  const { client, requests } = await setup(t, { tokenValue: pat, respond: () => new Response(JSON.stringify({
     user_id: 1, preferred_vibes: ["#calm"], saved_event_ids: [], vibe_scores: {},
   })) });
   const result = await client.callTool({ name: "get_my_profile", arguments: {} });
   assert.equal(result.isError, undefined);
   assert.equal(JSON.parse(result.content[0].text).user_id, 1);
   assert.equal(requests[0].url, "https://stub.invalid/users/me");
+  assert.equal(new Headers(requests[0].headers).get("Authorization"), "Bearer " + pat);
   const { tools } = await client.listTools();
   assert.equal(tools.find((tool) => tool.name === "get_my_profile").annotations.readOnlyHint, true);
   globalThis.fetch = async () => new Response(JSON.stringify({ detail: "Missing required scope: profile:read" }), { status: 403 });

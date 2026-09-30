@@ -18,7 +18,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.core.database import get_session
 from app.core.localtime import LOCAL_TZ, tonight_end, weekend_window
 from app.core.ratelimit import llm_rate_limit, share_rate_limit
-from app.core.security import Actor, get_current_user, get_optional_read_actor, get_optional_planning_user, require_scope
+from app.core.security import Actor, get_current_user, get_optional_read_actor, get_optional_planning_user, require_scope, scoped_user
 from app.models.event import Event
 from app.models.itinerary import SavedItinerary
 from app.models.user import User
@@ -818,11 +818,10 @@ async def set_onboarding_profile(
 def get_recommendations(
     *,
     session: Session = Depends(get_session),
-    actor: Actor = Depends(require_scope("events:read", "profile:read")),
+    user: User = Depends(scoped_user("events:read", "profile:read")),
     limit: int = Query(default=25, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[RecommendationResponse]:
-    user = actor.user
     preferred_vibes = set(v.lower() for v in (user.preferred_vibes or []) if isinstance(v, str))
     profile_scores = _user_profile_service.compute_vibe_scores_for_user(
         session=session,
@@ -1287,9 +1286,8 @@ def list_owned_itineraries(
     limit: int = Query(default=25, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     session: Session = Depends(get_session),
-    actor: Actor = Depends(require_scope("plans:read")),
+    user: User = Depends(scoped_user("plans:read")),
 ) -> list[OwnedItineraryResponse]:
-    user = actor.user
     saved = session.exec(
         select(SavedItinerary).where(SavedItinerary.user_id == user.id)
         .order_by(SavedItinerary.created_at.desc(), SavedItinerary.id.desc())
