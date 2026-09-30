@@ -272,6 +272,11 @@ def get_optional_read_actor(
 ) -> Actor | None:
     if credentials is None:
         return None
+    if not credentials.credentials.startswith("tof_pat_"):
+        # Public discovery has always tolerated stale browser JWTs. A PAT is
+        # an explicit delegation and must remain strict after revocation.
+        user = get_optional_user(credentials, settings, session)
+        return Actor(user=user, kind="user", scopes=frozenset({"*"})) if user else None
     actor = get_actor(request, credentials, settings, session)
     if actor.kind == "agent" and "events:read" not in actor.scopes:
         raise HTTPException(403, "Missing required scope: events:read")

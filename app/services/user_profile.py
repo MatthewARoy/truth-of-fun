@@ -121,7 +121,7 @@ class UserProfileService:
         signal_type: str,
         event_id: int | None = None,
         vibe_tag: str | None = None,
-        created_via: str = "user",
+        created_via: str = "legacy",
     ) -> UserSignal | None:
         weight = self.signal_weight(signal_type)
         if weight <= 0:

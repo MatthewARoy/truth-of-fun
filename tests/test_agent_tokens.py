@@ -168,3 +168,44 @@ def test_agent_rate_limit_is_keyed_by_token_and_preserves_usage(client_and_db, m
     assert int(response.headers['retry-after']) > 0
     with Session(engine) as session:
         assert session.get(AgentToken, token['id']).request_count == 2
+
+
+def test_agent_like_is_learned_feedback_without_changing_explicit_choices(client_and_db):
+    client, engine = client_and_db
+    owner = _owner(client)
+    assert client.put('/users/me/preferences', headers=owner, json={'preferred_vibes':['#jazz']}).status_code == 200
+    token = _mint(client, owner, ['profile:read','signals:write'])
+    response = client.post('/users/me/interests', headers=_bearer(token), json={'action':'like','vibe_tag':'#chill'})
+    assert response.status_code == 200
+    assert response.json()['preferred_vibes'] == ['#jazz']
+    assert client.get('/users/me', headers=_bearer(token)).json()['vibe_scores']['#chill'] > 0
+    with Session(engine) as session:
+        assert session.exec(select(UserSignal)).one().created_via == f'agent:{token["id"]}'
+
+
+def test_active_token_cap_requires_revocation_before_minting(client_and_db):
+    client, engine = client_and_db
+    owner = _owner(client)
+    with Session(engine) as session:
+        user = session.exec(select(User)).one()
+        for i in range(50):
+            session.add(AgentToken(user_id=user.id, name='cap fixture', token_prefix=f'{i:012x}',
+                token_hash=f'{i:064x}', scopes=['events:read'], expires_at=datetime.now(timezone.utc)+timedelta(days=1)))
+        session.commit()
+    response = client.post('/users/me/tokens', headers=owner, json={'name':'51st','scopes':['events:read']})
+    assert response.status_code == 409
+    assert client.delete('/users/me/tokens/1', headers=owner).status_code == 204
+    assert client.post('/users/me/tokens', headers=owner, json={'name':'replacement','scopes':['events:read']}).status_code == 201
+
+
+@pytest.mark.parametrize('method,path,payload', [
+    ('GET','/folders',None), ('GET','/folders/1',None),
+    ('POST','/folders/1/items',{'event_id':1}),
+    ('POST','/folders/1/invite',{}),
+    ('POST','/folders/1/votes',{'event_id':1,'vote':1}),
+    ('POST','/folders/invites/unknown/accept',{}),
+])
+def test_folder_routes_do_not_accept_pat(client_and_db,method,path,payload):
+    client, _ = client_and_db
+    token = _mint(client, _owner(client))
+    assert client.request(method,path,headers=_bearer(token),json=payload).status_code == 401

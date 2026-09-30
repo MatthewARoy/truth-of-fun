@@ -52,7 +52,7 @@ function describeError(error: unknown, operatorTool = false): string {
       if (operatorTool) return `Operator authorization required (HTTP ${apiError.status}). Configure TOF_OPS_TOKEN for get_platform_status; a user token does not grant operator access.`;
       return (
         `Not authorized (HTTP ${apiError.status}). Check TOF_TOKEN scopes, expiry, and revocation. ` +
-        "Public publication and folder mutations require an interactive user JWT; scoped agent tokens cannot grant those actions."
+        "Public publication and folder access require an interactive user JWT; scoped agent tokens cannot grant those actions."
       );
     }
     if (apiError.status === 404) {

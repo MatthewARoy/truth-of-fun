@@ -134,7 +134,7 @@ Returned by `GET /events` (as a list) and extended by `GET /recommendations`.
 
 ### GET /events
 
-Auth: none. Full-text, geo, and preset-filtered event search.
+Auth: none required; presented PATs require valid events:read delegation (stale user JWTs retain anonymous fallback). Full-text, geo, and preset-filtered event search.
 
 Query parameters:
 
@@ -166,7 +166,7 @@ Response headers:
 
 ### GET /events/{event_id}
 
-Auth: none. One event with the provenance needed to cite and qualify it.
+Auth: none required; presented PATs require valid events:read delegation (stale user JWTs retain anonymous fallback). One event with the provenance needed to cite and qualify it.
 Returns `404` when no event has that id.
 
 Response: `EventResponse` plus:
@@ -260,7 +260,7 @@ Response:
 
 ### POST /concierge/itinerary
 
-Auth: none. Parses a natural-language query into an intent/time window, picks an anchor event (source tier ≤ 2), and sequences nearby support events (tier ≥ 3, within 0.5 mi) into an itinerary. `itinerary` is empty (and `anchor_event_id` null) when no anchor matches.
+Auth: none required; presented PATs require valid events:read delegation (stale user JWTs retain anonymous fallback). Parses a natural-language query into an intent/time window, picks an anchor event (source tier ≤ 2), and sequences nearby support events (tier ≥ 3, within 0.5 mi) into an itinerary. `itinerary` is empty (and `anchor_event_id` null) when no anchor matches.
 
 `intent` is one of `date_night`, `out_of_town_guests`, `bar_crawl`, `active_day`, `general_night_out`. An `active_day` request (gyms, workout classes, climbing, yoga, run clubs, etc.) sets `category_focus: "Fitness"` and restricts anchor selection to that category.
 
@@ -708,7 +708,7 @@ signals:write and profile:read, retaining `created_via=agent:{token_id}` on each
 signal (human writes `user`; pre-migration/old-process writes `legacy`). Events-only planning omits personal
 ranking inputs. Own itinerary-link listing supports plans:read. Token/credential
 management, public publication/revocation, onboarding/preferences and folder
-mutations remain user-JWT-only. Future scopes are rejected until implemented.
+access remain user-JWT-only. Future scopes are rejected until implemented.
 
 `GET /users/me` returns user_id, preferred_vibes, saved_event_ids and learned
 vibe_scores. Password hashes and email are omitted. The MCP get_my_profile tool

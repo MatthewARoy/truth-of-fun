@@ -733,7 +733,7 @@ def update_me_interests(
         tag = payload.vibe_tag.strip()
         if not tag.startswith("#"):
             tag = f"#{tag}"
-        if tag not in user.preferred_vibes:
+        if actor.kind == "user" and tag not in user.preferred_vibes:
             user.preferred_vibes.append(tag)
         _user_profile_service.record_signal(
             session=session,
@@ -794,6 +794,7 @@ async def set_onboarding_profile(
         _user_profile_service.record_signal(
             session=session,
             user_id=int(user.id or 0),
+            created_via="user",
             signal_type="onboarding",
             vibe_tag=tag,
         )

@@ -76,10 +76,10 @@ Supported scopes:
 | --- | --- |
 | `events:read` | search, event detail, corpus-only itinerary building |
 | `profile:read` | get_my_profile; with events:read, personalized recommendations/planning |
-| `signals:write` | save/feedback; also requires profile:read because the existing response contains profile state |
+| `signals:write` | save/feedback (learned signals only, not explicit vibe choices); also requires profile:read because the existing response contains profile state |
 | `plans:read` | list your existing itinerary links |
 
-Public publication/revocation, folder mutations, onboarding and explicit
+Public publication/revocation, folder access, onboarding and explicit
 preference replacement retain their user-JWT requirements. Legacy JWT and
 startup login configurations remain compatible for those interactive actions;
 prefer scoped tokens for agent use. Tokens do not grant operator access.
@@ -94,15 +94,15 @@ requests already admitted may finish. Anonymous public browsing remains public.
 | `search_events` | no | Keyword / tag / time / geo search. Returns a page plus total match count. |
 | `get_event` | no | One event with source provenance and first-seen time. |
 | `build_itinerary` | no | Natural language → sequenced itinerary with travel buffers. Not saved. |
-| `share_itinerary` | yes | Publish selected event stops after an explicit request for a public link; requires `publish_publicly: true`. |
-| `list_my_itineraries` | yes | Inspect your published links, expiry dates, and revocation status. |
-| `revoke_itinerary` | yes | Revoke one of your public links when requested. |
+| `share_itinerary` | user JWT | Publish selected event stops after an explicit request for a public link; requires `publish_publicly: true`. |
+| `list_my_itineraries` | plans:read | Inspect your published links, expiry dates, and revocation status. |
+| `revoke_itinerary` | user JWT | Revoke one of your public links when requested. |
 | `get_platform_status` | operator token | Is the platform healthy? Use it to qualify freshness claims. |
 | `get_my_profile` | profile:read | Read preferences, saved IDs and learned weights. |
 | `get_recommendations` | events:read + profile:read | Personalized ranking with per-event match scores. |
-| `save_event` | yes | Save an event; also feeds the recommender. |
-| `record_feedback` | yes | Record a like or a click. |
-| `list_folders` / `create_folder` / `add_event_to_folder` | yes | Shortlist folders — the shareable output of a planning session. |
+| `save_event` | signals:write + profile:read | Save an event; also feeds the recommender. |
+| `record_feedback` | signals:write + profile:read | Record a like or a click. |
+| `list_folders` / `create_folder` / `add_event_to_folder` | user JWT | Shortlist folders — the shareable output of a planning session. |
 
 ### Honesty rules the tools encode
 
