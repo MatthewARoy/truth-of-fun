@@ -5,7 +5,7 @@ import re
 import struct
 
 import pytest
-from sqlalchemy import Column, MetaData, String, Table, event as sa_event
+from sqlalchemy import Column, MetaData, String, Table, event as sa_event, text
 from sqlmodel import SQLModel, Session, create_engine, select
 
 from app.models.event import Event
@@ -77,9 +77,29 @@ def test_city_survives_normalization_for_geocoding():
     assert payload(city="Oakland")["city"] == "Oakland"
 
 
-@pytest.fixture
-def database():
+@pytest.fixture(params=["sqlite", "postgres"])
+def database(request):
     """Exercise real SQL/transactions; spatial behavior is outside these tests."""
+    if request.param == "postgres":
+        from uuid import uuid4
+        from app.core.config import get_settings
+        from conftest import _require_disposable_database
+        url = get_settings().database_url
+        _require_disposable_database(url)
+        schema = "pipeline_test_" + uuid4().hex
+        admin = create_engine(url)
+        with admin.begin() as conn:
+            conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        engine = create_engine(url, connect_args={"options": f"-csearch_path={schema},public"})
+        SQLModel.metadata.create_all(engine, checkfirst=False)
+        try:
+            yield engine
+        finally:
+            engine.dispose()
+            with admin.begin() as conn:
+                conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+            admin.dispose()
+        return
     engine = create_engine("sqlite://")
 
     @sa_event.listens_for(engine, "connect")
@@ -89,8 +109,13 @@ def database():
                 return value
             lon, lat = map(float, re.search(r"POINT\(([^ ]+) ([^)]+)\)", value).groups())
             return struct.pack("<BIdd", 1, 1, lon, lat)
+        connection.isolation_level = None
         connection.create_function("GeomFromEWKT", 1, geometry)
         connection.create_function("AsEWKB", 1, lambda value: value)
+
+    @sa_event.listens_for(engine, "begin")
+    def explicit_sqlite_transaction(connection):
+        connection.exec_driver_sql("BEGIN")
 
     metadata = MetaData()
     Table("events", metadata, *[
@@ -258,11 +283,12 @@ async def test_authoritative_coordinate_only_revision_is_applied_before_hash_adv
         with Session(database) as session:
             await service.process_raw_events(session=session, raw_events=[revised])
             saved = session.exec(select(Event)).one()
-            _, _, lon, lat = struct.unpack("<BIdd", bytes(saved.location.data))
+            lon, lat = struct.unpack("<dd", bytes(saved.location.data)[-16:])
             assert (lon, lat) == (-122.41, 37.71)
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("database", ["postgres"], indirect=True)
 async def test_concurrent_cache_fill_does_not_rollback_unrelated_events(database):
     class RacingTags(CountingTags):
         def __init__(self):
@@ -304,7 +330,7 @@ async def test_unchanged_alias_cannot_restore_coordinates_from_previous_venue(da
             await service.process_raw_events(session=session, raw_events=batch)
     with Session(database) as session:
         saved = session.exec(select(Event)).one()
-        _, _, lon, lat = struct.unpack("<BIdd", bytes(saved.location.data))
+        lon, lat = struct.unpack("<dd", bytes(saved.location.data)[-16:])
         assert saved.venue_name == "New Venue"
         assert saved.location_confidence == 0.3
         assert (lon, lat) == (-122.42, 37.77)
@@ -458,3 +484,65 @@ async def test_late_failure_preserves_prior_chunks_and_replay_is_idempotent(data
         assert len(session.exec(select(Event)).all()) == 5
         assert len(session.exec(select(EventSourceRecord)).all()) == 5
         assert replay.calls == []
+
+
+@pytest.mark.anyio
+async def test_poison_observation_rejected_without_starving_later_rows(database):
+    class ParallelTags:
+        async def classify(self, description):
+            from app.services.vibe_tagger import VibeTagResult
+            if description == "malformed provider":
+                raise AttributeError("non-text provider fixture")
+            return VibeTagResult(["#social"], True)
+    service = DataPipelineService(vibe_tagger=ParallelTags(), commit_every=2)
+    batch = [payload(source_name="19hz", source_event_id=f"weak-{i}",
+        venue_name=f"Distinct Venue {i}", description="malformed provider" if i == 3 else f"social {i}") for i in range(5)]
+    original = service._remember_source_records
+    def reject(session, event, incoming):
+        if incoming["source_event_id"] == "weak-1":
+            raise ValueError("identity conflict fixture")
+        original(session, event, incoming)
+    service._remember_source_records = reject
+    with Session(database) as session:
+        result = await service.process_raw_events(session=session, raw_events=batch)
+        assert result["inserted"] == 4
+        assert result["rejected"] == 1
+        assert len(session.exec(select(VibeTagCache)).all()) == 4
+    # Reconcile the poison observation; weak identities must replay without
+    # duplicating the durable earlier and later observations.
+    service._remember_source_records = original
+    with Session(database) as session:
+        result = await service.process_raw_events(session=session, raw_events=batch)
+        assert result["inserted"] == 1
+        assert result["skipped"] == 4
+        assert len(session.exec(select(Event)).all()) == 5
+
+
+@pytest.mark.anyio
+async def test_parallel_cache_survives_first_chunk_fatal_failure(database):
+    from app.services.vibe_tagger import VibeTagResult
+    class ParallelTags:
+        calls = 0
+        async def classify(self, description):
+            self.calls += 1
+            return VibeTagResult(["#social"], True)
+    tagger = ParallelTags()
+    service = DataPipelineService(vibe_tagger=tagger, commit_every=100)
+    batch = [payload(source_event_id=f"early-{i}", venue_name=f"Venue {i}", description=f"unique {i}") for i in range(3)]
+    def fail(*args):
+        raise RuntimeError("first chunk outage")
+    service._remember_source_records = fail
+    with Session(database) as session:
+        with pytest.raises(RuntimeError, match="first chunk"):
+            await service.process_raw_events(session=session, raw_events=batch)
+        session.rollback()
+    with Session(database) as session:
+        assert len(session.exec(select(Event)).all()) == 0
+        assert len(session.exec(select(VibeTagCache)).all()) == 3
+        await DataPipelineService(vibe_tagger=tagger).process_raw_events(session=session, raw_events=batch)
+    assert tagger.calls == 3
+
+
+@pytest.mark.parametrize("configured,expected", [(0,1), (50,8)])
+def test_tagging_concurrency_bounds(configured, expected):
+    assert DataPipelineService(vibe_tagger=NoTags(), tagging_concurrency=configured)._tagging_concurrency == expected

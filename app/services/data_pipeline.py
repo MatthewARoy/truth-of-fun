@@ -11,7 +11,7 @@ from typing import Any
 from Levenshtein import ratio as levenshtein_ratio
 from rapidfuzz import fuzz
 from sqlalchemy import or_
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError
 from sqlmodel import Session, select
 
 from app.core.localtime import LOCAL_TZ
@@ -25,7 +25,7 @@ from app.services.geocoding import (
     worth_writing,
 )
 from app.services.tags import canonical_vibe_tags
-from app.services.vibe_tagger import ClaudeVibeTagger, VibeTagger
+from app.services.vibe_tagger import ClaudeVibeTagger, VibeTagger, VibeTagResult
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +105,9 @@ class DataPipelineService:
         self._tagging_calls = 0
         self._prepared_tags = {}
         await self._prepare_vibe_tags(session, observations)
+        # Derived classifications are independent of authoritative observations.
+        # Preserve successful provider work even if the first event chunk fails.
+        session.commit()
 
         inserted_ids: set[int] = set()
         updated_ids: set[int] = set()
@@ -117,39 +120,21 @@ class DataPipelineService:
             # source checkpoints remain unchanged until the whole run succeeds.
             if index and index % self._commit_every == 0:
                 session.commit()
-            existing = self._find_existing_event(
-                session=session, incoming_event=event_payload
-            )
-            llm_tags = await self._cached_vibe_tags(
-                session, event_payload.get("description")
-            )
-            event_payload["tags"] = canonical_vibe_tags(
-                self._merge_lists(event_payload.get("tags", []), llm_tags)
-            )
-
-            if existing is None:
-                existing = Event(**{
-                    key: value for key, value in event_payload.items()
-                    if key in Event.model_fields
-                })
-                session.add(existing)
-                session.flush()
-                self._remember_source_records(session, existing, event_payload)
-                inserted_ids.add(existing.id)
-                seen_ids.add(existing.id)
+            try:
+                with session.begin_nested():
+                    event_id, inserted, updated = await self._process_observation(
+                        session, event_payload
+                    )
+                    session.flush()
+            except (ValueError, IntegrityError, DataError):
+                rejected += 1
+                logger.warning("Rejected source observation from %s", event_payload.get("source_name"))
                 continue
-
-            if self.has_significant_new_information(
-                existing_event=existing, incoming_event=event_payload
-            ):
-                merged_for_update = self._merge_event_payloads(
-                    primary=self._event_to_payload(existing),
-                    secondary=event_payload,
-                )
-                self._apply_payload(existing=existing, payload=merged_for_update)
-                updated_ids.add(existing.id)
-            seen_ids.add(existing.id)
-            self._remember_source_records(session, existing, event_payload)
+            seen_ids.add(event_id)
+            if inserted:
+                inserted_ids.add(event_id)
+            if updated:
+                updated_ids.add(event_id)
 
         session.commit()
         return {
@@ -160,6 +145,40 @@ class DataPipelineService:
             "rejected": rejected,
             "tagging_calls": self._tagging_calls,
         }
+
+    async def _process_observation(self, session: Session, event_payload: dict[str, Any]) -> tuple[int, bool, bool]:
+        existing = self._find_existing_event(
+            session=session, incoming_event=event_payload
+        )
+        llm_tags = await self._cached_vibe_tags(
+            session, event_payload.get("description")
+        )
+        event_payload["tags"] = canonical_vibe_tags(
+            self._merge_lists(event_payload.get("tags", []), llm_tags)
+        )
+
+        if existing is None:
+            existing = Event(**{
+                key: value for key, value in event_payload.items()
+                if key in Event.model_fields
+            })
+            session.add(existing)
+            session.flush()
+            self._remember_source_records(session, existing, event_payload)
+            return existing.id, True, False
+
+        updated = False
+        if self.has_significant_new_information(
+            existing_event=existing, incoming_event=event_payload
+        ):
+            merged_for_update = self._merge_event_payloads(
+                primary=self._event_to_payload(existing),
+                secondary=event_payload,
+            )
+            self._apply_payload(existing=existing, payload=merged_for_update)
+            updated = True
+        self._remember_source_records(session, existing, event_payload)
+        return existing.id, False, updated
 
     def _tag_key(self, description: str | None) -> tuple[str, str] | None:
         if not description or not description.strip():
@@ -196,7 +215,12 @@ class DataPipelineService:
         limiter = asyncio.Semaphore(self._tagging_concurrency)
         async def run(key, text):
             async with limiter:
-                return key, await classify(text)
+                try:
+                    return key, await classify(text)
+                except Exception:
+                    # One malformed response must not strand sibling tasks or
+                    # prevent unrelated observations from reaching persistence.
+                    return key, VibeTagResult([], False)
         results = await asyncio.gather(*(run(key, text) for key, text in pending.items()))
         for key, result in results:
             tags = canonical_vibe_tags(result.tags)

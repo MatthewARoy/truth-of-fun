@@ -71,11 +71,10 @@ class ClaudeVibeTagger:
                 messages=[{"role": "user", "content": prompt}],
                 system="You generate concise vibe tags for events.",
             )
+            content = response.content[0].text if response.content else ""
+            tags = self._normalize_tags(content)
         except Exception:
             return VibeTagResult([], False)
-
-        content = response.content[0].text if response.content else ""
-        tags = self._normalize_tags(content)
         return VibeTagResult(tags, True)
 
     def _normalize_tags(self, raw_content: str | None) -> list[str]:
