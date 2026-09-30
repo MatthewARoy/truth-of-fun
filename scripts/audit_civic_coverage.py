@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import create_engine, text
+from pydantic import ValidationError
 
 from app.services.civic_coverage import CoverageManifest, SF, evaluate_occurrence
 
@@ -42,15 +43,19 @@ def read_public_snapshot(connection, *, now: datetime, horizon_days: int) -> tup
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     parser.add_argument("--horizon-days", type=int, default=180, choices=range(1, 366))
     args = parser.parse_args(argv)
     try:
         if args.manifest.stat().st_size > 256_000:
             raise ValueError("manifest is too large")
         manifest = CoverageManifest.model_validate_json(args.manifest.read_text())
-        if not args.database_url:
-            raise ValueError("Set DATABASE_URL or --database-url")
+        database_url = os.environ.get("DATABASE_URL")
+        if not database_url:
+            raise ValueError("Set DATABASE_URL")
+    except ValidationError as error:
+        fields = [".".join(map(str, item["loc"])) for item in error.errors(include_input=False)]
+        print("Invalid coverage manifest fields: " + ", ".join(fields), file=sys.stderr)
+        return 2
     except (ValueError, OSError) as error:
         # Validation details are local manifest data, never connection secrets.
         print(f"Invalid coverage input ({type(error).__name__})", file=sys.stderr)
@@ -58,14 +63,14 @@ def main(argv=None) -> int:
     now = datetime.now(timezone.utc)
     engine = None
     try:
-        engine = create_engine(args.database_url, connect_args={"connect_timeout": 5})
+        engine = create_engine(database_url, connect_args={"connect_timeout": 5})
         if engine.dialect.name != "postgresql":
             raise ValueError("PostgreSQL is required for enforced read-only transactions")
         with engine.connect() as connection:
             with connection.begin():
                 events, health = read_public_snapshot(connection, now=now, horizon_days=args.horizon_days)
         report = [evaluate_occurrence(item, events=events, health=health, now=now,
-                  horizon_days=args.horizon_days) for item in manifest.expectations]
+                  horizon_days=args.horizon_days, source_horizon_days=manifest.source_horizon_days) for item in manifest.expectations]
         print(json.dumps({"checked_at": now.isoformat(), "horizon_days": args.horizon_days,
                           "results": report}, indent=2))
     except Exception as error:
@@ -76,7 +81,7 @@ def main(argv=None) -> int:
             engine.dispose()
     if any(item["status"] == "missing_current_corpus" for item in report):
         return 1
-    if any(item["status"] in {"corpus_stale", "expectation_stale", "schedule_unverified"} for item in report):
+    if any(item["status"] in {"corpus_stale", "expectation_stale", "schedule_unverified", "coverage_horizon_unverified"} for item in report):
         return 3
     return 0
 

@@ -82,7 +82,7 @@
       "evidence_url": "https://www.nihonmachistreetfair.org/"
     },
     {
-      "checked_at": "2026-09-30T01:42:00+00:00",
+      "checked_at": "2026-09-30T02:21:00+00:00",
       "coverage_sources": [
         "funcheap_sf",
         "sfstation",
@@ -103,5 +103,11 @@
       "season_end": "2026-09-30",
       "evidence_url": "https://goldengateparkband.org/"
     }
-  ]
+  ],
+  "source_horizon_days": {
+    "funcheap_sf": 10,
+    "sfstation": 7,
+    "dothebay": 7,
+    "eventbrite": 14
+  }
 }

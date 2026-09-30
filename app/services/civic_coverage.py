@@ -4,10 +4,13 @@ from __future__ import annotations
 import re
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+from typing import Annotated, get_args
 
 from pydantic import BaseModel, Field, HttpUrl, model_validator
+from app.ingestion.contracts import SourceId
 
 SF = ZoneInfo("America/Los_Angeles")
+KNOWN_SOURCES = frozenset(get_args(SourceId))
 
 
 class OccurrenceExpectation(BaseModel):
@@ -16,7 +19,7 @@ class OccurrenceExpectation(BaseModel):
     expected_date: date | None = None
     title_aliases: list[str] = Field(min_length=1, max_length=10)
     venue_aliases: list[str] = Field(min_length=1, max_length=10)
-    coverage_sources: list[str] = Field(min_length=1, max_length=10)
+    coverage_sources: list[SourceId] = Field(min_length=1, max_length=10)
     evidence_url: HttpUrl
     checked_at: datetime
     season_start: date | None = None
@@ -38,6 +41,7 @@ class OccurrenceExpectation(BaseModel):
 class CoverageManifest(BaseModel):
     version: int = Field(default=1, ge=1, le=1)
     expectations: list[OccurrenceExpectation] = Field(min_length=1, max_length=100)
+    source_horizon_days: dict[SourceId, Annotated[int, Field(ge=1, le=365, strict=True)]] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def unique_keys(self):
@@ -61,14 +65,15 @@ def _contains(value: str | None, aliases: list[str]) -> bool:
 
 def evaluate_occurrence(expectation: OccurrenceExpectation, *, events: list[dict], health: dict[str, dict],
                         now: datetime, horizon_days: int = 180, evidence_days: int = 14,
-                        corpus_hours: int = 24) -> dict:
+                        corpus_hours: int = 24, source_horizon_days: dict[str, int] | None = None) -> dict:
     if now.tzinfo is None:
         raise ValueError("now requires a timezone")
     today = now.astimezone(SF).date()
     result = {"key": expectation.key, "series": expectation.series,
               "expected_date": str(expectation.expected_date) if expectation.expected_date else None,
               "evidence_url": str(expectation.evidence_url), "checked_at": expectation.checked_at.isoformat(),
-              "admission_note": expectation.admission_note, "event_ids": [], "stale_sources": []}
+              "admission_note": expectation.admission_note, "event_ids": [], "stale_sources": [],
+              "outside_source_horizon": [], "unknown_source_horizon": []}
     if ((expectation.season_start and today < expectation.season_start)
             or (expectation.season_end and today > expectation.season_end)):
         result["status"] = "off_season"
@@ -84,6 +89,20 @@ def evaluate_occurrence(expectation: OccurrenceExpectation, *, events: list[dict
         for source in expectation.coverage_sources:
             snapshot = health.get(source, {})
             success, run = _aware(snapshot.get("last_success_at")), _aware(snapshot.get("last_run_at"))
+            source_days = (source_horizon_days or {}).get(source)
+            if source_days is None:
+                result["unknown_source_horizon"].append(source)
+                continue
+            # The manifest must match the worker's reviewed crawl configuration.
+            # A fresh previous-day run has a different far boundary than today.
+            recent = success and timedelta(0) <= now-success <= timedelta(hours=corpus_hours)
+            # Health records completion, not crawl start. Standard bounded
+            # crawls may cross SF midnight; reserve one calendar day rather
+            # than claiming a later boundary than the run could have reached.
+            crawl_day = (success.astimezone(SF).date() if recent else today) - timedelta(days=1)
+            if expectation.expected_date > crawl_day + timedelta(days=source_days-1):
+                result["outside_source_horizon"].append(source)
+                continue
             # All named coverage paths need recent complete evidence. A newer
             # failed/partial run must not borrow the previous successful run.
             if (snapshot.get("status") != "healthy" or snapshot.get("last_error") or not success or not run
@@ -93,13 +112,13 @@ def evaluate_occurrence(expectation: OccurrenceExpectation, *, events: list[dict
         for event in events:
             start = _aware(event.get("start_at"))
             if (start and start.astimezone(SF).date() == expectation.expected_date
-                    and bool(event.get("source_name"))
-                    and not re.search(r"(?:^|[-_])(?:dev|demo|seed|fixture|test)(?:$|[-_])", event.get("source_name") or "", re.I)
+                    and event.get("source_name") in KNOWN_SOURCES
                     and event.get("status") == "scheduled"
                     and _contains(event.get("title"), expectation.title_aliases)
-                    and _contains(event.get("venue_name"), expectation.venue_aliases)
-                    and not re.search(r"\b(?:dev|demo|seed|fixture|test)\b", event.get("title") or "", re.I)):
+                    and _contains(event.get("venue_name"), expectation.venue_aliases)):
                 result["event_ids"].append(event["id"])
         result["status"] = ("covered" if result["event_ids"] else
+                            "coverage_horizon_unverified" if result["unknown_source_horizon"] else
+                            "outside_source_horizon" if len(result["outside_source_horizon"]) == len(expectation.coverage_sources) else
                             "corpus_stale" if result["stale_sources"] else "missing_current_corpus")
     return result
