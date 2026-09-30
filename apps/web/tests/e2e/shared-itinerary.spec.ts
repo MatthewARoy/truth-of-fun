@@ -135,7 +135,7 @@ test("building stays private until explicit publishing, which omits the prompt a
   });
   await buildPlan(page);
   expect(posted).toHaveLength(0);
-  await expect(page.getByText(/Anyone with the link can read this event plan/)).toBeVisible();
+  await expect(page.getByText(/Anyone with the link can read this plan, including your starting point and any stops you added/)).toBeVisible();
   await expect(page.getByText(/Your original request stays private and is not included/)).toBeVisible();
   await expect(page.getByLabel("Public link expires after")).toHaveValue("14");
   await page.getByPlaceholder(/plan a date in the Mission/).fill("A different private Sunday request");
