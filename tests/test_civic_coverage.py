@@ -38,6 +38,13 @@ def test_exact_occurrence_matches_venue_date_and_real_source():
     assert result["stale_sources"] == []
 
 
+def test_any_real_ingestion_source_can_satisfy_stored_coverage():
+    result = evaluate(events=[event(source_name="ticketmaster")], health={})
+    assert result["status"] == "covered"
+    assert result["event_ids"] == [42]
+    assert result["stale_sources"] == ["funcheap_sf", "sfstation"]
+
+
 @pytest.mark.parametrize("changes", [
     dict(title="Yerba Buena Gardens Festival season"), dict(source_name="dev-seed"),
     dict(title="Dev seed African Arts Festival"), dict(venue_name="Other park"),

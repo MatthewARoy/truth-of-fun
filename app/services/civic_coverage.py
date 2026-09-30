@@ -93,7 +93,7 @@ def evaluate_occurrence(expectation: OccurrenceExpectation, *, events: list[dict
         for event in events:
             start = _aware(event.get("start_at"))
             if (start and start.astimezone(SF).date() == expectation.expected_date
-                    and event.get("source_name") in expectation.coverage_sources
+                    and bool(event.get("source_name"))
                     and not re.search(r"(?:^|[-_])(?:dev|demo|seed|fixture|test)(?:$|[-_])", event.get("source_name") or "", re.I)
                     and event.get("status") == "scheduled"
                     and _contains(event.get("title"), expectation.title_aliases)
