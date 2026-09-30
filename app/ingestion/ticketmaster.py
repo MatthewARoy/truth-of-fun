@@ -375,7 +375,7 @@ class TicketmasterSource(BaseSource):
             for key in keys:
                 value = item.get(key)
                 name = value.get("name") if isinstance(value, dict) else None
-                if isinstance(name, str) and name.strip() and name.strip().lower() not in {"undefined", "other", "miscellaneous"}:
+                if isinstance(name, str) and name.strip() and name.strip().lower() not in {"undefined", "other"} and (name.strip().lower() != "miscellaneous" or key == "segment"):
                     if name.strip() not in labels:
                         labels.append(name.strip())
         return labels

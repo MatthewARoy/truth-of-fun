@@ -66,6 +66,42 @@ def test_published_lineup_revision_replaces_old_facts_without_guessing_erasure()
     assert preserved["genres"] == ["Pop"]
 
 
+def test_unchanged_alias_metadata_does_not_trigger_redundant_update():
+    from test_pipeline_revision_regressions import payload
+    service = DataPipelineService()
+    current = payload(performers=["Replacement Artist"], genres=["Pop"])
+    old_alias = payload(source_name="meetup", source_event_id="meetup-old", source_tier=2,
+                        performers=["Original Artist"], genres=["Rock"])
+    old_alias["_source_unchanged"] = True
+    assert not service.has_significant_new_information(existing_event=Event(**current), incoming_event=old_alias)
+    merged = service._merge_event_payloads(primary=current, secondary=old_alias)
+    assert merged["performers"] == ["Replacement Artist"]
+    assert merged["genres"] == ["Pop"]
+
+
+def test_category_filter_matches_legacy_display_and_dedicated_genre(isolated_events_session):
+    from fastapi.testclient import TestClient
+    from app.main import app
+    session = isolated_events_session
+    for title, categories, genres in [("Legacy", ["Rock", "Undefined"], []), ("New", ["Music"], ["Rock"])]:
+        session.add(Event(title=title, start_at=datetime.now(timezone.utc)+timedelta(days=2), source_name="test",
+                          source_tier=1, categories=categories, genres=genres, location="POINT(-122.4 37.76)"))
+    session.flush()
+    client = TestClient(app)
+    for category in ("Music", "Rock"):
+        response = client.get("/events", params={"category":category})
+        assert response.status_code == 200
+        assert {row["title"] for row in response.json()} == {"Legacy", "New"}
+        assert all(row["categories"] == ["Music"] and row["genres"] == ["Rock"] for row in response.json())
+
+
+def test_known_source_classification_labels_are_preserved():
+    from app.services.catalog_taxonomy_v1 import legacy_genres_v1
+    labels = ["Hip-Hop/Rap", "Latin", "World", "Soul", "Funk", "Indie", "Punk", "Family", "Fairs & Festivals", "Circus & Specialty Acts"]
+    assert legacy_genres_v1(labels) == labels
+    assert categories_v1(labels) == ["Music", "Festival", "Arts & Theatre"]
+
+
 
 def test_category_migration_preserves_rows_and_restores_originals():
     import importlib.util
@@ -94,6 +130,8 @@ def test_category_migration_preserves_rows_and_restores_originals():
                 connection.execute(text(f"CREATE SCHEMA {schema}"))
                 connection.execute(text(f"SET LOCAL search_path TO {schema}"))
                 connection.execute(text("CREATE TABLE events(id integer PRIMARY KEY, categories json NOT NULL)"))
+                connection.execute(text("CREATE TABLE event_source_records(source_event_id text PRIMARY KEY, content_hash text)"))
+                connection.execute(text("INSERT INTO event_source_records VALUES ('legacy','old-hash')"))
                 connection.execute(text("""INSERT INTO events VALUES
                     (1,'["Undefined","Rock","21+","$50 | 21+"]'),
                     (2,'["Music"]'),
@@ -101,6 +139,9 @@ def test_category_migration_preserves_rows_and_restores_originals():
                 before_addition = connection.execute(text("SELECT * FROM events ORDER BY id")).mappings().all()
                 additive.op = Operations(MigrationContext.configure(connection))
                 additive.upgrade()
+                provenance = connection.execute(text("SELECT * FROM event_source_records")).mappings().one()
+                assert provenance["content_hash"] == "old-hash" and provenance["hash_version"] == 1 and provenance["catalog_facts"] == {}
+                assert connection.execute(text("SELECT count(*) FROM pg_indexes WHERE schemaname=:schema AND indexname='ix_events_performers_search'"), {"schema":schema}).scalar_one() == 1
                 connection.execute(text("UPDATE events SET genres='[\"Jazz\"]' WHERE id=2"))
                 original = connection.execute(text("SELECT * FROM events ORDER BY id")).mappings().all()
                 assert all(row["performers"] == [] for row in original)
@@ -112,9 +153,17 @@ def test_category_migration_preserves_rows_and_restores_originals():
                 assert changed[1] == original[1]
                 assert changed[2]["categories"] == []
                 assert connection.execute(text("SELECT count(*) FROM event_category_backup_20260929")).scalar_one() == 2
+                # A post-upgrade row has no backup and survives downgrade.
+                connection.execute(text("INSERT INTO events VALUES (4,'[\"Music\"]','[]','[]')"))
+                # Deletion cascades retire an obsolete backup before any ID reuse.
+                connection.execute(text("DELETE FROM events WHERE id=3"))
+                assert connection.execute(text("SELECT count(*) FROM event_category_backup_20260929")).scalar_one() == 1
                 module.downgrade()
                 restored = connection.execute(text("SELECT * FROM events ORDER BY id")).mappings().all()
-                assert restored == original
+                assert restored[:2] == original[:2]
+                assert restored[2]["id"] == 4 and restored[2]["categories"] == ["Music"]
+                connection.execute(text("DELETE FROM events WHERE id=4"))
+                connection.execute(text("INSERT INTO events VALUES (3,'[\"Other\"]','[]','[]')"))
                 additive.downgrade()
                 assert connection.execute(text("SELECT * FROM events ORDER BY id")).mappings().all() == before_addition
             finally:

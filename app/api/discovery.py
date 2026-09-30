@@ -24,7 +24,7 @@ from app.models.itinerary import SavedItinerary
 from app.models.user import User
 from app.models.user_signal import UserSignal
 from app.services.categories import canonical_category
-from app.services.catalog_taxonomy_v1 import categories_v1
+from app.services.catalog_taxonomy_v1 import ALIASES, CANONICAL, categories_v1, legacy_genres_v1
 from app.services.planning import PlanningPlace, SearchArea, TravelMode, UserStop, resolve_search_area, travel_minutes
 from app.services.concierge import (
     anchor_hour_range,
@@ -321,7 +321,7 @@ def _serialize_event(event: Event, *, people_interested: int = 0) -> EventRespon
         venue_name=event.venue_name,
         tags=canonical_vibe_tags(event.tags or []),
         categories=categories_v1(event.categories),
-        performers=event.performers or [], genres=event.genres or [],
+        performers=event.performers or [], genres=list(dict.fromkeys([*(event.genres or []), *legacy_genres_v1(event.categories)])),
         image_url=event.image_url,
         price=float(event.price) if event.price is not None else None,
         currency=event.currency,
@@ -475,7 +475,14 @@ def _category_filter(category: str):
     so only Postgres sees it. Cast to JSONB so containment uses the ``@>``
     operator it was meant to.
     """
-    return cast(Event.categories, JSONB).contains([category])
+    if category in CANONICAL:
+        aliases = [label for label, parent in ALIASES.items() if parent == category]
+        element = func.jsonb_array_elements_text(cast(Event.categories, JSONB)).column_valued("category_label")
+        return or_(cast(Event.categories, JSONB).contains([category]),
+                   select(element).where(func.lower(func.trim(element)).in_(aliases)).exists())
+    # Preserve the legacy fine-grained category query contract after genres
+    # move to their dedicated field. No unknown label becomes a top-level bucket.
+    return or_(cast(Event.categories, JSONB).contains([category]), cast(Event.genres, JSONB).contains([category]))
 
 
 def _apply_concierge_category_filter(stmt: object, category: str | None) -> object:

@@ -172,6 +172,50 @@ async def test_source_aliases_survive_cross_source_merge_and_later_reschedule(da
 
 
 @pytest.mark.anyio
+async def test_catalog_contributions_survive_owner_revision_and_alias_replay(database):
+    service = DataPipelineService(vibe_tagger=NoTags())
+    owner = payload(performers=["Original Artist"], genres=["Rock"])
+    alias = payload(source_name="19hz", source_event_id="19hz-123", source_tier=2, genres=["House"])
+    with Session(database) as session:
+        await service.process_raw_events(session=session, raw_events=[owner, alias])
+        saved = session.exec(select(Event)).one()
+        assert set(saved.genres) == {"Rock", "House"}
+        event_id = saved.id
+    with Session(database) as session:
+        revised = payload(performers=["Replacement Artist"], genres=["Pop"])
+        await service.process_raw_events(session=session, raw_events=[revised])
+        saved = session.get(Event,event_id)
+        assert saved.performers == ["Replacement Artist"]
+        assert set(saved.genres) == {"Pop", "House"}
+    with Session(database) as session:
+        summary = await service.process_raw_events(session=session, raw_events=[alias])
+        assert summary["updated"] == 0 and summary["skipped"] == 1
+        assert set(session.get(Event,event_id).genres) == {"Pop", "House"}
+
+
+@pytest.mark.anyio
+async def test_legacy_hash_baseline_cannot_grant_alias_revision_authority(database):
+    service = DataPipelineService(vibe_tagger=NoTags())
+    owner = payload()
+    alias = payload(source_name="meetup", source_event_id="meetup-legacy", source_tier=1)
+    with Session(database) as session:
+        await service.process_raw_events(session=session, raw_events=[owner,alias])
+        record = session.get(EventSourceRecord,("meetup","meetup-legacy"))
+        record.hash_version = 1
+        record.content_hash = "0" * 64
+        session.commit()
+        event_id = record.event_id
+    with Session(database) as session:
+        refreshed = payload(source_name="meetup", source_event_id="meetup-legacy", source_tier=1,
+                            price=Decimal("99"), genres=["Jazz"])
+        await service.process_raw_events(session=session, raw_events=[refreshed])
+        saved = session.get(Event,event_id)
+        assert saved.source_name == "ticketmaster" and saved.price == Decimal("10")
+        assert saved.genres == ["Jazz"]
+        assert session.get(EventSourceRecord,("meetup","meetup-legacy")).hash_version == 2
+
+
+@pytest.mark.anyio
 async def test_tag_cache_survives_new_pipeline_and_is_versioned(database):
     first_tags = CountingTags()
     with Session(database) as session:

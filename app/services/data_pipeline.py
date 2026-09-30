@@ -99,6 +99,7 @@ class DataPipelineService:
             payload["_source_hash"] = hashlib.sha256(
                 json.dumps(payload, sort_keys=True, default=str).encode()
             ).hexdigest()
+            payload["_source_hash_version"] = 2
         observations = await self.enrich_locations(
             session=session,
             events=observations,
@@ -169,6 +170,7 @@ class DataPipelineService:
             return existing.id, True, False
 
         updated = False
+        prior_catalog = {field: list(getattr(existing, field) or []) for field in ("performers", "genres")}
         if self.has_significant_new_information(
             existing_event=existing, incoming_event=event_payload
         ):
@@ -178,7 +180,7 @@ class DataPipelineService:
             )
             self._apply_payload(existing=existing, payload=merged_for_update)
             updated = True
-        self._remember_source_records(session, existing, event_payload)
+        updated = self._remember_source_records(session, existing, event_payload, prior_catalog=prior_catalog) or updated
         return existing.id, False, updated
 
     def _tag_key(self, description: str | None) -> tuple[str, str] | None:
@@ -295,19 +297,40 @@ class DataPipelineService:
         return records
 
     def _remember_source_records(
-        self, session: Session, event: Event, payload: dict[str, Any]
-    ) -> None:
-        for name, source_id in self._source_records(payload):
+        self, session: Session, event: Event, payload: dict[str, Any], *, prior_catalog: dict | None = None
+    ) -> bool:
+        identities = self._source_records(payload)
+        if not identities:
+            return False
+        prior = prior_catalog or {field: list(getattr(event, field) or []) for field in ("performers", "genres")}
+        old_contribution = {}
+        for name, source_id in identities:
             record = session.get(EventSourceRecord, (name, source_id))
             if record is None:
-                session.add(EventSourceRecord(
+                record = EventSourceRecord(
                     source_name=name, source_event_id=source_id, event_id=event.id,
-                    content_hash=payload.get("_source_hash"),
-                ))
+                )
+                session.add(record)
             elif record.event_id != event.id:
                 raise ValueError("Source identity already belongs to a different event")
-            else:
+            if (name, source_id) == (payload.get("source_name"), payload.get("source_event_id")):
+                old_contribution = dict(record.catalog_facts or {})
+                facts = dict(old_contribution)
+                for field in ("performers", "genres"):
+                    if payload.get(field):
+                        facts[field] = list(payload[field])
+                record.catalog_facts = facts
                 record.content_hash = payload.get("_source_hash")
+                record.hash_version = payload.get("_source_hash_version", 2)
+        records = session.exec(select(EventSourceRecord).where(EventSourceRecord.event_id == event.id)).all()
+        records.sort(key=lambda row: ((row.source_name, row.source_event_id) != (event.source_name, event.source_event_id), row.source_name, row.source_event_id))
+        for field in ("performers", "genres"):
+            # Replace only the re-observed provider's contribution. Retain
+            # other providers and legacy facts whose contributor is unknown.
+            inherited = [label for label in prior[field] if label not in old_contribution.get(field, [])]
+            published = [label for row in records for label in (row.catalog_facts or {}).get(field, [])]
+            setattr(event, field, self._catalog_labels(self._merge_lists(published, inherited)))
+        return any(getattr(event, field) != prior[field] for field in prior)
 
     async def enrich_locations(
         self,
@@ -403,7 +426,7 @@ class DataPipelineService:
             record = session.get(EventSourceRecord, (name, source_id))
             if record is not None:
                 content_hash = incoming_event.get("_source_hash")
-                if content_hash and record.content_hash:
+                if content_hash and record.content_hash and record.hash_version == incoming_event.get("_source_hash_version", 2):
                     incoming_event["_source_unchanged"] = content_hash == record.content_hash
                     incoming_event["_source_known_revision"] = content_hash != record.content_hash
                 event = session.get(Event, record.event_id)
@@ -500,8 +523,6 @@ class DataPipelineService:
                  > float(existing_payload.get("location_confidence") or 0) + 0.05)
                 or bool(set(incoming_event.get("tags") or []) - set(existing_payload.get("tags") or []))
                 or bool(set(incoming_event.get("categories") or []) - set(existing_payload.get("categories") or []))
-                or bool(set(incoming_event.get("performers") or []) - set(existing_payload.get("performers") or []))
-                or bool(set(incoming_event.get("genres") or []) - set(existing_payload.get("genres") or []))
             )
 
         if self._same_source_identity(existing_payload, incoming_event) or incoming_event.get("_source_known_revision"):

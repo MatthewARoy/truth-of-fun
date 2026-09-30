@@ -19,7 +19,7 @@ def upgrade():
     events = sa.table("events", sa.column("id", sa.Integer()), sa.column("categories", sa.JSON()), sa.column("genres", sa.JSON()))
     backup = sa.table("event_category_backup_20260929", sa.column("event_id", sa.Integer()), sa.column("categories", sa.JSON()), sa.column("genres", sa.JSON()))
     # Stream/chunk a public catalog rather than materialize an unbounded corpus.
-    for rows in conn.execute(sa.select(events)).mappings().partitions(500):
+    for rows in conn.execute(sa.select(events).execution_options(stream_results=True, yield_per=500)).mappings().partitions(500):
         for row in rows:
             categories = categories_v1(row["categories"])
             genres = list(dict.fromkeys([*(row["genres"] or []), *legacy_genres_v1(row["categories"])]))
