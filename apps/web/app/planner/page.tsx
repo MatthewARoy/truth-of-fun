@@ -5,7 +5,9 @@ import Link from "next/link";
 import type {
   ConciergeResponse,
   PortableItineraryResponse,
+  TravelMode,
 } from "@truth-of-fun/api-client";
+import { PlanningInputs, placeInput, stopInputs, type StopDraft } from "@/components/planning-inputs";
 import { apiClient } from "@/lib/api/client";
 import { useAuth } from "@/lib/auth-context";
 import { Button } from "@/components/ui/button";
@@ -36,6 +38,10 @@ function PlannerContent() {
   const { token } = useAuth();
   const [query, setQuery] = useState("");
   const [expiresInDays, setExpiresInDays] = useState(14);
+  const [origin, setOrigin] = useState({ name: "", lat: "", lng: "" });
+  const [travelMode, setTravelMode] = useState<TravelMode>("driving");
+  const [userStops, setUserStops] = useState<StopDraft[]>([]);
+  const [shareOrigin, setShareOrigin] = useState(true);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ConciergeResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -57,7 +63,7 @@ function PlannerContent() {
     setLoading(true);
     resetResults();
     try {
-      const response = await apiClient.buildItinerary({ query: query.trim() });
+      const response = await apiClient.buildItinerary({ query: query.trim(), origin: placeInput(origin), travel_mode: travelMode, user_stops: stopInputs(userStops) });
       setResult(response);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to build itinerary");
@@ -79,11 +85,14 @@ function PlannerContent() {
         timeframe: result.timeframe,
         geography: result.geography,
         anchor_event_id: result.anchor_event_id,
-        stops: result.itinerary.map((stop) => ({
+        origin: shareOrigin ? result.origin : undefined,
+        travel_mode: result.travel_mode,
+        stops: result.itinerary.map((stop) => stop.provenance === "planner" ? ({
           kind: stop.kind,
-          event_id: stop.event_id,
-          travel_buffer_minutes_before: stop.travel_buffer_minutes_before,
-        })),
+          user_stop: { kind: stop.kind as "meeting" | "walk" | "activity", title: stop.title,
+            place: { name: stop.venue_name, address: stop.address, lat: stop.lat, lng: stop.lng },
+            start_at: stop.start_at, end_at: stop.end_at },
+        }) : ({ kind: stop.kind, event_id: stop.event_id })),
       });
       setShared(response);
     } catch (err) {
@@ -125,6 +134,7 @@ function PlannerContent() {
           onChange={(e) => setQuery(e.target.value)}
           rows={3}
         />
+        <PlanningInputs origin={origin} setOrigin={value => { setOrigin(value); resetResults(); }} mode={travelMode} setMode={value => { setTravelMode(value); resetResults(); }} stops={userStops} setStops={value => { setUserStops(value); resetResults(); }} disabled={loading || sharing} />
         <Button type="submit" disabled={loading || sharing || !query.trim()}>
           {loading ? "Building your plan..." : "Build itinerary"}
         </Button>
@@ -158,7 +168,8 @@ function PlannerContent() {
             <div className="flex flex-wrap gap-2">
               {result.intent && <Badge active>{result.intent.replace(/_/g, " ")}</Badge>}
               {result.timeframe && <Badge>{result.timeframe}</Badge>}
-              {result.geography && <Badge>{result.geography}</Badge>}
+              {result.resolved_area ? <Badge>{result.resolved_area.label} · {result.resolved_area.radius_miles} mi radius</Badge> : result.geography && <Badge>{result.geography}</Badge>}
+              <Badge>{result.travel_mode ?? "driving"}</Badge>
             </div>
           </Card>
 
@@ -184,9 +195,14 @@ function PlannerContent() {
                 {token ? (
                   <>
                     <p className="text-sm text-slate-300">
-                      Anyone with the link can read this event plan until it expires or you revoke it.
+                      Anyone with the link can read this plan, including your starting point and any stops you added, until it expires or you revoke it.
                       Your original request stays private and is not included in the link.
                     </p>
+                    {result.origin && <label className="flex items-center gap-2 text-sm text-slate-300">
+                      <input type="checkbox" checked={shareOrigin} disabled={sharing || Boolean(shared)} onChange={e => setShareOrigin(e.target.checked)} />
+                      Include starting point in the public link
+                    </label>}
+                    <p className="text-xs text-slate-400">Stops you added are public even when the starting point is omitted.</p>
                     <Select
                       label="Public link expires after"
                       value={expiresInDays}

@@ -297,6 +297,8 @@ export class TruthOfFunApiClient {
         timeframe: payload.timeframe,
         geography: payload.geography,
         anchor_event_id: payload.anchor_event_id,
+        origin: payload.origin,
+        travel_mode: payload.travel_mode,
         stops: payload.stops,
       }),
     });

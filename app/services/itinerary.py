@@ -16,8 +16,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Protocol
+from datetime import datetime, timedelta
+from typing import Literal, Protocol
 from urllib.parse import quote
 
 from app.core.localtime import LOCAL_TZ
@@ -115,7 +115,8 @@ def map_url(location: StopLocation) -> str | None:
 
 
 def directions_url(
-    *, destination: StopLocation, origin: StopLocation | None = None
+    *, destination: StopLocation, origin: StopLocation | None = None,
+    travel_mode: Literal["driving", "walking", "bicycling", "transit"] = "driving",
 ) -> str | None:
     """Driving directions to ``destination``.
 
@@ -126,7 +127,7 @@ def directions_url(
     waypoint = _waypoint(destination)
     if waypoint is None:
         return None
-    url = f"{_MAPS_BASE}/dir/?api=1&destination={quote(waypoint)}&travelmode=driving"
+    url = f"{_MAPS_BASE}/dir/?api=1&destination={quote(waypoint)}&travelmode={travel_mode}"
     origin_waypoint = _waypoint(origin) if origin is not None else None
     if origin_waypoint is not None:
         url += f"&origin={quote(origin_waypoint)}"
@@ -160,6 +161,7 @@ def build_stop_links(
     location: StopLocation,
     previous_location: StopLocation | None = None,
     tickets_url: str | None = None,
+    travel_mode: Literal["driving", "walking", "bicycling", "transit"] = "driving",
 ) -> StopLinks:
     """The full set of tap targets for one stop."""
     if not location.is_locatable:
@@ -182,7 +184,7 @@ def build_stop_links(
     return StopLinks(
         tickets_url=tickets_url,
         map_url=map_url(location),
-        directions_url=directions_url(destination=location, origin=origin),
+        directions_url=directions_url(destination=location, origin=origin, travel_mode=travel_mode),
         food_url=nearby_search_url(location, "restaurants"),
         drinks_url=nearby_search_url(location, "bars"),
         parking_url=nearby_search_url(location, "parking"),
@@ -306,14 +308,22 @@ def render_itinerary_text(
                 time_range += f"–{format_local_time(stop.end_at)}"
         lines.append(f"{index}. {time_range} · {stop_kind_label(stop.kind)}")
         lines.append(f"   {stop.title}")
+        if getattr(stop, "provenance", "event") == "planner":
+            lines.append("   Added by the planner")
 
         where = location_label(venue_name=stop.venue_name, address=stop.address)
         if where:
             lines.append(f"   {where}")
         if stop.travel_buffer_minutes_before > 0:
-            lines.append(
-                f"   Leave ~{stop.travel_buffer_minutes_before} min ahead"
-            )
+            leave_by = getattr(stop, "leave_by", None)
+            if leave_by is None and not stop.start_time_is_estimated:
+                leave_by = stop.start_at - timedelta(minutes=stop.travel_buffer_minutes_before)
+            if leave_by is not None:
+                lines.append(f"   Leave by ~{format_local_time(leave_by)} ({stop.travel_buffer_minutes_before} min travel allowance)")
+            if getattr(stop, "travel_estimate", None) is False:
+                lines.append("   Default allowance: coordinates unavailable or untrusted")
+        if getattr(stop, "timing_warning", False):
+            lines.append("   Timing overlap: leave before the previous stop ends")
 
         for label, url in (
             ("Tickets", stop.links.tickets_url),

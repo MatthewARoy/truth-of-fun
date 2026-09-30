@@ -72,9 +72,17 @@ export type PreferencesRequest = {
   preferred_vibes: string[];
 };
 
+export type TravelMode = "driving" | "walking" | "bicycling" | "transit";
+export type PlanningPlace = { name?: string | null; address?: string | null; lat?: number | null; lng?: number | null };
+export type UserStop = { kind: "meeting" | "walk" | "activity"; title: string; place: PlanningPlace; start_at: string; end_at?: string | null };
+export type SearchArea = { label: string; lat: number; lng: number; radius_miles: number };
+
 export type ConciergeRequest = {
   query: string;
   limit?: number;
+  origin?: PlanningPlace | null;
+  travel_mode?: TravelMode;
+  user_stops?: UserStop[];
 };
 
 /** Google Maps deep links for one stop. Null when the stop has no resolvable
@@ -92,7 +100,11 @@ export type StopLinks = {
 
 export type ItineraryStopResponse = {
   kind: string;
-  event_id: number;
+  event_id: number | null;
+  provenance?: "event" | "planner";
+  leave_by?: string | null;
+  travel_estimate?: boolean | null;
+  timing_warning?: boolean;
   title: string;
   start_at: string;
   /** See `EventResponse.start_time_is_estimated`. */
@@ -108,6 +120,9 @@ export type ItineraryStopResponse = {
 };
 
 export type ConciergeResponse = {
+  resolved_area?: SearchArea | null;
+  origin?: PlanningPlace | null;
+  travel_mode?: TravelMode;
   intent: string;
   timeframe: string;
   geography: string | null;
@@ -124,11 +139,14 @@ export type ConciergeResponse = {
  * display fact from the database when it writes the snapshot. */
 export type ShareItineraryStop = {
   kind: string;
-  event_id: number;
+  event_id?: number | null;
+  user_stop?: UserStop;
   travel_buffer_minutes_before?: number;
 };
 
 export type ShareItineraryRequest = {
+  origin?: PlanningPlace | null;
+  travel_mode?: TravelMode;
   /** Link lifetime in days. The API defaults to 14 and allows 1–30. */
   expires_in_days?: number;
   intent?: string;
@@ -139,6 +157,8 @@ export type ShareItineraryRequest = {
 };
 
 export type PortableItineraryResponse = {
+  origin?: PlanningPlace | null;
+  travel_mode?: TravelMode;
   share_token: string;
   /** Relative path to the public page, e.g. "/itinerary/<token>". */
   share_url: string;

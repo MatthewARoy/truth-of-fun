@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from geoalchemy2 import Geography
 from sqlalchemy import and_, case, cast, delete, func, literal, or_, text, update
 from sqlalchemy.dialects.postgresql import JSONB
@@ -24,6 +24,7 @@ from app.models.itinerary import SavedItinerary
 from app.models.user import User
 from app.models.user_signal import UserSignal
 from app.services.categories import canonical_category
+from app.services.planning import PlanningPlace, SearchArea, TravelMode, UserStop, resolve_search_area, travel_minutes
 from app.services.concierge import (
     anchor_hour_range,
     intent_vibe_profile,
@@ -96,6 +97,9 @@ class EventDetailResponse(EventResponse):
 
 class ConciergeRequest(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
+    origin: PlanningPlace | None = None
+    travel_mode: TravelMode = "driving"
+    user_stops: list[UserStop] = Field(default_factory=list, max_length=10)
     # Accepted for compatibility, deliberately unused: an itinerary is at most
     # three stops by construction, so this never sized the response. It used to
     # cap the candidate pools instead, which silently decided the anchor and the
@@ -117,7 +121,7 @@ class StopLinksResponse(BaseModel):
 
 class ItineraryStopResponse(BaseModel):
     kind: str
-    event_id: int
+    event_id: int | None
     title: str
     start_at: datetime
     # Defaulted so snapshots frozen before the flag existed still rehydrate.
@@ -130,12 +134,19 @@ class ItineraryStopResponse(BaseModel):
     lat: float | None = None
     lng: float | None = None
     links: StopLinksResponse = StopLinksResponse()
+    provenance: Literal["event", "planner"] = "event"
+    leave_by: datetime | None = None
+    travel_estimate: bool | None = None
+    timing_warning: bool = False
 
 
 class ConciergeResponse(BaseModel):
     intent: str
     timeframe: str
     geography: str | None
+    resolved_area: SearchArea | None = None
+    origin: PlanningPlace | None = None
+    travel_mode: TravelMode = "driving"
     category_focus: str | None = None
     anchor_event_id: int | None
     itinerary: list[ItineraryStopResponse]
@@ -146,14 +157,24 @@ class ConciergeResponse(BaseModel):
 class ShareItineraryStopRequest(BaseModel):
     """A stop the client is asking to freeze.
 
-    Only the identity and ordering of a stop come from the client; every
-    display fact is re-read from the database when the snapshot is written, so
-    a shared page can never be made to show text the caller supplied.
+    Event facts are re-read from the database. A separate user_stop carries
+    bounded planner text with explicit provenance; it cannot override an event.
     """
 
     kind: str = Field(max_length=50)
-    event_id: int
+    event_id: int | None = None
+    user_stop: UserStop | None = None
     travel_buffer_minutes_before: int = Field(default=0, ge=0, le=24 * 60)
+
+    @model_validator(mode="after")
+    def one_identity(self):
+        if (self.event_id is None) == (self.user_stop is None):
+            raise ValueError("Supply exactly one event_id or user_stop")
+        if self.user_stop is not None:
+            self.kind = self.user_stop.kind
+        elif self.kind not in {"main_event", "before_event", "after_event", "pre_event_drink", "post_event_drink", "late_night_snack", "stop"}:
+            raise ValueError("Unknown event stop kind")
+        return self
 
 
 class ShareItineraryRequest(BaseModel):
@@ -165,6 +186,8 @@ class ShareItineraryRequest(BaseModel):
     timeframe: str = Field(default="upcoming_week", max_length=100)
     geography: str | None = Field(default=None, max_length=255)
     anchor_event_id: int | None = None
+    origin: PlanningPlace | None = None
+    travel_mode: TravelMode = "driving"
     stops: list[ShareItineraryStopRequest] = Field(min_length=1, max_length=20)
 
 
@@ -175,6 +198,8 @@ class PortableItineraryResponse(BaseModel):
     intent: str
     timeframe: str
     geography: str | None
+    origin: PlanningPlace | None = None
+    travel_mode: TravelMode = "driving"
     anchor_event_id: int | None
     created_at: datetime
     expires_at: datetime
@@ -327,21 +352,26 @@ def _event_location(event: Event | None) -> StopLocation:
 
 def _portable_stops(
     raw_stops: list[tuple[ItineraryStopResponse, StopLocation]],
+    *, origin: PlanningPlace | None = None, travel_mode: TravelMode = "driving",
 ) -> list[ItineraryStopResponse]:
     """Attach maps links to each stop, routing each one from the previous stop.
 
-    A stop we can't locate is left linkless and does not become the origin for
-    the next leg — otherwise one venue-less entry would break directions for
-    the rest of the night.
+    An unlocatable predecessor yields phone-origin directions and the default
+    allowance. Never estimate a leg from an earlier, different stop.
     """
     enriched: list[ItineraryStopResponse] = []
-    previous: StopLocation | None = None
+    previous: StopLocation | None = origin.location() if origin else None
+    previous_stop: ItineraryStopResponse | None = None
     for stop, location in raw_stops:
         links = build_stop_links(
             location=location,
             previous_location=previous,
             tickets_url=stop.external_url,
+            travel_mode=travel_mode,
         )
+        minutes, estimated = travel_minutes(previous, location, travel_mode) if (previous_stop or origin) else (0, False)
+        leave_by = stop.start_at - timedelta(minutes=minutes) if minutes and not stop.start_time_is_estimated else None
+        previous_boundary = (previous_stop.end_at or (previous_stop.start_at if not previous_stop.start_time_is_estimated else None)) if previous_stop else None
         enriched.append(
             stop.model_copy(
                 update={
@@ -349,13 +379,33 @@ def _portable_stops(
                     "lat": location.lat,
                     "lng": location.lng,
                     "links": StopLinksResponse(**asdict(links)),
+                    "travel_buffer_minutes_before": minutes,
+                    "travel_estimate": estimated if minutes else None,
+                    "leave_by": leave_by,
+                    "timing_warning": bool(leave_by and previous_boundary and _utc_datetime(previous_boundary) > _utc_datetime(leave_by)),
                 }
             )
         )
-        if location.is_locatable:
-            previous = location
+        # The immediately preceding stop determines the leg, even if it lacks
+        # coordinates. Never estimate distance from an earlier known venue.
+        previous = location
+        previous_stop = stop
     return enriched
 
+
+
+def _user_stop_pair(stop: UserStop) -> tuple[ItineraryStopResponse, StopLocation]:
+    return ItineraryStopResponse(kind=stop.kind, event_id=None, title=stop.title,
+        start_at=stop.start_at, end_at=stop.end_at, venue_name=stop.place.name,
+        external_url=None, travel_buffer_minutes_before=0, provenance="planner"), stop.place.location()
+
+
+def _area_filter(stmt, area: SearchArea | None):
+    if area is None:
+        return stmt
+    point = func.ST_SetSRID(func.ST_MakePoint(area.lng, area.lat), 4326)
+    return stmt.where(Event.location_confidence >= 0.7,
+        func.ST_DWithin(cast(Event.location, Geography), cast(point, Geography), area.radius_miles * 1609.34))
 
 def _canonical_tag_filter(vibe_tag: str):
     """Match *vibe_tag* against stored tags regardless of their spelling.
@@ -949,6 +999,7 @@ async def build_concierge_itinerary(
     user: User | None = Depends(get_optional_planning_user),
 ) -> ConciergeResponse:
     parsed = await parse_intent_async(payload.query)
+    area = resolve_search_area(payload.query)
 
     def _anchor_query(*, restrict_to_intent_hours: bool):
         stmt = select(Event).where(
@@ -977,7 +1028,7 @@ async def build_concierge_itinerary(
         # payload, not the candidate pool) hid every later event from that
         # ranking.
         stmt = stmt.order_by(Event.start_at.asc())
-        stmt = _apply_concierge_geography_filter(stmt, parsed.geography)
+        stmt = _area_filter(stmt, area) if area else _apply_concierge_geography_filter(stmt, parsed.geography)
         return _apply_concierge_category_filter(stmt, parsed.category_focus)
 
     # Prefer an anchor that fits the intent's time of day; fall back to the
@@ -1007,18 +1058,30 @@ async def build_concierge_itinerary(
             user=user,
             user_vibe_scores=vibe_scores,
             popularity_counts=popularity_counts,
+            apply_diversity=not (payload.origin is not None and payload.origin.lat is not None),
         )
+        if payload.origin is not None and payload.origin.lat is not None:
+            def origin_score(ranked):
+                minutes, known = travel_minutes(payload.origin.location(), _event_location(ranked.event), payload.travel_mode)
+                # A bounded penalty; unknown points get no invented proximity.
+                penalty = min(25, minutes / 2) if known else 25
+                return ranked.total_score - penalty
+            ranked_anchors.sort(key=origin_score, reverse=True)
         anchor = ranked_anchors[0].event if ranked_anchors else None
     else:
         anchor = None
     if anchor is None:
+        user_itinerary = _portable_stops([_user_stop_pair(stop) for stop in sorted(payload.user_stops, key=lambda s: s.start_at)], origin=payload.origin, travel_mode=payload.travel_mode)
+        user_title = itinerary_title(intent=parsed.intent, geography=parsed.geography, starts_at=user_itinerary[0].start_at if user_itinerary else None)
         return ConciergeResponse(
             intent=parsed.intent,
             timeframe=parsed.timeframe_label,
             geography=parsed.geography,
             category_focus=parsed.category_focus,
             anchor_event_id=None,
-            itinerary=[],
+            itinerary=user_itinerary, title=user_title,
+            text=render_itinerary_text(title=user_title, stops=user_itinerary),
+            resolved_area=area, origin=payload.origin, travel_mode=payload.travel_mode,
         )
 
     anchor_lat, anchor_lng = _extract_lat_lng(anchor)
@@ -1031,7 +1094,7 @@ async def build_concierge_itinerary(
         )
 
         def _support_query(*, radius_miles: float):
-            return (
+            return _area_filter((
                 select(Event)
                 .where(
                     Event.id != anchor.id,
@@ -1054,12 +1117,19 @@ async def build_concierge_itinerary(
                 # silently ended at the main event. The set is already bounded
                 # by the intent window and the ST_DWithin radius.
                 .order_by(Event.start_at.asc())
-            )
+            ), area)
 
         support_events = session.exec(_support_query(radius_miles=0.5)).all()
         if not support_events:
             support_events = session.exec(_support_query(radius_miles=1.0)).all()
-    sequenced = sequence_itinerary(anchor=anchor, support_events=support_events)
+    # Exclude support events that overlap a declared planner interval. An
+    # unknown user duration blocks only its stated instant, never a guessed end.
+    support_events = [event for event in support_events if not any(
+        _utc_datetime(event.start_at) <= (stop.end_at or stop.start_at)
+        and _utc_datetime(event.end_at or event.start_at) >= stop.start_at
+        for stop in payload.user_stops
+    )]
+    sequenced = sequence_itinerary(anchor=anchor, support_events=support_events, travel_mode=payload.travel_mode, location_for_event=_event_location)
 
     # The anchor and its support events are already loaded, so locations come
     # from memory rather than a second round of queries.
@@ -1068,8 +1138,7 @@ async def build_concierge_itinerary(
         for event in [anchor, *support_events]
         if event.id is not None
     }
-    itinerary = _portable_stops(
-        [
+    raw_stops = [
             (
                 ItineraryStopResponse(
                     kind=item.kind,
@@ -1086,7 +1155,9 @@ async def build_concierge_itinerary(
             )
             for item in sequenced
         ]
-    )
+    raw_stops.extend(_user_stop_pair(stop) for stop in payload.user_stops)
+    raw_stops.sort(key=lambda pair: _utc_datetime(pair[0].start_at))
+    itinerary = _portable_stops(raw_stops, origin=payload.origin, travel_mode=payload.travel_mode)
     title = itinerary_title(
         intent=parsed.intent,
         geography=parsed.geography,
@@ -1098,6 +1169,7 @@ async def build_concierge_itinerary(
         geography=parsed.geography,
         category_focus=parsed.category_focus,
         anchor_event_id=int(anchor.id or 0),
+        resolved_area=area, origin=payload.origin, travel_mode=payload.travel_mode,
         itinerary=itinerary,
         title=title,
         text=render_itinerary_text(title=title, stops=itinerary),
@@ -1125,12 +1197,16 @@ def _portable_response(itinerary: SavedItinerary) -> PortableItineraryResponse:
     Links are derived rather than stored so that improvements to how we build
     map URLs reach itineraries that were shared before the change.
     """
+    context = itinerary.planning_context or {}
+    origin = PlanningPlace.model_validate(context["origin"]) if context.get("origin") else None
+    mode = context.get("travel_mode", "driving")
     stops = _portable_stops(
         [
             (
                 ItineraryStopResponse(
                     kind=str(stop.get("kind") or "stop"),
-                    event_id=int(stop.get("event_id") or 0),
+                    event_id=int(stop["event_id"]) if stop.get("event_id") is not None else None,
+                    provenance=stop.get("provenance", "event"),
                     title=str(stop.get("title") or "Untitled"),
                     start_at=datetime.fromisoformat(stop["start_at"]),
                     start_time_is_estimated=bool(
@@ -1159,7 +1235,7 @@ def _portable_response(itinerary: SavedItinerary) -> PortableItineraryResponse:
                 ),
             )
             for stop in (itinerary.stops or [])
-        ]
+        ], origin=origin, travel_mode=mode,
     )
     share_url = _share_url_for(itinerary.share_token)
     return PortableItineraryResponse(
@@ -1169,6 +1245,7 @@ def _portable_response(itinerary: SavedItinerary) -> PortableItineraryResponse:
         intent=itinerary.intent,
         timeframe=itinerary.timeframe,
         geography=itinerary.geography,
+        origin=origin, travel_mode=mode,
         anchor_event_id=itinerary.anchor_event_id,
         created_at=_utc_datetime(itinerary.created_at),
         expires_at=_utc_datetime(itinerary.expires_at),
@@ -1195,9 +1272,9 @@ def share_concierge_itinerary(
     Takes the stops the caller is looking at rather than re-running the
     concierge: re-planning here would quietly hand back a different night than
     the one on screen. Titles, venues, and coordinates are re-read from the
-    database so the public page only ever renders our own data.
+    database. Explicit user stops carry bounded plain text and planner provenance.
     """
-    requested_ids = [stop.event_id for stop in payload.stops]
+    requested_ids = [stop.event_id for stop in payload.stops if stop.event_id is not None]
     events_by_id = {
         int(event.id): event
         for event in session.exec(select(Event).where(Event.id.in_(requested_ids))).all()
@@ -1209,8 +1286,16 @@ def share_concierge_itinerary(
             status_code=404, detail=f"Unknown event ids: {sorted(set(missing))}"
         )
 
+    if payload.anchor_event_id is not None and payload.anchor_event_id not in requested_ids:
+        raise HTTPException(status_code=422, detail="Anchor must be one of the event stops")
     snapshot: list[dict] = []
     for stop in payload.stops:
+        if stop.user_stop is not None:
+            pair, location = _user_stop_pair(stop.user_stop)
+            snapshot.append({**pair.model_dump(mode="json", exclude={"links"}),
+                "address": location.address, "lat": location.lat, "lng": location.lng,
+                "location_confidence": location.location_confidence})
+            continue
         event = events_by_id[stop.event_id]
         lat, lng = _extract_lat_lng(event)
         snapshot.append(
@@ -1237,9 +1322,7 @@ def share_concierge_itinerary(
             }
         )
 
-    first_start = min(
-        events_by_id[stop.event_id].start_at for stop in payload.stops
-    )
+    first_start = min(_utc_datetime(datetime.fromisoformat(stop["start_at"])) for stop in snapshot)
     now = datetime.now(timezone.utc)
     saved = SavedItinerary(
         share_token=generate_share_token(),
@@ -1255,6 +1338,7 @@ def share_concierge_itinerary(
         geography=payload.geography,
         anchor_event_id=payload.anchor_event_id,
         stops=snapshot,
+        planning_context={"origin": payload.origin.model_dump(mode="json") if payload.origin else None, "travel_mode": payload.travel_mode},
         created_at=now,
         expires_at=now + timedelta(days=payload.expires_in_days),
     )

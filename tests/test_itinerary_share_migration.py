@@ -56,3 +56,39 @@ def test_legacy_shares_receive_rollout_grace_and_survive_downgrade():
                 transaction.rollback()  # Includes this test's isolated schema.
     finally:
         engine.dispose()
+
+
+
+def test_planning_context_is_additive_and_legacy_default_is_empty():
+    url = os.environ.get("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("Set TEST_DATABASE_URL to disposable PostgreSQL")
+    from conftest import _require_disposable_database
+    _require_disposable_database(url)
+    path = Path(__file__).parents[1] / "alembic/versions/202609290005_planning_context.py"
+    spec = importlib.util.spec_from_file_location("planning_context_migration", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    engine = create_engine(url)
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                schema = "planning_context_" + uuid4().hex
+                connection.execute(text(f"CREATE SCHEMA {schema}"))
+                connection.execute(text(f"SET LOCAL search_path TO {schema}"))
+                connection.execute(text("CREATE TABLE saved_itineraries(id integer PRIMARY KEY, stops json NOT NULL)"))
+                connection.execute(text("INSERT INTO saved_itineraries VALUES(1, '[{\"title\":\"Legacy\"}]')"))
+                module.op = Operations(MigrationContext.configure(connection))
+                module.upgrade()
+                row = connection.execute(text("SELECT * FROM saved_itineraries")).mappings().one()
+                assert row["planning_context"] == {}
+                assert row["stops"] == [{"title":"Legacy"}]
+                module.downgrade()
+                row = connection.execute(text("SELECT * FROM saved_itineraries")).mappings().one()
+                assert "planning_context" not in row
+                assert row["stops"] == [{"title":"Legacy"}]
+            finally:
+                transaction.rollback()
+    finally:
+        engine.dispose()

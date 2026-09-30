@@ -82,15 +82,28 @@ const FIRST_SEEN_NOTE =
   "first_seen_at is when Truth of Fun first ingested this event, NOT when the " +
   "event was announced. Do not describe it as an announcement or on-sale date.";
 
+const plainText = (limit: number) => z.string().trim().min(1).max(limit).refine(
+  value => !/[<>\p{C}]|[a-z][a-z0-9+.-]*:\/\/|\b(?:www\.|javascript:|data:)/iu.test(value),
+  "Use plain text without markup, URLs or control characters"
+);
+const PLACE_INPUT = z.strictObject({ name: plainText(120).optional(), address: plainText(250).optional(),
+  lat: z.number().min(-90).max(90).optional(), lng: z.number().min(-180).max(180).optional() })
+  .refine(p => (p.lat === undefined) === (p.lng === undefined) && (p.lat !== undefined || Boolean(p.name || p.address)), "Supply a place or coordinate pair");
+const USER_STOP_INPUT = z.strictObject({ kind: z.enum(["meeting", "walk", "activity"]), title: plainText(160),
+  place: PLACE_INPUT, start_at: z.string().datetime({ offset: true }), end_at: z.string().datetime({ offset: true }).optional() });
+
 const PUBLIC_SHARE_INPUT = z.strictObject({
   publish_publicly: z.literal(true).describe(
     "Required explicit confirmation: the user asked to publish these selected stops as a public link."
   ),
-  stops: z.array(z.strictObject({
+  origin: PLACE_INPUT.optional(),
+  travel_mode: z.enum(["driving", "walking", "bicycling", "transit"]).optional(),
+  stops: z.array(z.union([z.strictObject({
     event_id: z.number().int().positive(),
     kind: z.enum(["before_event", "main_event", "after_event", "pre_event_drink", "late_night_snack"]),
     travel_buffer_minutes_before: z.number().int().min(0).max(1440).default(0),
-  })).min(1).max(20).describe("The selected event identities in itinerary order; no titles, prompts or notes."),
+  }), z.strictObject({ kind: z.enum(["meeting", "walk", "activity"]), user_stop: USER_STOP_INPUT })]))
+    .min(1).max(20).describe("Selected event identities or explicitly public planner-authored stops in order; never private prompts or notes."),
   intent: z.enum(["date_night", "out_of_town_guests", "bar_crawl", "active_day", "general_night_out"])
     .default("general_night_out"),
   timeframe: z.enum([
@@ -237,21 +250,27 @@ export function registerTools(server: McpServer, client: TruthOfFunApiClient): v
         CITATION_NOTE,
       inputSchema: {
         query: z.string().describe("Natural-language request, in the user's own words"),
+        origin: z.object({ name: z.string().max(120).optional(), address: z.string().max(250).optional(),
+          lat: z.number().min(-90).max(90).optional(), lng: z.number().min(-180).max(180).optional() }).optional(),
+        travel_mode: z.enum(["driving", "walking", "bicycling", "transit"]).optional(),
+        user_stops: z.array(z.object({ kind: z.enum(["meeting", "walk", "activity"]), title: z.string().min(3).max(160),
+          place: z.object({ name: z.string().max(120).optional(), address: z.string().max(250).optional(), lat: z.number().min(-90).max(90).optional(), lng: z.number().min(-180).max(180).optional() }),
+          start_at: z.string().datetime({ offset: true }), end_at: z.string().datetime({ offset: true }).optional() })).max(10).optional(),
         limit: z
           .number()
           .int()
           .min(1)
           .max(100)
           .optional()
-          .describe("Candidate pool size to sequence from (default 25)"),
+          .describe("Compatibility hint (3–100); does not truncate candidate ranking"),
       },
       // Not read-only in cost terms (it may make one LLM call server-side) but
       // it writes nothing, and repeating it is safe.
       annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: true },
     },
-    async ({ query, limit }) =>
+    async ({ query, limit, origin, travel_mode, user_stops }) =>
       guard(async () => {
-        const itinerary = await client.buildItinerary({ query, limit: limit ?? 25 });
+        const itinerary = await client.buildItinerary({ query, limit: limit ?? 25, origin, travel_mode, user_stops });
         return ok({
           ...itinerary,
           note:
@@ -267,25 +286,25 @@ export function registerTools(server: McpServer, client: TruthOfFunApiClient): v
     {
       title: "Publish selected itinerary stops as a public link",
       description:
-        "Publish a snapshot of selected event stops as a public link. Use only after the user " +
+        "Publish selected event or planner-authored stops as a public link. Use only after the user " +
         "explicitly requests a public link for those stops. Planning, saving, or copying a plan " +
         "does not authorize publishing it. Requires publish_publicly=true and user authentication. " +
-        "Anyone with the link can read the selected event details until it expires or the owner revokes it. " +
+        "Anyone with the link can read the stops and any origin details until expiry or revocation. " +
         "Do not include the original planning query or private context; this tool accepts only selected " +
-        "event identities and bounded metadata. Default expiry is 14 days, maximum 30. " +
+        "event identities, bounded plain-text planner stops, optional public origin and travel mode. Confirm the user intends those details to be public. Default expiry is 14 days, maximum 30. " +
         "Use list_my_itineraries to inspect links and revoke_itinerary to withdraw a link on request.",
       inputSchema: PUBLIC_SHARE_INPUT,
       annotations: {
         readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true,
       },
     },
-    async ({ publish_publicly: _confirmation, stops, intent, timeframe, geography, expires_in_days }) =>
+    async ({ publish_publicly: _confirmation, stops, intent, timeframe, geography, expires_in_days, origin, travel_mode }) =>
       guard(async () => {
         const unauthorized = authenticationRequired(client);
         if (unauthorized) return unauthorized;
         return ok(await client.shareItinerary({
-          stops, intent, timeframe, geography,
-          anchor_event_id: stops.find((stop) => stop.kind === "main_event")?.event_id ?? null,
+          stops, intent, timeframe, geography, origin, travel_mode,
+          anchor_event_id: stops.reduce<number | null>((id, stop) => "event_id" in stop && stop.kind === "main_event" ? stop.event_id : id, null),
           expires_in_days,
         }));
       })

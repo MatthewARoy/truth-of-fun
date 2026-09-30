@@ -471,3 +471,86 @@ def test_uncertain_anchor_location_does_not_invent_a_nearby_route(isolated_event
     )
     assert response.status_code == 200
     assert [stop["title"] for stop in response.json()["itinerary"]] == ["Unresolved jazz venue"]
+
+
+@pytest.mark.parametrize("query,label", [("date night in the sunset Sunday", "Sunset district"),
+    ("date night near ocean beach Sunday", "Near Ocean Beach"),
+    ("date night on the west side Sunday", "West side of San Francisco")])
+def test_spatial_plan_constrains_anchor_and_support(isolated_events_session, query, label):
+    session = isolated_events_session
+    def row(title, lat, lng, tier=2, confidence=0.9, hour=20):
+        event = Event(title=title, start_at=_next_sunday_at(hour), end_at=_next_sunday_at(hour+1),
+            source_name="test-spatial", source_tier=tier, location=f"POINT({lng} {lat})",
+            location_confidence=confidence, tags=["#date"], venue_name=title)
+        session.add(event)
+        session.flush()
+        return event
+    downtown = row("Downtown anchor",37.79,-122.4)
+    low = row("Untrusted west anchor",37.76,-122.50,confidence=0.3)
+    west = row("West anchor",37.76,-122.50)
+    nearby = row("West support",37.7601,-122.5001,tier=3,hour=18)
+    row("Outside support",37.79,-122.4,tier=3,hour=18)
+    row("Untrusted support",37.7602,-122.50,tier=3,confidence=0.6,hour=22)
+    session.expire_all()
+    response = TestClient(app).post("/concierge/itinerary", json={"query":query})
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["resolved_area"]["label"] == label
+    assert data["anchor_event_id"] == west.id
+    assert {stop["event_id"] for stop in data["itinerary"]} == {west.id, nearby.id}
+    assert downtown.id not in {stop["event_id"] for stop in data["itinerary"]}
+    assert low.id not in {stop["event_id"] for stop in data["itinerary"]}
+    mixed = TestClient(app).post("/concierge/itinerary",json={"query":query,"user_stops":[{
+        "kind":"activity","title":"Dinner meetup","place":{"name":"A planner's place"},
+        "start_at":_next_sunday_at(18,30).isoformat(),"end_at":_next_sunday_at(19,45).isoformat()}]}).json()
+    assert nearby.id not in {stop["event_id"] for stop in mixed["itinerary"]}
+    assert next(stop for stop in mixed["itinerary"] if stop["event_id"] == west.id)["timing_warning"] is True
+
+
+def test_origin_changes_equal_anchor_ranking_and_routes(isolated_events_session):
+    session = isolated_events_session
+    for name, lng in [("Downtown",-122.40),("West",-122.50)]:
+        session.add(Event(title=name, start_at=_next_sunday_at(20), source_name="test-origin", source_tier=2,
+            location=f"POINT({lng} 37.76)", location_confidence=0.9, venue_name=name, raw_address="San Francisco",
+            created_at=_next_sunday_at(8)))
+    session.flush()
+    session.expire_all()
+    response = TestClient(app).post("/concierge/itinerary", json={"query":"date night in San Francisco Sunday",
+        "origin":{"name":"Ocean Beach", "lat":37.76, "lng":-122.50}, "travel_mode":"walking"})
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["itinerary"][0]["title"] == "West"
+    assert data["resolved_area"] is None
+    assert "origin=37.76%2C-122.5" in data["itinerary"][0]["links"]["directions_url"]
+    assert "travelmode=walking" in data["itinerary"][0]["links"]["directions_url"]
+
+
+
+def test_name_only_origin_preserves_anchor_scoring_and_routes(isolated_events_session,monkeypatch):
+    from app.api import discovery
+    session = isolated_events_session
+    event = Event(title="Standalone",start_at=_next_sunday_at(20),source_name="test-name-origin",source_tier=2,
+        location="POINT(-122.4 37.76)",venue_name="San Francisco")
+    session.add(event); session.flush(); session.expire_all()
+    original = discovery._recommender_service.score_events
+    calls = []
+    def record(**kwargs):
+        calls.append(kwargs["apply_diversity"])
+        return original(**kwargs)
+    monkeypatch.setattr(discovery._recommender_service,"score_events",record)
+    client = TestClient(app)
+    first = client.post("/concierge/itinerary",json={"query":"date night in San Francisco Sunday"}).json()
+    second = client.post("/concierge/itinerary",json={"query":"date night in San Francisco Sunday","origin":{"name":"Home"}}).json()
+    assert calls == [True,True]
+    assert first["anchor_event_id"] == second["anchor_event_id"]
+    assert "origin=Home" in second["itinerary"][0]["links"]["directions_url"]
+
+
+def test_planner_only_response_remains_portable(isolated_events_session):
+    response = TestClient(app).post("/concierge/itinerary",json={"query":"no matching events Sunday",
+        "user_stops":[{"kind":"meeting","title":"Meet at Java Beach Cafe","place":{"name":"Java Beach Cafe"},"start_at":_next_sunday_at(17).isoformat()}]})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["anchor_event_id"] is None
+    assert data["itinerary"][0]["provenance"] == "planner"
+    assert "Added by the planner" in data["text"]

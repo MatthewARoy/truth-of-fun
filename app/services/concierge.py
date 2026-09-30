@@ -5,7 +5,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 import anthropic
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -13,6 +13,8 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from app.core.config import get_settings
 from app.core.localtime import LOCAL_TZ, tonight_end, weekend_window
 from app.services.categories import FITNESS, query_targets_fitness
+from app.services.itinerary import StopLocation
+from app.services.planning import TravelMode, travel_minutes
 
 logger = logging.getLogger(__name__)
 
@@ -94,11 +96,15 @@ def sequence_itinerary(
     *,
     anchor: EventLike,
     support_events: list[EventLike],
+    travel_mode: TravelMode = "driving",
+    location_for_event: Callable[[EventLike], StopLocation] = lambda event: StopLocation(),
 ) -> list[SequencedStop]:
     # An unpublished clock time cannot support a precise multi-stop schedule.
     if anchor.start_time_is_estimated:
         return [_build_stop(kind="main_event", event=anchor, travel_buffer_minutes_before=0)]
-    buffer = timedelta(minutes=30)
+    def buffer_between(source, destination):
+        minutes, _ = travel_minutes(location_for_event(source), location_for_event(destination), travel_mode)
+        return timedelta(minutes=minutes)
     # Treat the small hours as part of the previous outing, not the next day.
     outing = (anchor.start_at.astimezone(LOCAL_TZ) - timedelta(hours=4)).date()
     sorted_support = sorted(
@@ -112,13 +118,13 @@ def sequence_itinerary(
         event
         for event in sorted_support
         if event.end_at is not None and event.end_at >= event.start_at
-        and event.end_at + buffer <= anchor.start_at
+        and event.end_at + buffer_between(event, anchor) <= anchor.start_at
     ]
     post_candidates = [
         event
         for event in sorted_support
         if anchor.end_at is not None and anchor.end_at >= anchor.start_at
-        and event.start_at >= anchor.end_at + buffer
+        and event.start_at >= anchor.end_at + buffer_between(anchor, event)
     ]
 
     pre_event = pre_candidates[-1] if pre_candidates else None
@@ -133,7 +139,7 @@ def sequence_itinerary(
         )
 
     stops.append(
-        _build_stop(kind="main_event", event=anchor, travel_buffer_minutes_before=30 if pre_event else 0)
+        _build_stop(kind="main_event", event=anchor, travel_buffer_minutes_before=int(buffer_between(pre_event, anchor).total_seconds() // 60) if pre_event else 0)
     )
 
     if post_event is not None:
@@ -141,7 +147,7 @@ def sequence_itinerary(
             _build_stop(
                 kind="after_event",
                 event=post_event,
-                travel_buffer_minutes_before=30,
+                travel_buffer_minutes_before=int(buffer_between(anchor, post_event).total_seconds() // 60),
             )
         )
 

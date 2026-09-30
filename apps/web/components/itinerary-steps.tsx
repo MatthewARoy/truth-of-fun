@@ -76,9 +76,10 @@ export function ItinerarySteps({ stops, showDayPerStop = false }: Props) {
     <ol className="space-y-3">
       {stops.map((stop, index) => (
         <li key={`${stop.event_id}-${index}`} className="space-y-2">
-          {stop.travel_buffer_minutes_before > 0 && index > 0 && (
+          {stop.travel_buffer_minutes_before > 0 && (
             <p className="pl-11 text-xs text-slate-500">
-              ↓ leave ~{stop.travel_buffer_minutes_before} min ahead
+              {stop.leave_by ? `↓ Leave by ~${formatLocalTime(stop.leave_by)}` : `↓ Allow ~${stop.travel_buffer_minutes_before} min`}
+              {stop.travel_estimate === false && " · default allowance; coordinates unverified"}
             </p>
           )}
 
@@ -112,6 +113,8 @@ export function ItinerarySteps({ stops, showDayPerStop = false }: Props) {
 
                 {/* break-words: scraped titles run long and must not scroll the page sideways. */}
                 <h3 className="break-words font-semibold leading-snug">{stop.title}</h3>
+                {stop.provenance === "planner" && <p className="text-xs text-amber-200">Added by the planner</p>}
+                {stop.timing_warning && <p className="text-xs text-amber-200">Timing overlap: leave before the previous stop ends</p>}
 
                 {(stop.venue_name || stop.address) && (
                   <p className="break-words text-sm text-slate-400">

@@ -50,6 +50,7 @@ const SHARED_ITINERARY = {
       venue_name: "The Chapel",
       external_url: "https://tickets.example/julien-baker",
       travel_buffer_minutes_before: 30,
+      leave_by: "2026-08-09T02:30:00Z",
       address: "777 Valencia St, San Francisco, CA",
       lat: 37.7599,
       lng: -122.4214,
@@ -86,7 +87,7 @@ test("shared itinerary renders every stop with its map links", async ({ page }) 
 
   await expect(page.getByText("Julien Baker at The Chapel")).toBeVisible();
   await expect(page.getByText(/777 Valencia St/)).toBeVisible();
-  await expect(page.getByText(/leave ~30 min ahead/i)).toBeVisible();
+  await expect(page.getByText(/Leave by ~7:30 PM/i)).toBeVisible();
 
   // Directions and parking are the links you need while standing outside.
   const secondStop = stops.nth(1);
@@ -134,7 +135,7 @@ test("building stays private until explicit publishing, which omits the prompt a
   });
   await buildPlan(page);
   expect(posted).toHaveLength(0);
-  await expect(page.getByText(/Anyone with the link can read this event plan/)).toBeVisible();
+  await expect(page.getByText(/Anyone with the link can read this plan, including your starting point and any stops you added/)).toBeVisible();
   await expect(page.getByText(/Your original request stays private and is not included/)).toBeVisible();
   await expect(page.getByLabel("Public link expires after")).toHaveValue("14");
   await page.getByPlaceholder(/plan a date in the Mission/).fill("A different private Sunday request");
@@ -385,4 +386,26 @@ test("owner links change from active to expired while the page stays open", asyn
   await expect(page.getByRole("button", { name: "Copy link", exact: true })).toHaveCount(0);
   await expect(page.getByRole("link", { name: SUMMARY.title, exact: true })).toHaveCount(0);
   expect(listCalls).toBe(initialCalls);
+});
+
+test("owner can omit a private starting point from the public link", async ({ page }) => {
+  await signIn(page);
+  await page.route(`${API_BASE}/concierge/itinerary`, route => route.fulfill({ json: { ...SHARED_ITINERARY, origin: { name: "Private home", lat: 37.76, lng: -122.5 }, travel_mode: "walking" } }));
+  const posted: Record<string, unknown>[] = [];
+  await page.route(`${API_BASE}/concierge/itinerary/share`, route => {
+    posted.push(route.request().postDataJSON());
+    return route.fulfill({ json: { ...SHARED_ITINERARY, origin: null, travel_mode: "walking" } });
+  });
+  await page.goto("/planner");
+  await page.getByPlaceholder(/plan a date in the Mission/).fill("Private outing");
+  await page.getByRole("button", { name: "Build itinerary", exact: true }).click();
+  const includeOrigin = page.getByRole("checkbox", { name: "Include starting point in the public link" });
+  await expect(includeOrigin).toBeChecked();
+  await includeOrigin.uncheck();
+  await page.getByRole("button", { name: "Create public link", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Public link created", exact: true })).toBeDisabled();
+  expect(posted).toHaveLength(1);
+  expect(posted[0]).not.toHaveProperty("origin");
+  expect(posted[0].travel_mode).toBe("walking");
+  expect(JSON.stringify(posted[0])).not.toContain("Private home");
 });
