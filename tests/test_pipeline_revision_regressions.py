@@ -172,10 +172,11 @@ async def test_source_aliases_survive_cross_source_merge_and_later_reschedule(da
 
 
 @pytest.mark.anyio
-async def test_catalog_contributions_survive_owner_revision_and_alias_replay(database):
+@pytest.mark.parametrize("alias_source,alias_id", [("meetup","meetup-123"),("19hz","19hz-profile-url")])
+async def test_catalog_contributions_survive_owner_revision_and_alias_replay(database,alias_source,alias_id):
     service = DataPipelineService(vibe_tagger=NoTags())
     owner = payload(performers=["Original Artist"], genres=["Rock"])
-    alias = payload(source_name="19hz", source_event_id="19hz-123", source_tier=2, genres=["House"])
+    alias = payload(source_name=alias_source, source_event_id=alias_id, source_tier=2, genres=["House"])
     with Session(database) as session:
         await service.process_raw_events(session=session, raw_events=[owner, alias])
         saved = session.exec(select(Event)).one()
@@ -191,6 +192,11 @@ async def test_catalog_contributions_survive_owner_revision_and_alias_replay(dat
         summary = await service.process_raw_events(session=session, raw_events=[alias])
         assert summary["updated"] == 0 and summary["skipped"] == 1
         assert set(session.get(Event,event_id).genres) == {"Pop", "House"}
+        if alias_source == "meetup":
+            assert session.get(EventSourceRecord,(alias_source,alias_id)).catalog_facts["genres"] == ["House"]
+            changed = {**alias,"genres":["Techno"]}
+            await service.process_raw_events(session=session, raw_events=[changed])
+            assert set(session.get(Event,event_id).genres) == {"Pop", "Techno"}
 
 
 @pytest.mark.anyio

@@ -83,7 +83,7 @@ def test_category_filter_matches_legacy_display_and_dedicated_genre(isolated_eve
     from fastapi.testclient import TestClient
     from app.main import app
     session = isolated_events_session
-    for title, categories, genres in [("Legacy", ["Rock", "Undefined"], []), ("New", ["Music"], ["Rock"])]:
+    for title, categories, genres in [("Legacy", ["Rock", "Undefined"], []), ("New", ["Music"], ["Rock"]), ("Unrelated comedy", ["Comedy"], [])]:
         session.add(Event(title=title, start_at=datetime.now(timezone.utc)+timedelta(days=2), source_name="test",
                           source_tier=1, categories=categories, genres=genres, location="POINT(-122.4 37.76)"))
     session.flush()
@@ -158,6 +158,8 @@ def test_category_migration_preserves_rows_and_restores_originals():
                 # Deletion cascades retire an obsolete backup before any ID reuse.
                 connection.execute(text("DELETE FROM events WHERE id=3"))
                 assert connection.execute(text("SELECT count(*) FROM event_category_backup_20260929")).scalar_one() == 1
+                # Downgrade explicitly restores the pre-upgrade snapshot on backed-up rows.
+                connection.execute(text("UPDATE events SET genres='[\"Post-upgrade Jazz\"]' WHERE id=1"))
                 module.downgrade()
                 restored = connection.execute(text("SELECT * FROM events ORDER BY id")).mappings().all()
                 assert restored[:2] == original[:2]
