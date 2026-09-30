@@ -1,3 +1,4 @@
+import math
 import json
 import logging
 import os
@@ -321,8 +322,18 @@ class TicketmasterSource(BaseSource):
             timezone_name=timezone_name,
         )
 
-        price_ranges = event.get("priceRanges", [])
-        primary_price = price_ranges[0] if price_ranges and isinstance(price_ranges[0], dict) else {}
+        price_ranges = event.get("priceRanges")
+        price_ranges = price_ranges if isinstance(price_ranges, list) else []
+        def usable_price(item):
+            if not isinstance(item, dict) or isinstance(item.get("min"), bool):
+                return False
+            try:
+                value = float(item["min"])
+                return math.isfinite(value) and value >= 0
+            except (KeyError, TypeError, ValueError, OverflowError):
+                return False
+        # A malformed earlier range must not discard later published prices.
+        primary_price = next((item for item in price_ranges if usable_price(item)), {})
 
         tags = self._extract_tags(event)
         categories = self._extract_categories(event)
@@ -341,6 +352,9 @@ class TicketmasterSource(BaseSource):
             "raw_address": raw_address,
             "location": f"POINT({longitude} {latitude})",
             "categories": categories,
+            "genres": self._classification_labels(event, ("genre", "subGenre")),
+            "performers": list(dict.fromkeys(item["name"].strip() for item in event.get("_embedded", {}).get("attractions", [])
+                if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"].strip())),
             "tags": tags,
             "price": primary_price.get("min"),
             "currency": primary_price.get("currency"),
@@ -349,17 +363,22 @@ class TicketmasterSource(BaseSource):
         }
 
     def _extract_categories(self, event: dict[str, Any]) -> list[str]:
-        categories: list[str] = []
+        from app.services.catalog_taxonomy_v1 import categories_v1
+        return categories_v1(self._classification_labels(event, ("segment", "genre", "subGenre", "type", "subType")))
+
+    @staticmethod
+    def _classification_labels(event: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
+        labels = []
         for item in event.get("classifications", []):
             if not isinstance(item, dict):
                 continue
-            for key in ("segment", "genre", "subGenre", "type", "subType"):
-                value = item.get(key, {})
-                if isinstance(value, dict):
-                    name = value.get("name")
-                    if isinstance(name, str) and name and name not in categories:
-                        categories.append(name)
-        return categories
+            for key in keys:
+                value = item.get(key)
+                name = value.get("name") if isinstance(value, dict) else None
+                if isinstance(name, str) and name.strip() and name.strip().lower() not in {"undefined", "other", "miscellaneous"}:
+                    if name.strip() not in labels:
+                        labels.append(name.strip())
+        return labels
 
     def _extract_tags(self, event: dict[str, Any]) -> list[str]:
         """Ticketmaster exposes no vibe data, so contribute none.

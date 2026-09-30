@@ -24,6 +24,7 @@ from app.models.itinerary import SavedItinerary
 from app.models.user import User
 from app.models.user_signal import UserSignal
 from app.services.categories import canonical_category
+from app.services.catalog_taxonomy_v1 import categories_v1
 from app.services.planning import PlanningPlace, SearchArea, TravelMode, UserStop, resolve_search_area, travel_minutes
 from app.services.concierge import (
     anchor_hour_range,
@@ -39,7 +40,7 @@ from app.services.itinerary import (
 )
 from app.services.recommender import RecommenderService, ScoredEvent
 from app.services.social import generate_share_token, is_valid_share_token
-from app.services.tags import VIBE_VOCABULARY, resolve_vibe_tag, stored_forms_for
+from app.services.tags import VIBE_VOCABULARY, canonical_vibe_tags, resolve_vibe_tag, stored_forms_for
 from app.services.user_profile import UserProfileService
 
 router = APIRouter(tags=["discovery"])
@@ -60,6 +61,8 @@ class EventResponse(BaseModel):
     venue_name: str | None
     tags: list[str]
     categories: list[str]
+    performers: list[str] = Field(default_factory=list)
+    genres: list[str] = Field(default_factory=list)
     image_url: str | None
     price: float | None
     currency: str | None
@@ -316,8 +319,9 @@ def _serialize_event(event: Event, *, people_interested: int = 0) -> EventRespon
         end_at=event.end_at,
         external_url=event.external_url,
         venue_name=event.venue_name,
-        tags=list(event.tags or []),
-        categories=list(event.categories or []),
+        tags=canonical_vibe_tags(event.tags or []),
+        categories=categories_v1(event.categories),
+        performers=event.performers or [], genres=event.genres or [],
         image_url=event.image_url,
         price=float(event.price) if event.price is not None else None,
         currency=event.currency,
@@ -590,7 +594,8 @@ def search_events(
 
     if q:
         stmt = stmt.where(
-            text("search_vector @@ plainto_tsquery('english', :q)").bindparams(q=q)
+            or_(text("search_vector @@ plainto_tsquery('english', :q)").bindparams(q=q),
+                text("to_tsvector('english', performers::text) @@ plainto_tsquery('english', :performer_q)").bindparams(performer_q=q))
         )
 
     if not include_past:

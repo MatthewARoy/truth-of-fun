@@ -174,6 +174,7 @@ function EventCardContent({ event, showRecommendationFields, folderOptions = [],
           </span>
         ) : null}
         <h3 title={event.title} className="line-clamp-2 break-words text-lg font-semibold">{event.title}</h3>
+            {event.performers?.length ? <p className="line-clamp-1 text-xs text-slate-400" title={event.performers.join(", ")}>With {event.performers.join(", ")}</p> : null}
         <p className="text-sm text-slate-300">
           {notice ? "Originally " : null}
           {startLabel} at {event.venue_name || "Unknown venue"}

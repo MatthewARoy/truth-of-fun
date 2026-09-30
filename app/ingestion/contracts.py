@@ -94,6 +94,8 @@ class CanonicalEvent(BaseModel):
     description: str | None = None
     category_tags: list[str] = Field(default_factory=list)
     vibe_tags: list[str] = Field(default_factory=list)
+    performers: list[str] = Field(default_factory=list)
+    genres: list[str] = Field(default_factory=list)
     status: Literal["scheduled", "cancelled", "postponed", "unknown"] = "scheduled"
     timezone: str = "America/Los_Angeles"
     start_time: datetime
@@ -132,6 +134,8 @@ class CanonicalEvent(BaseModel):
             "location": location,
             "categories": self.category_tags,
             "tags": self.vibe_tags,
+            "performers": self.performers,
+            "genres": self.genres,
             "price": self.offers.price_min,
             "currency": self.offers.currency,
             "image_url": str(self.image_url) if self.image_url else None,

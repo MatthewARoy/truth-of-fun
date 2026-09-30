@@ -1,0 +1,13 @@
+# Catalog categories, performers and price evidence
+
+For #9 and #10, categories now contain only known canonical activity buckets. Source genres map to their parent buckets and retain their published labels in `genres`; performer/attraction names live in `performers`. Unknown, Undefined and age/cost strings do not become categories or vibes. API serialization filters legacy junk, and keyword search includes performer names. Cards show a separate published lineup rather than artist vibe chips. No performer identity is guessed from historical tag strings.
+
+Migration 006 adds empty performer/genre arrays without changing existing facts. Migration 007 maps historical categories using the frozen v1 taxonomy, preserves known music genres and keeps originals in a rollback table. Downgrade restores changed surviving rows; deletion cascades remove obsolete backups. New rows are not overwritten by the rollback. Future category mappings require a new version. This is a prepared backfill, tested on disposable PostgreSQL only. Applying it to an existing catalog and refreshing source metadata remain separate release steps.
+
+Published source-owner lineup revisions replace prior nonempty lineup/genre facts; omitted arrays retain known facts. Non-owner enrichment unions facts within the existing source authority rules. Legacy unknown tags are filtered at API and recommender boundaries; the existing canonical-tag backfill remains a separately authorized operation.
+
+For #19, Ticketmaster now skips malformed or incomplete price ranges and accepts the first usable nonnegative finite published minimum. Currency is absent when price is unknown. Existing 19hz, SFStation and Funcheap price parsing and Eventbrite unknown-price handling are retained. Luma list fixtures publish no cost, so no price is invented. No fresh authenticated provider response or ingestion was run.
+
+The September 29 read-only local upcoming cohort contained 712 events: 19hz 268 (147 priced, 2 explicitly free), Ticketmaster 438 (1 priced), Eventbrite 6 (0 priced). Thus 148/712 had a price; the issue's older 99 percent-null snapshot is not current evidence. Local stored rows cannot establish what the provider currently publishes. Upstream price availability and population still require an authorized source refresh; #19 remains open for that verification.
+
+Validation covers junk categories/vibes, published performers, genre separation, lineup revision and unknown-field preservation, performer-only PostgreSQL search, price range edge cases, and additive/backfill migration upgrade/downgrade. No deployment, existing-database migration, live ingestion or paid provider activation is included.

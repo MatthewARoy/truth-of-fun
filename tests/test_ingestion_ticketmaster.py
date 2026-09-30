@@ -67,6 +67,9 @@ def test_ticketmaster_mapping_to_canonical_event_payload() -> None:
     assert "Music" in mapped["categories"]
     # Performer names are not vibes; they must not pollute the tag space.
     assert mapped["tags"] == []
+    assert mapped["performers"] == ["Headliner Artist"]
+    assert mapped["genres"] == ["Rock", "Alternative"]
+    assert mapped["categories"] == ["Music"]
     assert mapped["status"] == "scheduled"
 
 
@@ -345,3 +348,18 @@ async def test_usage_counts_each_http_retry(monkeypatch):
     assert [r["last_status"] for r in reports] == [429, 503, 200]
     assert all(r["calls"] == 1 for r in reports)
     assert "private" not in str(reports)
+
+
+@pytest.mark.parametrize("ranges,expected", [([{"currency":"USD"},{"min":"45.00","currency":"USD"}], "45.00"),
+    ([{"min":-10,"currency":"USD"},{"min":20,"currency":"USD"}],20),
+    (None,None),([{"min":float("nan"),"currency":"USD"}],None)])
+def test_published_price_survives_invalid_earlier_ranges(ranges,expected):
+    source = TicketmasterSource(api_key="fixture-key")
+    event = {"name":"Published show", "dates":{"start":{"dateTime":"2026-10-02T03:00:00Z"}},
+        "_embedded":{"venues":[{"location":{"latitude":"37.76","longitude":"-122.4"}}]}, "priceRanges":ranges,
+        "classifications":[{"segment":{"name":"Undefined"},"genre":{"name":"Rock"},"subGenre":{"name":"Undefined"}}]}
+    mapped = source._map_ticketmaster_event(event)
+    assert mapped["price"] == expected
+    assert mapped["currency"] == ("USD" if expected is not None else None)
+    assert mapped["categories"] == ["Music"]
+    assert mapped["genres"] == ["Rock"]

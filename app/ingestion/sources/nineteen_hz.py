@@ -122,6 +122,7 @@ class NineteenHzSource(InputAgentSource):
                 price_text=cost_text or None,
             ),
             category_tags=genres,
+            genres=genres,
             vibe_tags=[],
         )
 
