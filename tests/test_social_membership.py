@@ -70,6 +70,8 @@ def _build_client() -> Generator[TestClient, None, None]:
                     location BLOB,
                     categories JSON NOT NULL DEFAULT '[]',
                     tags JSON NOT NULL DEFAULT '[]',
+                    performers JSON NOT NULL DEFAULT '[]',
+                    genres JSON NOT NULL DEFAULT '[]',
                     price NUMERIC,
                     currency VARCHAR,
                     image_url VARCHAR,
