@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "expectations": [
+    {
+      "checked_at": "2026-09-30T01:42:00+00:00",
+      "coverage_sources": [
+        "funcheap_sf",
+        "sfstation",
+        "dothebay",
+        "eventbrite"
+      ],
+      "venue_aliases": [
+        "Yerba Buena Gardens"
+      ],
+      "admission_note": "Admission-free outdoor program; consult the official page for RSVP and access details.",
+      "key": "african-arts",
+      "series": "Yerba Buena Gardens Festival",
+      "title_aliases": [
+        "African Arts Festival"
+      ],
+      "expected_date": "2026-10-03",
+      "evidence_url": "https://ybgfestival.org/event/african-arts-festival-2026/"
+    },
+    {
+      "checked_at": "2026-09-30T01:42:00+00:00",
+      "coverage_sources": [
+        "funcheap_sf",
+        "sfstation",
+        "dothebay",
+        "eventbrite"
+      ],
+      "venue_aliases": [
+        "Yerba Buena Gardens"
+      ],
+      "admission_note": "Admission-free outdoor program; consult the official page for RSVP and access details.",
+      "key": "quinteto-latino",
+      "series": "Yerba Buena Gardens Festival",
+      "title_aliases": [
+        "Quinteto Latino"
+      ],
+      "expected_date": "2026-10-08",
+      "evidence_url": "https://ybgfestival.org/event/quinteto-latino-2026/"
+    },
+    {
+      "checked_at": "2026-09-30T01:42:00+00:00",
+      "coverage_sources": [
+        "funcheap_sf",
+        "sfstation",
+        "dothebay",
+        "eventbrite"
+      ],
+      "venue_aliases": [
+        "Yerba Buena Gardens"
+      ],
+      "admission_note": "Admission-free outdoor program; consult the official page for RSVP and access details.",
+      "key": "halloween-hoopla",
+      "series": "Yerba Buena Gardens Festival",
+      "title_aliases": [
+        "Halloween Hoopla"
+      ],
+      "expected_date": "2026-10-31",
+      "evidence_url": "https://ybgfestival.org/event/halloween-hoopla-2026/"
+    },
+    {
+      "checked_at": "2026-09-30T01:42:00+00:00",
+      "coverage_sources": [
+        "funcheap_sf",
+        "sfstation",
+        "dothebay",
+        "eventbrite"
+      ],
+      "venue_aliases": [
+        "Japantown"
+      ],
+      "admission_note": "Future dates announced; admission conditions for 2027 need verification.",
+      "key": "nihonmachi-2027",
+      "series": "Nihonmachi Street Fair",
+      "title_aliases": [
+        "Nihonmachi Street Fair"
+      ],
+      "expected_date": "2027-08-07",
+      "evidence_url": "https://www.nihonmachistreetfair.org/"
+    },
+    {
+      "checked_at": "2026-09-30T01:42:00+00:00",
+      "coverage_sources": [
+        "funcheap_sf",
+        "sfstation",
+        "dothebay",
+        "eventbrite"
+      ],
+      "venue_aliases": [
+        "Golden Gate Park"
+      ],
+      "admission_note": "Season reference only; no future dated occurrence invented.",
+      "key": "ggp-band-season",
+      "series": "Golden Gate Park Band",
+      "title_aliases": [
+        "Golden Gate Park Band"
+      ],
+      "expected_date": null,
+      "season_start": "2026-04-01",
+      "season_end": "2026-09-30",
+      "evidence_url": "https://goldengateparkband.org/"
+    }
+  ]
+}
