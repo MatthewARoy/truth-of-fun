@@ -184,3 +184,32 @@ test.describe("event times for a traveler", () => {
     await expect(page.getByText(/Sat, Oct 3 · 11:00 PM/)).toBeVisible();
   });
 });
+
+test("Explore reports total matches, ends pagination, and fits long titles without shifting actions", async ({ page }) => {
+  const longTitle = "Entanglement: " + "Afriqua, Agonis, Carlos Souffront, Christina Chatfield, ".repeat(8);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.route(`${API}/events**`, async (route) => {
+    const offset = Number(new URL(route.request().url()).searchParams.get("offset"));
+    return route.fulfill({
+      headers: { "X-Total-Count": "21", "Access-Control-Expose-Headers": "X-Total-Count" },
+      json: offset === 0 ? Array.from({ length: 20 }, (_, i) => event(i, i === 0 ? longTitle : `Event ${i}`)) : [event(20)],
+    });
+  });
+  await page.goto("/explore");
+  await expect(page).toHaveTitle("Explore | Truth of Fun");
+  await expect(page.getByText("20 of 21 events", { exact: true })).toBeVisible();
+  const title = page.getByRole("heading", { name: longTitle });
+  await expect(title).toHaveAttribute("title", longTitle);
+  const titleBox = await title.boundingBox();
+  const lineHeight = await title.evaluate((element) => Number.parseFloat(getComputedStyle(element).lineHeight));
+  expect(titleBox!.height).toBeLessThanOrEqual(2 * lineHeight + 1);
+  const actions = page.getByRole("button", { name: "Mark viewed", exact: true });
+  const first = await actions.nth(0).boundingBox();
+  const second = await actions.nth(1).boundingBox();
+  expect(Math.abs(first!.y - second!.y)).toBeLessThan(1);
+  await page.getByRole("button", { name: "Load more", exact: true }).click();
+  await expect(page.getByText("21 of 21 events", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Load more", exact: true })).toHaveCount(0);
+  await page.goto("/planner");
+  await expect(page).toHaveTitle("Planner | Truth of Fun");
+});

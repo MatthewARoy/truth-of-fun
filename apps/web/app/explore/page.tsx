@@ -51,7 +51,7 @@ export default function ExplorePage() {
     location_preset: (locationPreset || undefined) as EventsQuery["location_preset"],
     category: activeCategory || undefined,
   }), [appliedSearch, timePreset, locationPreset, activeCategory]);
-  const { events, loading, error, hasMore, loadMore } = useEventSearch(query);
+  const { events, loading, error, total, hasMore, loadMore } = useEventSearch(query);
 
   function handleSearch(e: React.FormEvent) {
     e.preventDefault();
@@ -154,7 +154,9 @@ export default function ExplorePage() {
         <p className="text-sm text-slate-500">
           {loading && events.length === 0
             ? "Loading events..."
-            : `${displayed.length} event${displayed.length !== 1 ? "s" : ""}`}
+            : total === null
+              ? `${displayed.length.toLocaleString()} events loaded`
+              : `${displayed.length.toLocaleString()} of ${total.toLocaleString()} events`}
         </p>
         <div className="flex gap-1 rounded-ui border border-slate-800 bg-slate-900 p-1">
           <button
@@ -189,7 +191,7 @@ export default function ExplorePage() {
         </InlineNotice>
       ) : null}
       {loading && events.length === 0 ? (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid items-stretch gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 6 }).map((_, i) => (
             <Card key={i} className="space-y-3">
               <Skeleton className="h-5 w-3/4" />
@@ -206,7 +208,7 @@ export default function ExplorePage() {
         />
       ) : (
         <>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid items-stretch gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {displayed.map((event) => (
               <EventCard key={event.id} event={event} />
             ))}

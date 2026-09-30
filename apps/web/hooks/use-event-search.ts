@@ -12,7 +12,7 @@ export function useEventSearch(query: EventsQuery) {
   const active = useRef<AbortController | null>(null);
   const [state, setState] = useState({
     key, events: [] as EventResponse[], nextOffset: 0,
-    hasMore: false, loading: true, error: null as string | null,
+    total: null as number | null, hasMore: false, loading: true, error: null as string | null,
   });
 
   const fetchPage = useCallback(async (offset: number) => {
@@ -21,7 +21,7 @@ export function useEventSearch(query: EventsQuery) {
     active.current = controller;
     setState((previous) => ({
       ...previous, key, loading: true, error: null,
-      ...(offset === 0 ? { events: [], nextOffset: 0, hasMore: false } : {}),
+      ...(offset === 0 ? { events: [], nextOffset: 0, total: null, hasMore: false } : {}),
     }));
     try {
       const page = await apiClient.getEventsPage(
@@ -32,7 +32,7 @@ export function useEventSearch(query: EventsQuery) {
       setState((previous) => ({
         key,
         events: offset === 0 ? page.events : [...previous.events, ...page.events],
-        nextOffset,
+        nextOffset, total: page.total,
         hasMore: page.total === null ? page.events.length === PAGE_SIZE : nextOffset < page.total,
         loading: false, error: null,
       }));
@@ -52,7 +52,7 @@ export function useEventSearch(query: EventsQuery) {
 
   // Hide the prior query immediately, before its effect cleanup runs.
   const current = state.key === key ? state : {
-    key, events: [], nextOffset: 0, hasMore: false, loading: true, error: null,
+    key, events: [], nextOffset: 0, total: null, hasMore: false, loading: true, error: null,
   };
   return { ...current, loadMore: () => {
     if (!current.loading) void fetchPage(current.nextOffset);
