@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Protocol
 
 import anthropic
@@ -12,6 +13,12 @@ from app.services.tags import VIBE_VOCABULARY, canonical_vibe_tags
 class VibeTagger(Protocol):
     async def generate_vibe_tags(self, description: str | None) -> list[str]:
         """Generate 3-5 vibe tags for an event description."""
+
+
+@dataclass(frozen=True)
+class VibeTagResult:
+    tags: list[str]
+    succeeded: bool
 
 
 class ClaudeVibeTagger:
@@ -35,9 +42,14 @@ class ClaudeVibeTagger:
         return f"{self._model}:{self.PROMPT_VERSION}:{','.join(sorted(VIBE_VOCABULARY))}"
 
     async def generate_vibe_tags(self, description: str | None) -> list[str]:
-        self.last_call_succeeded = False
+        result = await self.classify(description)
+        self.last_call_succeeded = result.succeeded
+        return result.tags
+
+    async def classify(self, description: str | None) -> VibeTagResult:
+        """Per-call outcome, safe to use concurrently without a shared success flag."""
         if self._client is None or not description or not description.strip():
-            return []
+            return VibeTagResult([], False)
 
         # An unconstrained prompt free-associates and the vocabulary explodes:
         # tags that appear once carry no ranking signal, and the profiles in
@@ -60,12 +72,11 @@ class ClaudeVibeTagger:
                 system="You generate concise vibe tags for events.",
             )
         except Exception:
-            return []
+            return VibeTagResult([], False)
 
         content = response.content[0].text if response.content else ""
         tags = self._normalize_tags(content)
-        self.last_call_succeeded = True
-        return tags
+        return VibeTagResult(tags, True)
 
     def _normalize_tags(self, raw_content: str | None) -> list[str]:
         if not raw_content:

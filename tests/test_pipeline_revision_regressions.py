@@ -394,3 +394,67 @@ async def test_alias_revision_cannot_take_ownership_and_restore_unavailable_even
             restored["start_at"] += timedelta(days=120)
         await service.process_raw_events(session=session, raw_events=[restored])
         assert session.exec(select(Event)).one().status == "scheduled"
+
+
+@pytest.mark.anyio
+async def test_parallel_classification_coalesces_descriptions_and_is_bounded(database):
+    from app.services.vibe_tagger import VibeTagResult
+    class ParallelTags:
+        cache_identity = 'immutable-outcome-v1'
+        def __init__(self):
+            self.active = self.peak = 0
+            self.calls = []
+        async def classify(self, description):
+            self.calls.append(description)
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            await asyncio.sleep(0.01)
+            self.active -= 1
+            return VibeTagResult(['#social'], not description.endswith('failed'))
+    tagger = ParallelTags()
+    batch = [payload(source_event_id=f'tm-{i}',venue_name=f'Venue {i}',
+        description=('classification failed' if i == 1 else f'social event {i % 5}')) for i in range(14)]
+    service = DataPipelineService(vibe_tagger=tagger,tagging_concurrency=3,max_tagging_calls_per_run=4)
+    with Session(database) as session:
+        result = await service.process_raw_events(session=session,raw_events=batch)
+        assert result['tagging_calls'] == 4
+        assert result['inserted'] == 14
+        assert tagger.peak == 3
+        assert len(tagger.calls) == len(set(tagger.calls)) == 4
+        assert len(session.exec(select(VibeTagCache)).all()) == 3
+    before = len(tagger.calls)
+    with Session(database) as session:
+        await service.process_raw_events(session=session,raw_events=batch)
+    # Three successful classifications are reused; only the failed and
+    # previously budget-deferred descriptions are attempted on replay.
+    assert len(tagger.calls) - before == 3
+
+
+@pytest.mark.anyio
+async def test_late_failure_preserves_prior_chunks_and_replay_is_idempotent(database):
+    service = DataPipelineService(vibe_tagger=CountingTags(),commit_every=2)
+    batch = [payload(source_event_id=f'durable-{i}',venue_name=f'Venue {i}') for i in range(5)]
+    original = service._remember_source_records
+    count = 0
+    def fail_late(session,event,incoming):
+        nonlocal count
+        count += 1
+        if count == 4:
+            raise RuntimeError('late chunk fixture failure')
+        original(session,event,incoming)
+    service._remember_source_records = fail_late
+    with Session(database) as session:
+        with pytest.raises(RuntimeError,match='late chunk'):
+            await service.process_raw_events(session=session,raw_events=batch)
+        session.rollback()
+    with Session(database) as session:
+        assert len(session.exec(select(Event)).all()) == 2
+        assert len(session.exec(select(EventSourceRecord)).all()) == 2
+    replay = CountingTags()
+    with Session(database) as session:
+        result = await DataPipelineService(vibe_tagger=replay,commit_every=2).process_raw_events(session=session,raw_events=batch)
+        assert result['inserted'] == 3
+        assert result['skipped'] == 2
+        assert len(session.exec(select(Event)).all()) == 5
+        assert len(session.exec(select(EventSourceRecord)).all()) == 5
+        assert replay.calls == []
