@@ -8,7 +8,7 @@ In the JSON shapes below, values are field types (`int`, `float`, `string`, `boo
 
 | Tier | How | Applies to |
 |---|---|---|
-| None | — | `/health*`, `/auth/*`, `GET /events`, `POST /concierge/itinerary`, `POST /concierge/itinerary/share`, `GET /shared/folders/{token}`, `GET /shared/itineraries/{token}` |
+| None | — | `/health*`, `/auth/*`, `GET /events`, `POST /concierge/itinerary`, `GET /shared/folders/{token}`, `GET /shared/itineraries/{token}` |
 | User bearer JWT | `Authorization: Bearer <token>` from `/auth/register` or `/auth/login` (HS256, expires per `JWT_EXPIRE_MINUTES`) | `/users/me/*`, `/recommendations`, all `/folders*` except the public share view |
 | Internal AAIM JWT | Scoped service JWT (HS256 shared secret or OIDC/JWKS, per `AAIM_JWT_*` / `AAIM_OIDC_*` settings) | `/internal/secrets/*` |
 
@@ -260,20 +260,23 @@ Response:
 
 ### POST /concierge/itinerary
 
-Auth: none required; presented PATs require valid events:read delegation (stale user JWTs retain anonymous fallback). Parses a natural-language query into an intent/time window, picks an anchor event (source tier ≤ 2), and sequences nearby support events (tier ≥ 3, within 0.5 mi) into an itinerary. `itinerary` is empty (and `anchor_event_id` null) when no anchor matches.
+Auth: none required; presented PATs require valid events:read delegation (stale user JWTs retain anonymous fallback). Parses a natural-language query into an intent/time window, picks an anchor event (source tier ≤ 2), and sequences nearby support events (tier ≥ 3, within 0.5 mi) into an itinerary. `anchor_event_id` is null when no anchor matches; supplied planner-authored stops still appear.
 
 `intent` is one of `date_night`, `out_of_town_guests`, `bar_crawl`, `active_day`, `general_night_out`. An `active_day` request (gyms, workout classes, climbing, yoga, run clubs, etc.) sets `category_focus: "Fitness"` and restricts anchor selection to that category.
 
-`limit` is accepted but has no effect. An itinerary is at most three stops by construction, so the field never sized the response; it only ever truncated the candidate pools, which decided the anchor and the post-anchor stop by start time before ranking and sequencing ran.
+`limit` is accepted but has no effect. An itinerary has at most three event stops plus ten explicitly supplied planner stops, so the field never sized the response; it only ever truncated the candidate pools, which decided the anchor and the post-anchor stop by start time before ranking and sequencing ran.
 
-New stops use `before_event`, `main_event`, and `after_event`; existing shared snapshots retain their old labels. All candidates must be scheduled. Sequencing stays within one outing night and requires a published predecessor end plus a 30-minute travel buffer. Unknown or estimated timing reduces the number of stops. Low-confidence anchor coordinates produce a standalone event instead of an asserted nearby route. The fixed buffer is not a live travel-time estimate.
+New stops use `before_event`, `main_event`, and `after_event`; existing shared snapshots retain their old labels. All candidates must be scheduled. Sequencing stays within one outing night and requires a published predecessor end plus an approximate per-leg, per-mode travel allowance. Unknown or estimated timing reduces the number of stops. Low-confidence anchor coordinates produce a standalone event instead of an asserted nearby route. Untrusted/missing coordinate pairs use a 30-minute fallback; neither estimate is live routing, traffic or transit data.
 
 Request:
 
 ```json
 {
   "query": "string",
-  "limit": "int (accepted for compatibility; ignored — see below)"
+  "limit": "int (accepted for compatibility; ignored)",
+  "origin": "PlanningPlace | null (optional)",
+  "travel_mode": "driving | walking | bicycling | transit (default driving)",
+  "user_stops": ["UserStop (optional, maximum 10)"]
 }
 ```
 
@@ -285,6 +288,9 @@ Response:
   "timeframe": "string",
   "geography": "string | null",
   "category_focus": "string | null",
+  "resolved_area": "{label, lat, lng, radius_miles} | null",
+  "origin": "PlanningPlace | null",
+  "travel_mode": "string",
   "anchor_event_id": "int | null",
   "title": "string",
   "text": "string",
@@ -294,12 +300,20 @@ Response:
 
 `title` is a subject-line summary (`"Date night in Mission — Sat, Aug 8"`); `text` is the whole plan rendered as pasteable plain text, with times in venue-local time.
 
+`PlanningPlace` holds optional `name` (120 characters), `address` (250), and a complete finite `lat`/`lng` pair within global bounds. At least text or coordinates is required. Coordinates affect anchor ranking; text is sent to Maps without automatic geocoding. No origin routes from the phone by default. All directions honor the selected mode.
+
+`UserStop` holds `kind` (`meeting`, `walk`, `activity`), `title` (160 characters), `place: PlanningPlace`, timezone-aware `start_at`, and optional `end_at >= start_at`. Planner text rejects markup, URLs and control characters. These stops have `provenance: planner`, no event ID or tickets, and visible “Added by the planner” attribution. Requests resolve supported SF area phrases to approximate circles; both anchor and support queries apply that circle and exclude location confidence below 0.7. `resolved_area` exposes the approximation. No matching phrase retains existing query behavior.
+
 `ItineraryStop`:
 
 ```json
 {
   "kind": "string",
-  "event_id": "int",
+  "event_id": "int | null",
+  "provenance": "event | planner",
+  "leave_by": "datetime | null",
+  "travel_estimate": "boolean | null",
+  "timing_warning": "boolean",
   "title": "string",
   "start_at": "datetime",
   "end_at": "datetime | null",
@@ -326,13 +340,15 @@ Response:
 
 Auth: user bearer JWT. Freezes an owned itinerary and returns an expiring public link. Anonymous creation returns `401`; public reading still needs no sign-in. This is an intentional privacy change from the earlier optional-auth contract.
 
-Callers send the selected stops, without the private planning prompt. Event titles, venues, coordinates, and times are re-read from `events`; plan metadata and ordering come from the caller. `422` if `stops` is empty or longer than 20, `404` if any `event_id` is unknown. Creating a link is a separate, explicit publication action; building or copying a plan does not publish it.
+Callers send the selected stops, without the private planning prompt. Event titles, venues, coordinates, and times are re-read from `events`; plan metadata and ordering come from the caller. A stop supplies exactly one `event_id` or a `user_stop` with the above schema. User stops have explicit planner provenance; caller event display overrides remain ignored. Optional `origin` and `travel_mode` are stored in the additive planning_context snapshot field (migration 005). Every origin and planner stop becomes public, and publication UI/tool descriptions disclose this. `422` if `stops` is empty or longer than 20, `404` if any `event_id` is unknown. Creating a link is a separate, explicit publication action; building or copying a plan does not publish it.
 
 Request:
 
 ```json
 {
   "expires_in_days": "int (1–30, default 14)",
+  "origin": "PlanningPlace | null (optional, public)",
+  "travel_mode": "driving | walking | bicycling | transit (default driving)",
   "intent": "string (default \"general_night_out\")",
   "timeframe": "string (default \"upcoming_week\")",
   "geography": "string | null",
@@ -347,7 +363,7 @@ Request:
 }
 ```
 
-`stops` holds 1–20 entries. The legacy `query` input is accepted for compatibility but ignored and not stored on new snapshots. The TypeScript client and MCP sharing tool do not accept it. All sharing and owner-management responses use `Cache-Control: private, no-store`.
+`stops` holds 1–20 entries. Planner entries use `{kind: "meeting" | "walk" | "activity", user_stop: UserStop}` in place of `event_id`. Links and travel allowances are recomputed from the authoritative snapshot; client buffer values cannot fabricate a travel estimate. Legacy snapshots default to driving and no origin. `leave_by` is absent for estimated event times; `timing_warning` signals a leg that requires leaving before the previous stop ends. The legacy `query` input is accepted for compatibility but ignored and not stored on new snapshots. The TypeScript client and MCP sharing tool do not accept it. All sharing and owner-management responses use `Cache-Control: private, no-store`.
 
 Response: `PortableItinerary` (below).
 

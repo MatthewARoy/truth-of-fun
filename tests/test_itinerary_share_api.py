@@ -493,3 +493,49 @@ def test_snapshot_retains_end_time_after_source_event_changes():
         session.add(event)
         session.commit()
         assert client.get(f"/shared/itineraries/{shared['share_token']}").json()['itinerary'][0]['end_at'] == original_end
+
+
+
+def _user_stop(**overrides):
+    base = {"kind":"meeting", "title":"Meet at Java Beach Cafe", "place":{"name":"Java Beach Cafe", "lat":37.760, "lng":-122.50},
+            "start_at":"2026-10-01T17:00:00-07:00", "end_at":"2026-10-01T17:15:00-07:00"}
+    return {**base, **overrides}
+
+
+def test_mixed_share_preserves_planner_provenance_origin_and_mode():
+    with _build_client() as (client, session):
+        _, show_id = _seed_night(session)
+        payload = {"origin":{"name":"Ocean Beach", "lat":37.76,"lng":-122.509}, "travel_mode":"transit",
+            "stops":[{"kind":"meeting", "user_stop":_user_stop()},
+            {"kind":"walk", "user_stop":_user_stop(kind="walk", title="Stroll the coastal trail",start_at="2026-10-01T17:20:00-07:00",end_at=None)},
+            {"kind":"main_event", "event_id":show_id, "title":"Injected event override"}]}
+        response = client.post("/concierge/itinerary/share", json=payload)
+        assert response.status_code == 200, response.text
+        shared = response.json()
+        public = client.get("/shared/itineraries/" + shared["share_token"]).json()
+        assert public["origin"] == shared["origin"]
+        assert public["travel_mode"] == "transit"
+        assert [stop["provenance"] for stop in public["itinerary"]] == ["planner","planner","event"]
+        assert public["itinerary"][0]["event_id"] is None
+        assert public["itinerary"][0]["links"]["tickets_url"] is None
+        assert public["itinerary"][2]["title"] == "Julien Baker at The Chapel"
+        assert all("travelmode=transit" in stop["links"]["directions_url"] for stop in public["itinerary"])
+        assert "Added by the planner" in public["text"]
+        assert "Leave by ~" in public["text"]
+        saved = session.exec(select(SavedItinerary)).one()
+        assert saved.query == ""
+        assert saved.planning_context["travel_mode"] == "transit"
+
+
+@pytest.mark.parametrize("bad", ["<script>alert(1)</script>","https://evil.example", "www.evil.example", "javascript:alert(1)", "x"*10000, "safe\nInjected line", "hidden\u202eoverride"])
+def test_hostile_user_stop_cannot_be_shared(bad):
+    with _build_client() as (client, session):
+        response = client.post("/concierge/itinerary/share", json={"stops":[{"kind":"meeting", "user_stop":_user_stop(title=bad)}]})
+        assert response.status_code == 422
+        assert session.exec(select(SavedItinerary)).all() == []
+
+
+@pytest.mark.parametrize("bad_place", [{"name":"<img src=x>"}, {"address":"https://evil.example"}, {"lat":37.7}, {"lat":999,"lng":-122}])
+def test_invalid_place_rejected(bad_place):
+    with _build_client() as (client, session):
+        assert client.post("/concierge/itinerary/share", json={"stops":[{"kind":"meeting", "user_stop":_user_stop(place=bad_place)}]}).status_code == 422

@@ -98,7 +98,8 @@ def _limit_of(limiter: SlidingWindowLimiter, limit: int) -> Generator[None, None
 
 def test_concierge_returns_429_past_the_cap() -> None:
     with _build_client() as client, _limit_of(get_llm_limiter(), 2):
-        payload = {"query": "date night in the Mission Saturday"}
+        # This SQLite test targets admission, not PostGIS neighborhood filtering.
+        payload = {"query": "date night Saturday"}
         for _ in range(2):
             response = client.post("/concierge/itinerary", json=payload)
             assert response.status_code == 200

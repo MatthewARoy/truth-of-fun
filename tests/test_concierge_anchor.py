@@ -471,3 +471,49 @@ def test_uncertain_anchor_location_does_not_invent_a_nearby_route(isolated_event
     )
     assert response.status_code == 200
     assert [stop["title"] for stop in response.json()["itinerary"]] == ["Unresolved jazz venue"]
+
+
+@pytest.mark.parametrize("query,label", [("date night in the sunset Sunday", "Sunset district"),
+    ("date night near ocean beach Sunday", "Near Ocean Beach"),
+    ("date night on the west side Sunday", "West side of San Francisco")])
+def test_spatial_plan_constrains_anchor_and_support(isolated_events_session, query, label):
+    session = isolated_events_session
+    def row(title, lat, lng, tier=2, confidence=0.9, hour=20):
+        event = Event(title=title, start_at=_next_sunday_at(hour), end_at=_next_sunday_at(hour+1),
+            source_name="test-spatial", source_tier=tier, location=f"POINT({lng} {lat})",
+            location_confidence=confidence, tags=["#date"], venue_name=title)
+        session.add(event)
+        session.flush()
+        return event
+    downtown = row("Downtown anchor",37.79,-122.4)
+    low = row("Untrusted west anchor",37.76,-122.50,confidence=0.3)
+    west = row("West anchor",37.76,-122.50)
+    nearby = row("West support",37.7601,-122.5001,tier=3,hour=18)
+    row("Outside support",37.79,-122.4,tier=3,hour=18)
+    row("Untrusted support",37.7602,-122.50,tier=3,confidence=0.45,hour=22)
+    session.expire_all()
+    response = TestClient(app).post("/concierge/itinerary", json={"query":query})
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["resolved_area"]["label"] == label
+    assert data["anchor_event_id"] == west.id
+    assert {stop["event_id"] for stop in data["itinerary"]} == {west.id, nearby.id}
+    assert downtown.id != low.id
+
+
+def test_origin_changes_equal_anchor_ranking_and_routes(isolated_events_session):
+    session = isolated_events_session
+    for name, lng in [("Downtown",-122.40),("West",-122.50)]:
+        session.add(Event(title=name, start_at=_next_sunday_at(20), source_name="test-origin", source_tier=2,
+            location=f"POINT({lng} 37.76)", location_confidence=0.9, venue_name=name, raw_address="San Francisco",
+            created_at=_next_sunday_at(8)))
+    session.flush()
+    session.expire_all()
+    response = TestClient(app).post("/concierge/itinerary", json={"query":"date night in San Francisco Sunday",
+        "origin":{"name":"Ocean Beach", "lat":37.76, "lng":-122.50}, "travel_mode":"walking"})
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["itinerary"][0]["title"] == "West"
+    assert data["resolved_area"] is None
+    assert "origin=37.76%2C-122.5" in data["itinerary"][0]["links"]["directions_url"]
+    assert "travelmode=walking" in data["itinerary"][0]["links"]["directions_url"]

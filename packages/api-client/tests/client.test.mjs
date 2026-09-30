@@ -126,3 +126,12 @@ test("revoking a share handles empty 204 responses and never retries a failed de
   await assert.rejects(client().revokeItinerary("token/part"), { status: 503 });
   assert.equal(calls, 2);
 });
+
+test("mixed-stop publication preserves explicitly public origin/mode and excludes private query", async () => {
+  const stop = { kind: "meeting", user_stop: { kind: "meeting", title: "Meet here", place: { name: "Ocean Beach" }, start_at: "2026-10-01T17:00:00-07:00" } };
+  globalThis.fetch = async (_url, init) => {
+    assert.deepEqual(JSON.parse(init.body), { stops: [stop], origin: { name: "Ocean Beach" }, travel_mode: "walking" });
+    return new Response("{}");
+  };
+  await client().shareItinerary({ query: "private", stops: [stop], origin: { name: "Ocean Beach" }, travel_mode: "walking" });
+});

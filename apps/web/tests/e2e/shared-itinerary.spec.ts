@@ -50,6 +50,7 @@ const SHARED_ITINERARY = {
       venue_name: "The Chapel",
       external_url: "https://tickets.example/julien-baker",
       travel_buffer_minutes_before: 30,
+      leave_by: "2026-08-09T02:30:00Z",
       address: "777 Valencia St, San Francisco, CA",
       lat: 37.7599,
       lng: -122.4214,
@@ -86,7 +87,7 @@ test("shared itinerary renders every stop with its map links", async ({ page }) 
 
   await expect(page.getByText("Julien Baker at The Chapel")).toBeVisible();
   await expect(page.getByText(/777 Valencia St/)).toBeVisible();
-  await expect(page.getByText(/leave ~30 min ahead/i)).toBeVisible();
+  await expect(page.getByText(/Leave by ~7:30 PM/i)).toBeVisible();
 
   // Directions and parking are the links you need while standing outside.
   const secondStop = stops.nth(1);

@@ -160,3 +160,30 @@ test("scoped PAT is forwarded by the read-only profile tool and scope denial is 
   assert.equal(refused.isError, true);
   assert.match(refused.content[0].text, /scopes, expiry, and revocation/);
 });
+
+test("mixed planner stops require consent, preserve origin/mode, and reject hostile text", async (t) => {
+  const { client, requests } = await setup(t);
+  const meeting = { kind: "meeting", user_stop: { kind: "meeting", title: "Meet at Java Beach Cafe", place: { name: "Ocean Beach", lat: 37.76, lng: -122.5 }, start_at: "2026-10-01T17:00:00-07:00" } };
+  const args = { publish_publicly: true, stops: [meeting, ...stops], origin: { name: "Ocean Beach" }, travel_mode: "walking" };
+  assert.notEqual((await client.callTool({ name: "share_itinerary", arguments: args })).isError, true);
+  const sent = JSON.parse(requests[0].body);
+  assert.equal(sent.origin.name, "Ocean Beach");
+  assert.equal(sent.travel_mode, "walking");
+  assert.equal(sent.stops[0].user_stop.title, "Meet at Java Beach Cafe");
+  assert.equal(sent.anchor_event_id, 42);
+  for (const title of ["<img src=x>", "https://evil.example", "bad\nline", "x".repeat(10000)]) {
+    const result = await client.callTool({ name: "share_itinerary", arguments: { ...args, stops: [{ ...meeting, user_stop: { ...meeting.user_stop, title } }] } });
+    assert.equal(result.isError, true);
+  }
+  assert.equal((await client.callTool({ name: "share_itinerary", arguments: { ...args, publish_publicly: false } })).isError, true);
+  assert.equal(requests.length, 1);
+});
+
+test("private planning forwards origin, mode and author stops without publishing", async (t) => {
+  const { client, requests } = await setup(t, { respond: () => new Response(JSON.stringify({ itinerary: [] })) });
+  const args = { query: "date night", origin: { name: "Ocean Beach", lat: 37.76, lng: -122.5 }, travel_mode: "walking", user_stops: [{ kind: "walk", title: "Coastal trail", place: { name: "Ocean Beach" }, start_at: "2026-10-01T17:00:00-07:00" }] };
+  assert.notEqual((await client.callTool({ name: "build_itinerary", arguments: args })).isError, true);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "https://stub.invalid/concierge/itinerary");
+  assert.deepEqual(JSON.parse(requests[0].body), { ...args, limit: 25 });
+});

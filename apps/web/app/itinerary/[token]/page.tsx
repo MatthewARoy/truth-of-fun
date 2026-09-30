@@ -81,6 +81,7 @@ function SharedItinerary({ token }: { token: string }) {
         <>
           <header className="space-y-1">
             <h1 className="text-xl font-semibold">{itinerary.title}</h1>
+            {itinerary.origin && <p className="text-sm text-slate-400">Starting point: {itinerary.origin.name || itinerary.origin.address || `${itinerary.origin.lat}, ${itinerary.origin.lng}`} · {itinerary.travel_mode ?? "driving"}</p>}
             <p className="text-sm text-slate-400">
               Public link expires {formatLocalDay(itinerary.expires_at)} at {formatLocalTime(itinerary.expires_at)} Pacific time.
             </p>

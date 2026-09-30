@@ -210,7 +210,7 @@ def test_text_rendering_carries_every_link_and_the_share_url() -> None:
     assert "1. 8:00 PM · Main event" in text
     assert "Julien Baker" in text
     assert "The Chapel — 777 Valencia St, San Francisco, CA" in text
-    assert "Leave ~30 min ahead" in text
+    assert "Leave by ~7:30 PM (30 min travel allowance)" in text
     assert "Tickets: https://tix.example/1" in text
     assert "Parking: https://www.google.com/maps/search/parking/" in text
     assert "Food nearby: https://www.google.com/maps/search/restaurants/" in text
