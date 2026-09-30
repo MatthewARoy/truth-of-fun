@@ -217,3 +217,23 @@ def test_snapshot_row_cap_is_failure_instead_of_truncated_missing_evidence():
         def execute(self,*args):return Result()
     with pytest.raises(ValueError,match="10000"):
         read_public_snapshot(Connection(),now=NOW,horizon_days=180)
+
+
+def test_previous_sf_day_success_uses_its_own_conservative_boundary():
+    health = fresh_health()
+    for snapshot in health.values():
+        snapshot["last_run_at"] = snapshot["last_success_at"] = NOW-timedelta(hours=20)
+    item = expectation(expected_date=date(2026,10,7),checked_at=NOW-timedelta(hours=21))
+    result = evaluate(item,health=health)
+    assert result["status"] == "outside_source_horizon"
+    assert result["outside_source_horizon"] == ["funcheap_sf","sfstation"]
+    assert result["stale_sources"] == []
+
+
+def test_reachable_stale_path_precedes_other_paths_outside_horizon():
+    health = fresh_health()
+    health["funcheap_sf"]["status"] = "partial"
+    result = evaluate(expectation(expected_date=date(2026,10,6)),health=health)
+    assert result["status"] == "corpus_stale"
+    assert result["stale_sources"] == ["funcheap_sf"]
+    assert result["outside_source_horizon"] == ["sfstation"]
