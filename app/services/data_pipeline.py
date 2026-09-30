@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -10,7 +11,7 @@ from typing import Any
 from Levenshtein import ratio as levenshtein_ratio
 from rapidfuzz import fuzz
 from sqlalchemy import or_
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError
 from sqlmodel import Session, select
 
 from app.core.localtime import LOCAL_TZ
@@ -24,14 +25,14 @@ from app.services.geocoding import (
     worth_writing,
 )
 from app.services.tags import canonical_vibe_tags
-from app.services.vibe_tagger import ClaudeVibeTagger, VibeTagger
+from app.services.vibe_tagger import ClaudeVibeTagger, VibeTagger, VibeTagResult
 
 logger = logging.getLogger(__name__)
 
 # Column widths from app/models/event.py. Sources are third-party and their
 # field lengths are not ours to control — 19hz, for instance, uses the event
 # URL as its identifier, and those carry Instagram tracking parameters well
-# past 255 characters. Because the whole cycle commits in one transaction, a
+# past 255 characters. Before chunk commits, a
 # single over-long value used to abort ingestion for *every* source, discarding
 # a run's worth of events from all eleven. Clamping at the normalization
 # boundary keeps one bad record from costing the entire cycle.
@@ -68,6 +69,8 @@ class DataPipelineService:
         vibe_tagger: VibeTagger | None = None,
         geocoder: VenueGeocoder | None = None,
         max_tagging_calls_per_run: int = 200,
+        tagging_concurrency: int = 4,
+        commit_every: int = 100,
     ) -> None:
         self._vibe_tagger = vibe_tagger or ClaudeVibeTagger()
         # No geocoder is the default: the pipeline then behaves exactly as it
@@ -76,6 +79,9 @@ class DataPipelineService:
         self._geocoder = geocoder
         self._max_tagging_calls_per_run = max(0, max_tagging_calls_per_run)
         self._tagging_calls = 0
+        self._tagging_concurrency = max(1, min(8, tagging_concurrency))
+        self._commit_every = max(1, commit_every)
+        self._prepared_tags: dict[str, list[str]] = {}
 
     async def process_raw_events(
         self,
@@ -97,6 +103,11 @@ class DataPipelineService:
             events=observations,
         )
         self._tagging_calls = 0
+        self._prepared_tags = {}
+        await self._prepare_vibe_tags(session, observations)
+        # Derived classifications are independent of authoritative observations.
+        # Preserve successful provider work even if the first event chunk fails.
+        session.commit()
 
         inserted_ids: set[int] = set()
         updated_ids: set[int] = set()
@@ -104,40 +115,26 @@ class DataPipelineService:
 
         # Preserve each source observation until its revision has been checked.
         # Early in-batch merging loses which provider changed which facts.
-        for event_payload in observations:
-            existing = self._find_existing_event(
-                session=session, incoming_event=event_payload
-            )
-            llm_tags = await self._cached_vibe_tags(
-                session, event_payload.get("description")
-            )
-            event_payload["tags"] = canonical_vibe_tags(
-                self._merge_lists(event_payload.get("tags", []), llm_tags)
-            )
-
-            if existing is None:
-                existing = Event(**{
-                    key: value for key, value in event_payload.items()
-                    if key in Event.model_fields
-                })
-                session.add(existing)
-                session.flush()
-                self._remember_source_records(session, existing, event_payload)
-                inserted_ids.add(existing.id)
-                seen_ids.add(existing.id)
+        for index, event_payload in enumerate(observations):
+            # Each new chunk is independent. A failed later chunk rolls back;
+            # source checkpoints remain unchanged until the whole run succeeds.
+            if index and index % self._commit_every == 0:
+                session.commit()
+            try:
+                with session.begin_nested():
+                    event_id, inserted, updated = await self._process_observation(
+                        session, event_payload
+                    )
+                    session.flush()
+            except (ValueError, IntegrityError, DataError):
+                rejected += 1
+                logger.warning("Rejected source observation from %s", event_payload.get("source_name"))
                 continue
-
-            if self.has_significant_new_information(
-                existing_event=existing, incoming_event=event_payload
-            ):
-                merged_for_update = self._merge_event_payloads(
-                    primary=self._event_to_payload(existing),
-                    secondary=event_payload,
-                )
-                self._apply_payload(existing=existing, payload=merged_for_update)
-                updated_ids.add(existing.id)
-            seen_ids.add(existing.id)
-            self._remember_source_records(session, existing, event_payload)
+            seen_ids.add(event_id)
+            if inserted:
+                inserted_ids.add(event_id)
+            if updated:
+                updated_ids.add(event_id)
 
         session.commit()
         return {
@@ -149,16 +146,109 @@ class DataPipelineService:
             "tagging_calls": self._tagging_calls,
         }
 
+    async def _process_observation(self, session: Session, event_payload: dict[str, Any]) -> tuple[int, bool, bool]:
+        existing = self._find_existing_event(
+            session=session, incoming_event=event_payload
+        )
+        llm_tags = await self._cached_vibe_tags(
+            session, event_payload.get("description")
+        )
+        event_payload["tags"] = canonical_vibe_tags(
+            self._merge_lists(event_payload.get("tags", []), llm_tags)
+        )
+
+        if existing is None:
+            existing = Event(**{
+                key: value for key, value in event_payload.items()
+                if key in Event.model_fields
+            })
+            session.add(existing)
+            session.flush()
+            self._remember_source_records(session, existing, event_payload)
+            return existing.id, True, False
+
+        updated = False
+        if self.has_significant_new_information(
+            existing_event=existing, incoming_event=event_payload
+        ):
+            merged_for_update = self._merge_event_payloads(
+                primary=self._event_to_payload(existing),
+                secondary=event_payload,
+            )
+            self._apply_payload(existing=existing, payload=merged_for_update)
+            updated = True
+        self._remember_source_records(session, existing, event_payload)
+        return existing.id, False, updated
+
+    def _tag_key(self, description: str | None) -> tuple[str, str] | None:
+        if not description or not description.strip():
+            return None
+        text = description.strip()[:ClaudeVibeTagger.MAX_DESCRIPTION_CHARS]
+        identity = getattr(self._vibe_tagger, "cache_identity", type(self._vibe_tagger).__qualname__)
+        return hashlib.sha256(f"{identity}\0{text}".encode()).hexdigest(), text
+
+    async def _prepare_vibe_tags(self, session: Session, observations: list[dict[str, Any]]) -> None:
+        """Read/cache/write serially; only immutable provider calls run in parallel."""
+        unique: dict[str, str] = {}
+        for row in observations:
+            identity = self._tag_key(row.get("description"))
+            if identity is not None:
+                key, text = identity
+                unique[key] = text
+        pending: dict[str, str] = {}
+        for key, text in unique.items():
+            cached = session.get(VibeTagCache, key)
+            if cached is not None:
+                self._prepared_tags[key] = list(cached.tags)
+            elif len(pending) < self._max_tagging_calls_per_run:
+                pending[key] = text
+            else:
+                self._prepared_tags[key] = []
+        classify = getattr(self._vibe_tagger, "classify", None)
+        if not callable(classify):
+            # Legacy/injected taggers expose a shared last_call_succeeded flag.
+            # Preserve their serial behavior rather than race that mutable flag.
+            for key, text in pending.items():
+                self._prepared_tags[key] = await self._cached_vibe_tags(session, text)
+            return
+        self._tagging_calls = len(pending)
+        limiter = asyncio.Semaphore(self._tagging_concurrency)
+        async def run(key, text):
+            async with limiter:
+                try:
+                    return key, await classify(text)
+                except Exception:
+                    # One malformed response must not strand sibling tasks or
+                    # prevent unrelated observations from reaching persistence.
+                    return key, VibeTagResult([], False)
+        results = await asyncio.gather(*(run(key, text) for key, text in pending.items()))
+        for key, result in results:
+            tags = canonical_vibe_tags(result.tags)
+            if result.succeeded:
+                tags = self._store_tag_cache(session, key, tags)
+            self._prepared_tags[key] = tags
+
+    def _store_tag_cache(self, session: Session, key: str, tags: list[str]) -> list[str]:
+        try:
+            with session.begin_nested():
+                session.add(VibeTagCache(cache_key=key, tags=tags))
+                session.flush()
+        except IntegrityError:
+            winner = session.get(VibeTagCache, key)
+            if winner is None:
+                raise
+            return list(winner.tags)
+        return tags
+
     async def _cached_vibe_tags(
         self, session: Session, description: str | None
     ) -> list[str]:
-        if not description or not description.strip():
+        identity = self._tag_key(description)
+        if identity is None:
             return []
-        text = description.strip()[:ClaudeVibeTagger.MAX_DESCRIPTION_CHARS]
-        identity = getattr(
-            self._vibe_tagger, "cache_identity", type(self._vibe_tagger).__qualname__
-        )
-        key = hashlib.sha256(f"{identity}\0{text}".encode()).hexdigest()
+        key, text = identity
+        if key in self._prepared_tags:
+            return list(self._prepared_tags[key])
         cached = session.get(VibeTagCache, key)
         if cached is not None:
             return list(cached.tags)
@@ -169,18 +259,7 @@ class DataPipelineService:
         # Provider failures and disabled credentials must be retried next run,
         # rather than fossilized as a successful empty classification.
         if getattr(self._vibe_tagger, "last_call_succeeded", True):
-            # Another worker may have classified the same description while
-            # this one awaited the provider. A cache collision must not roll
-            # back the authoritative event/source writes in the outer transaction.
-            try:
-                with session.begin_nested():
-                    session.add(VibeTagCache(cache_key=key, tags=tags))
-                    session.flush()
-            except IntegrityError:
-                winner = session.get(VibeTagCache, key)
-                if winner is None:
-                    raise
-                return list(winner.tags)
+            tags = self._store_tag_cache(session, key, tags)
         return tags
 
     @staticmethod

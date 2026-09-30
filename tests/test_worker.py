@@ -397,3 +397,25 @@ async def test_disabled_optional_source_does_not_dispatch_per_cycle_alerts(monke
     assert calls == []
     from app.worker import _source_health_state
     assert 'MEETUP_API_TOKEN' in _source_health_state['meetup']['last_error']
+
+
+@pytest.mark.parametrize("outcome", ["success", "rejected", "failure"])
+async def test_checkpoint_admission_requires_complete_persistence(outcome):
+    source = _FakeSource(source_name="alpha", events=[_event("one")])
+    acknowledgments = []
+    source.acknowledge_persisted = lambda: acknowledgments.append(True)
+    class Pipeline(_FakePipeline):
+        async def process_raw_events(self, **kwargs):
+            if outcome == "failure":
+                raise RuntimeError("persistence unavailable")
+            result = await super().process_raw_events(**kwargs)
+            result["rejected"] = int(outcome == "rejected")
+            return result
+    worker = IngestionWorker(source_registry=_FakeRegistry({"alpha": source}),
+        pipeline_service=Pipeline(), session_factory=lambda: nullcontext(object()))
+    if outcome == "failure":
+        with pytest.raises(RuntimeError, match="unavailable"):
+            await worker.run_once()
+    else:
+        await worker.run_once()
+    assert acknowledgments == ([True] if outcome == "success" else [])
