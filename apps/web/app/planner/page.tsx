@@ -41,6 +41,7 @@ function PlannerContent() {
   const [origin, setOrigin] = useState({ name: "", lat: "", lng: "" });
   const [travelMode, setTravelMode] = useState<TravelMode>("driving");
   const [userStops, setUserStops] = useState<StopDraft[]>([]);
+  const [shareOrigin, setShareOrigin] = useState(true);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ConciergeResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -84,7 +85,7 @@ function PlannerContent() {
         timeframe: result.timeframe,
         geography: result.geography,
         anchor_event_id: result.anchor_event_id,
-        origin: result.origin,
+        origin: shareOrigin ? result.origin : undefined,
         travel_mode: result.travel_mode,
         stops: result.itinerary.map((stop) => stop.provenance === "planner" ? ({
           kind: stop.kind,
@@ -197,6 +198,11 @@ function PlannerContent() {
                       Anyone with the link can read this plan, including your starting point and any stops you added, until it expires or you revoke it.
                       Your original request stays private and is not included in the link.
                     </p>
+                    {result.origin && <label className="flex items-center gap-2 text-sm text-slate-300">
+                      <input type="checkbox" checked={shareOrigin} disabled={sharing || Boolean(shared)} onChange={e => setShareOrigin(e.target.checked)} />
+                      Include starting point in the public link
+                    </label>}
+                    <p className="text-xs text-slate-400">Stops you added are public even when the starting point is omitted.</p>
                     <Select
                       label="Public link expires after"
                       value={expiresInDays}

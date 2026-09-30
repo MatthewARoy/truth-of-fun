@@ -84,7 +84,6 @@ class SearchArea(BaseModel):
 
 
 _AREAS = {
-    "near ocean beach": ("Near Ocean Beach", 37.7603, -122.5094, 1.5),
     "ocean beach": ("Near Ocean Beach", 37.7603, -122.5094, 1.5),
     "west side": ("West side of San Francisco", 37.765, -122.483, 2.5),
     "sunset": ("Sunset district", 37.753, -122.486, 1.8),
@@ -101,8 +100,15 @@ def resolve_search_area(query: str) -> SearchArea | None:
     # silently pulling a query into San Francisco.
     if re.search(r"\b(?:oakland|berkeley|san jose|richmond ca|richmond, ca)\b", text):
         return None
-    matches = [(m.start(), -len(phrase), values) for phrase, values in _AREAS.items()
-               if (m := re.search(r"\b" + re.escape(phrase) + r"\b", text))]
+    matches = []
+    for phrase, values in _AREAS.items():
+        # A show title or time-of-day phrase is not a geographic instruction.
+        pattern = r"\b(?:in|near|around|within|on)\s+(?:the\s+)?" + re.escape(phrase) + r"\b(?!\s+(?:bay|story|views)\b)"
+        match = re.search(pattern, text)
+        if match:
+            matches.append((match.start(), -len(phrase), values))
+        elif text.strip() == phrase:
+            matches.append((0, -len(phrase), values))
     if not matches:
         return None
     _, _, (label, lat, lng, radius) = min(matches)

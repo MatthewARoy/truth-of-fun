@@ -387,3 +387,25 @@ test("owner links change from active to expired while the page stays open", asyn
   await expect(page.getByRole("link", { name: SUMMARY.title, exact: true })).toHaveCount(0);
   expect(listCalls).toBe(initialCalls);
 });
+
+test("owner can omit a private starting point from the public link", async ({ page }) => {
+  await signIn(page);
+  await page.route(`${API_BASE}/concierge/itinerary`, route => route.fulfill({ json: { ...SHARED_ITINERARY, origin: { name: "Private home", lat: 37.76, lng: -122.5 }, travel_mode: "walking" } }));
+  const posted: Record<string, unknown>[] = [];
+  await page.route(`${API_BASE}/concierge/itinerary/share`, route => {
+    posted.push(route.request().postDataJSON());
+    return route.fulfill({ json: { ...SHARED_ITINERARY, origin: null, travel_mode: "walking" } });
+  });
+  await page.goto("/planner");
+  await page.getByPlaceholder(/plan a date in the Mission/).fill("Private outing");
+  await page.getByRole("button", { name: "Build itinerary", exact: true }).click();
+  const includeOrigin = page.getByRole("checkbox", { name: "Include starting point in the public link" });
+  await expect(includeOrigin).toBeChecked();
+  await includeOrigin.uncheck();
+  await page.getByRole("button", { name: "Create public link", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Public link created", exact: true })).toBeDisabled();
+  expect(posted).toHaveLength(1);
+  expect(posted[0]).not.toHaveProperty("origin");
+  expect(posted[0].travel_mode).toBe("walking");
+  expect(JSON.stringify(posted[0])).not.toContain("Private home");
+});

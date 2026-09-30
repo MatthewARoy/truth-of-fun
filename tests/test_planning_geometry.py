@@ -48,3 +48,21 @@ def test_user_stop_requires_aware_ordered_times(patch):
     with pytest.raises(ValueError):
         UserStop.model_validate({"kind":"walk", "title":"Coastal trail", "place":{"name":"Ocean Beach"},
             "start_at":"2026-10-01T17:00:00-07:00", **patch})
+
+
+@pytest.mark.parametrize("query", ["West Side Story at the Orpheum Saturday", "dinner with sunset views Saturday", "Warriors game in Mission Bay", "yoga at sunset in the Castro"])
+def test_non_geographic_titles_times_and_qualified_names_do_not_resolve(query):
+    assert resolve_search_area(query) is None
+
+
+def test_unknown_end_warns_when_travel_requires_leaving_before_previous_start():
+    start = datetime(2026,10,2,2,tzinfo=timezone.utc)
+    def stop(title, minutes):
+        from datetime import timedelta
+        return ItineraryStopResponse(kind="meeting", event_id=None, title=title,
+            start_at=start+timedelta(minutes=minutes), end_at=None, venue_name=title,
+            external_url=None, travel_buffer_minutes_before=0, provenance="planner")
+    stops = _portable_stops([(stop("First",0),StopLocation(venue_name="First")),
+        (stop("Next",10),StopLocation(venue_name="Next"))])
+    assert stops[1].timing_warning is True
+    assert "Timing overlap" in render_itinerary_text(title="Conflict",stops=stops)

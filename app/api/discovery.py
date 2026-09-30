@@ -371,6 +371,7 @@ def _portable_stops(
         )
         minutes, estimated = travel_minutes(previous, location, travel_mode) if (previous_stop or origin) else (0, False)
         leave_by = stop.start_at - timedelta(minutes=minutes) if minutes and not stop.start_time_is_estimated else None
+        previous_boundary = (previous_stop.end_at or (previous_stop.start_at if not previous_stop.start_time_is_estimated else None)) if previous_stop else None
         enriched.append(
             stop.model_copy(
                 update={
@@ -381,7 +382,7 @@ def _portable_stops(
                     "travel_buffer_minutes_before": minutes,
                     "travel_estimate": estimated if minutes else None,
                     "leave_by": leave_by,
-                    "timing_warning": bool(leave_by and previous_stop and previous_stop.end_at and _utc_datetime(previous_stop.end_at) > _utc_datetime(leave_by)),
+                    "timing_warning": bool(leave_by and previous_boundary and _utc_datetime(previous_boundary) > _utc_datetime(leave_by)),
                 }
             )
         )
@@ -1057,7 +1058,7 @@ async def build_concierge_itinerary(
             user=user,
             user_vibe_scores=vibe_scores,
             popularity_counts=popularity_counts,
-            apply_diversity=payload.origin is None,
+            apply_diversity=not (payload.origin is not None and payload.origin.lat is not None),
         )
         if payload.origin is not None and payload.origin.lat is not None:
             def origin_score(ranked):
@@ -1121,6 +1122,13 @@ async def build_concierge_itinerary(
         support_events = session.exec(_support_query(radius_miles=0.5)).all()
         if not support_events:
             support_events = session.exec(_support_query(radius_miles=1.0)).all()
+    # Exclude support events that overlap a declared planner interval. An
+    # unknown user duration blocks only its stated instant, never a guessed end.
+    support_events = [event for event in support_events if not any(
+        _utc_datetime(event.start_at) <= (stop.end_at or stop.start_at)
+        and _utc_datetime(event.end_at or event.start_at) >= stop.start_at
+        for stop in payload.user_stops
+    )]
     sequenced = sequence_itinerary(anchor=anchor, support_events=support_events, travel_mode=payload.travel_mode, location_for_event=_event_location)
 
     # The anchor and its support events are already loaded, so locations come
@@ -1314,7 +1322,7 @@ def share_concierge_itinerary(
             }
         )
 
-    first_start = min(datetime.fromisoformat(stop["start_at"]) for stop in snapshot)
+    first_start = min(_utc_datetime(datetime.fromisoformat(stop["start_at"])) for stop in snapshot)
     now = datetime.now(timezone.utc)
     saved = SavedItinerary(
         share_token=generate_share_token(),

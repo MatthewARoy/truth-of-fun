@@ -539,3 +539,38 @@ def test_hostile_user_stop_cannot_be_shared(bad):
 def test_invalid_place_rejected(bad_place):
     with _build_client() as (client, session):
         assert client.post("/concierge/itinerary/share", json={"stops":[{"kind":"meeting", "user_stop":_user_stop(place=bad_place)}]}).status_code == 422
+
+
+@pytest.mark.parametrize("stop", [{"kind":"meeting"}, {"kind":"meeting", "event_id":1, "user_stop":_user_stop()}])
+def test_share_requires_exactly_one_stop_identity(stop):
+    with _build_client() as (client, session):
+        assert client.post("/concierge/itinerary/share",json={"stops":[stop]}).status_code == 422
+        assert session.exec(select(SavedItinerary)).all() == []
+
+
+def test_anchor_identity_and_client_buffer_are_authoritative_on_server():
+    with _build_client() as (client, session):
+        first_id, show_id = _seed_night(session)
+        assert client.post("/concierge/itinerary/share",json={"anchor_event_id":show_id,"stops":[{"kind":"main_event","event_id":first_id}]}).status_code == 422
+        response = client.post("/concierge/itinerary/share",json={"stops":[{"kind":"before_event","event_id":first_id},
+            {"kind":"main_event","event_id":show_id,"travel_buffer_minutes_before":1440}]})
+        assert response.status_code == 200
+        assert response.json()["itinerary"][1]["travel_buffer_minutes_before"] < 30
+
+
+def test_legacy_snapshot_rehydrates_without_new_context_or_provenance():
+    from app.api.discovery import _portable_response
+    with _build_client() as (client, session):
+        _, show_id = _seed_night(session)
+        client.post("/concierge/itinerary/share",json={"stops":[{"kind":"main_event","event_id":show_id}]})
+        saved = session.exec(select(SavedItinerary)).one()
+        saved.planning_context = {}
+        legacy = dict(saved.stops[0])
+        legacy.pop("provenance",None)
+        legacy.pop("lat",None)
+        legacy.pop("lng",None)
+        saved.stops = [legacy]
+        data = _portable_response(saved)
+        assert data.travel_mode == "driving"
+        assert data.origin is None
+        assert data.itinerary[0].provenance == "event"
