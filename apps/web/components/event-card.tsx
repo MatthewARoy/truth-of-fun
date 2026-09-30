@@ -140,7 +140,7 @@ function EventCardContent({ event, showRecommendationFields, folderOptions = [],
   }
 
   return (
-    <Card padding="none" className="flex flex-col">
+    <Card padding="none" className="flex h-full min-w-0 flex-col">
       {event.image_url ? (
         <div className="relative aspect-[16/9] w-full overflow-hidden bg-slate-800">
           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -173,7 +173,7 @@ function EventCardContent({ event, showRecommendationFields, folderOptions = [],
             {notice.label}
           </span>
         ) : null}
-        <h3 className="text-lg font-semibold">{event.title}</h3>
+        <h3 title={event.title} className="line-clamp-2 break-words text-lg font-semibold">{event.title}</h3>
         <p className="text-sm text-slate-300">
           {notice ? "Originally " : null}
           {startLabel} at {event.venue_name || "Unknown venue"}
@@ -212,7 +212,7 @@ function EventCardContent({ event, showRecommendationFields, folderOptions = [],
         ))}
       </div>
 
-      <div className="flex flex-wrap gap-2">
+      <div className="mt-auto flex flex-wrap gap-2">
         <Button
           type="button"
           onClick={() => handleAction("click")}
@@ -220,7 +220,7 @@ function EventCardContent({ event, showRecommendationFields, folderOptions = [],
           size="sm"
           disabled={busyAction !== null}
         >
-          {busyAction === "click" ? "Saving..." : "Viewed"}
+          {busyAction === "click" ? "Recording..." : "Mark viewed"}
         </Button>
         <Button
           type="button"
