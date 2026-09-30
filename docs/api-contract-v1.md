@@ -115,8 +115,10 @@ Returned by `GET /events` (as a list) and extended by `GET /recommendations`.
   "end_at": "datetime | null",
   "external_url": "string | null",
   "venue_name": "string | null",
-  "tags": "string[]",
-  "categories": "string[]",
+  "tags": "string[] (canonical vibes only)",
+  "categories": "string[] (canonical activity buckets only)",
+  "performers": "string[] (published artist/attraction names; empty when unknown)",
+  "genres": "string[] (published source genre labels; empty when unknown)",
   "image_url": "string | null",
   "price": "float | null",
   "currency": "string | null",
@@ -140,7 +142,7 @@ Query parameters:
 
 | Param | Type | Notes |
 |---|---|---|
-| `q` | string | Full-text search query |
+| `q` | string | Full-text search over listing text and published performer names |
 | `lat` | float | Latitude for geo search |
 | `lng` | float | Longitude for geo search |
 | `radius_miles` | float (> 0) | `lat`, `lng`, `radius_miles` must be provided together (`400` otherwise) |

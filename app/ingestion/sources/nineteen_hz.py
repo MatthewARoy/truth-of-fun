@@ -121,7 +121,8 @@ class NineteenHzSource(InputAgentSource):
                 currency="USD" if price_min is not None else None,
                 price_text=cost_text or None,
             ),
-            category_tags=genres,
+            category_tags=["Music", *genres],
+            genres=genres,
             vibe_tags=[],
         )
 

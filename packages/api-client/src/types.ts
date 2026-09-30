@@ -11,6 +11,8 @@ export type EventResponse = {
   venue_name: string | null;
   tags: string[];
   categories: string[];
+  performers?: string[];
+  genres?: string[];
   image_url: string | null;
   price: number | null;
   currency: string | null;

@@ -53,6 +53,8 @@ class Event(SQLModel, table=True):
         default_factory=list,
         sa_column=Column(JSON, nullable=False, server_default="[]"),
     )
+    performers: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False, server_default="[]"))
+    genres: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False, server_default="[]"))
     price: Optional[Decimal] = Field(
         default=None,
         sa_column=Column(Numeric(10, 2), nullable=True),

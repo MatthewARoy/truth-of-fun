@@ -19,6 +19,7 @@ from app.models.event import Event
 from app.models.source_record import EventSourceRecord
 from app.models.vibe_tag_cache import VibeTagCache
 from app.services.categories import infer_categories
+from app.services.catalog_taxonomy_v1 import categories_v1, legacy_genres_v1
 from app.services.geocoding import (
     MIN_SEARCHABLE_LOCATION_CONFIDENCE,
     VenueGeocoder,
@@ -98,6 +99,7 @@ class DataPipelineService:
             payload["_source_hash"] = hashlib.sha256(
                 json.dumps(payload, sort_keys=True, default=str).encode()
             ).hexdigest()
+            payload["_source_hash_version"] = 2
         observations = await self.enrich_locations(
             session=session,
             events=observations,
@@ -168,6 +170,7 @@ class DataPipelineService:
             return existing.id, True, False
 
         updated = False
+        prior_catalog = {field: list(getattr(existing, field) or []) for field in ("performers", "genres")}
         if self.has_significant_new_information(
             existing_event=existing, incoming_event=event_payload
         ):
@@ -177,7 +180,7 @@ class DataPipelineService:
             )
             self._apply_payload(existing=existing, payload=merged_for_update)
             updated = True
-        self._remember_source_records(session, existing, event_payload)
+        updated = self._remember_source_records(session, existing, event_payload, prior_catalog=prior_catalog) or updated
         return existing.id, False, updated
 
     def _tag_key(self, description: str | None) -> tuple[str, str] | None:
@@ -294,19 +297,40 @@ class DataPipelineService:
         return records
 
     def _remember_source_records(
-        self, session: Session, event: Event, payload: dict[str, Any]
-    ) -> None:
-        for name, source_id in self._source_records(payload):
+        self, session: Session, event: Event, payload: dict[str, Any], *, prior_catalog: dict | None = None
+    ) -> bool:
+        identities = self._source_records(payload)
+        if not identities:
+            return False
+        prior = prior_catalog or {field: list(getattr(event, field) or []) for field in ("performers", "genres")}
+        old_contribution = {}
+        for name, source_id in identities:
             record = session.get(EventSourceRecord, (name, source_id))
             if record is None:
-                session.add(EventSourceRecord(
+                record = EventSourceRecord(
                     source_name=name, source_event_id=source_id, event_id=event.id,
-                    content_hash=payload.get("_source_hash"),
-                ))
+                )
+                session.add(record)
             elif record.event_id != event.id:
                 raise ValueError("Source identity already belongs to a different event")
-            else:
+            if (name, source_id) == (payload.get("source_name"), payload.get("source_event_id")):
+                old_contribution = dict(record.catalog_facts or {})
+                facts = dict(old_contribution)
+                for field in ("performers", "genres"):
+                    if payload.get(field):
+                        facts[field] = list(payload[field])
+                record.catalog_facts = facts
                 record.content_hash = payload.get("_source_hash")
+                record.hash_version = payload.get("_source_hash_version", 2)
+        records = session.exec(select(EventSourceRecord).where(EventSourceRecord.event_id == event.id)).all()
+        records.sort(key=lambda row: ((row.source_name, row.source_event_id) != (event.source_name, event.source_event_id), row.source_name, row.source_event_id))
+        for field in ("performers", "genres"):
+            # Replace only the re-observed provider's contribution. Retain
+            # other providers and legacy facts whose contributor is unknown.
+            inherited = [label for label in prior[field] if label not in old_contribution.get(field, [])]
+            published = [label for row in records for label in (row.catalog_facts or {}).get(field, [])]
+            setattr(event, field, self._catalog_labels(self._merge_lists(published, inherited)))
+        return any(getattr(event, field) != prior[field] for field in prior)
 
     async def enrich_locations(
         self,
@@ -402,7 +426,7 @@ class DataPipelineService:
             record = session.get(EventSourceRecord, (name, source_id))
             if record is not None:
                 content_hash = incoming_event.get("_source_hash")
-                if content_hash and record.content_hash:
+                if content_hash and record.content_hash and record.hash_version == incoming_event.get("_source_hash_version", 2):
                     incoming_event["_source_unchanged"] = content_hash == record.content_hash
                     incoming_event["_source_known_revision"] = content_hash != record.content_hash
                 event = session.get(Event, record.event_id)
@@ -542,6 +566,10 @@ class DataPipelineService:
             and float(incoming_confidence) > float(existing_confidence) + 0.05
         ):
             return True
+
+        for field in ("performers", "genres"):
+            if set(incoming_event.get(field) or []) - set(existing_payload.get(field) or []):
+                return True
 
         existing_categories = set(existing_payload.get("categories") or [])
         incoming_categories = set(incoming_event.get("categories") or [])
@@ -721,7 +749,7 @@ class DataPipelineService:
     REVISION_FIELDS = (
         "title", "description", "start_at", "end_at", "price", "currency",
         "status", "is_free", "attendee_count", "venue_name", "raw_address",
-        "external_url", "image_url", "organizer_name",
+        "external_url", "image_url", "organizer_name", "performers", "genres",
     )
 
     @classmethod
@@ -821,9 +849,11 @@ class DataPipelineService:
             int(primary.get("source_tier", 99)),
             int(secondary.get("source_tier", 99)),
         )
-        merged["categories"] = self._merge_lists(
+        merged["categories"] = categories_v1(self._merge_lists(
             primary.get("categories", []), secondary.get("categories", [])
-        )
+        ))
+        for field in ("performers", "genres"):
+            merged[field] = self._merge_lists(primary.get(field, []), secondary.get(field, []))
         merged["tags"] = self._merge_lists(
             primary.get("tags", []), secondary.get("tags", [])
         )
@@ -928,6 +958,7 @@ class DataPipelineService:
         if not isinstance(status, str) or not status.strip():
             return None
 
+        price = self._coerce_decimal(event.get("price"))
         return {
             "title": self._clamp(title.strip(), _MAX_TITLE),
             "description": self._normalize_str(event.get("description")),
@@ -948,14 +979,16 @@ class DataPipelineService:
             "raw_address": self._normalize_str(event.get("raw_address")),
             "city": self._normalize_str(event.get("city")),
             "location": location.strip(),
-            "categories": infer_categories(
+            "categories": categories_v1(infer_categories(
                 title=title.strip(),
                 description=self._normalize_str(event.get("description")),
                 existing=self._normalize_list(event.get("categories")),
-            ),
+            )),
+            "performers": self._catalog_labels(event.get("performers")),
+            "genres": self._catalog_labels([*self._normalize_list(event.get("genres")), *legacy_genres_v1(event.get("categories"))]),
             "tags": canonical_vibe_tags(self._normalize_list(event.get("tags"))),
-            "price": self._coerce_decimal(event.get("price")),
-            "currency": self._normalize_currency(event.get("currency")),
+            "price": price,
+            "currency": self._normalize_currency(event.get("currency")) if price is not None else None,
             "image_url": self._clamp(self._normalize_str(event.get("image_url")), _MAX_URL),
             "status": self._clamp(status.strip().lower(), _MAX_STATUS),
             "organizer_name": self._clamp(
@@ -967,6 +1000,9 @@ class DataPipelineService:
             ),
             "is_free": bool(event.get("is_free", False)),
         }
+
+    def _catalog_labels(self, value) -> list[str]:
+        return list(dict.fromkeys(item.strip()[:200] for item in self._normalize_list(value) if item.strip()))[:100]
 
     def _event_to_payload(self, event: Event) -> dict[str, Any]:
         return {
@@ -982,7 +1018,9 @@ class DataPipelineService:
             "venue_name": event.venue_name,
             "raw_address": event.raw_address,
             "location": event.location,
-            "categories": list(event.categories),
+            "categories": categories_v1(event.categories),
+            "performers": list(event.performers or []),
+            "genres": list(event.genres or []),
             "tags": canonical_vibe_tags(list(event.tags)),
             "price": event.price,
             "currency": event.currency,
@@ -1011,6 +1049,8 @@ class DataPipelineService:
         existing.location = payload["location"]
         existing.categories = payload.get("categories", [])
         existing.tags = payload.get("tags", [])
+        existing.performers = payload.get("performers", [])
+        existing.genres = payload.get("genres", [])
         existing.price = payload.get("price")
         existing.currency = payload.get("currency")
         existing.image_url = payload.get("image_url")

@@ -12,7 +12,8 @@ def test_published_genres_are_retained_without_inventing_a_vibe() -> None:
     assert event is not None
     assert event.location.venue_name == "The Midway (San Francisco)"
     assert event.location.city == "San Francisco"
-    assert event.category_tags == ["bass house", "future bass", "dubstep"]
+    assert event.category_tags == ["Music", "bass house", "future bass", "dubstep"]
+    assert event.genres == ["bass house", "future bass", "dubstep"]
     assert event.vibe_tags == []
     assert event.offers.price_min == 25
     assert event.location.location_confidence == 0.9
@@ -179,9 +180,11 @@ def test_missing_city_does_not_guess_genres_and_venue_qualifiers_survive():
         'venue_name': 'Some Venue', 'source_url': 'https://19hz.info/e/fixture'}
     event = source.normalize_raw(raw)
     assert event.location.venue_name == 'Some Venue'
-    assert event.category_tags == []
+    assert event.category_tags == ["Music"]
+    assert event.genres == []
     raw['venue_name'] = 'Some Venue (Main Room) (San Francisco) house, disco'
     event = source.normalize_raw(raw)
     assert event.location.city == 'San Francisco'
     assert event.location.venue_name == 'Some Venue (Main Room) (San Francisco)'
-    assert event.category_tags == ['house', 'disco']
+    assert event.category_tags == ['Music', 'house', 'disco']
+    assert event.genres == ['house', 'disco']
