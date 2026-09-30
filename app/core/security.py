@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import secrets
+import hashlib
+import re
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Callable
 
 import jwt
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlmodel import Session, select
+from sqlalchemy import update
 
 from app.core.config import Settings, get_settings
 from app.core.database import get_session
 from app.models.user import User
+from app.models.agent_token import AgentToken
+from app.core.ratelimit import SlidingWindowLimiter
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -187,6 +193,100 @@ def get_current_user(
             detail="Account is deactivated.",
         )
     return user
+
+
+@dataclass(frozen=True)
+class Actor:
+    user: User
+    kind: str
+    scopes: frozenset[str]
+    token_id: int | None = None
+
+    @property
+    def created_via(self) -> str:
+        return f"agent:{self.token_id}" if self.kind == "agent" else "user"
+
+
+_agent_limiter = SlidingWindowLimiter(name="agent", limit=120, window_seconds=60)
+_PAT = re.compile(r"tof_pat_([0-9a-f]{12})_([A-Za-z0-9_-]{43})", re.ASCII)
+
+
+def get_actor(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(get_session),
+) -> Actor:
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(401, "Missing bearer token.")
+    raw = credentials.credentials
+    if not raw.startswith("tof_pat_"):
+        return Actor(user=get_current_user(credentials, settings, session), kind="user", scopes=frozenset({"*"}))
+    match = _PAT.fullmatch(raw)
+    if match is None:
+        raise HTTPException(401, "Invalid agent token.")
+    token = session.exec(select(AgentToken).where(AgentToken.token_prefix == match[1])).first()
+    if token is None or not secrets.compare_digest(token.token_hash, hashlib.sha256(raw.encode()).hexdigest()):
+        raise HTTPException(401, "Invalid agent token.")
+    now = datetime.now(timezone.utc)
+    expires = token.expires_at if token.expires_at.tzinfo else token.expires_at.replace(tzinfo=timezone.utc)
+    if token.revoked_at is not None or expires <= now:
+        raise HTTPException(401, "Invalid agent token.")
+    user = session.get(User, token.user_id)
+    if user is None or not user.is_active:
+        raise HTTPException(403, "Account is deactivated.")
+    retry_after = _agent_limiter.hit(str(token.id))
+    if retry_after is not None:
+        raise HTTPException(429, "Agent rate limit exceeded.", headers={"Retry-After": str(max(1, int(retry_after + 1)))})
+    # Atomic increment with a second validity check closes a revoke-vs-auth
+    # race. Revocation blocks subsequent admissions; admitted work may finish.
+    admitted = session.execute(update(AgentToken).where(AgentToken.id == token.id,
+        AgentToken.revoked_at.is_(None), AgentToken.expires_at > now).values(
+        request_count=AgentToken.request_count + 1, last_used_at=now).returning(AgentToken.id).execution_options(synchronize_session=False)).scalar_one_or_none()
+    if admitted is None:
+        session.rollback()
+        raise HTTPException(401, "Invalid agent token.")
+    actor = Actor(user=user, kind="agent", scopes=frozenset(token.scopes), token_id=token.id)
+    session.commit()  # Usage admission is durable even if the route later refuses its scope.
+    return actor
+
+
+def require_scope(*scopes: str):
+    def dependency(actor: Actor = Depends(get_actor)) -> Actor:
+        if actor.kind != "user" and not set(scopes).issubset(actor.scopes):
+            raise HTTPException(403, "Missing required scope: " + ", ".join(scopes))
+        return actor
+    return dependency
+
+
+def scoped_user(*scopes: str):
+    def dependency(actor: Actor = Depends(require_scope(*scopes))) -> User:
+        return actor.user
+    return dependency
+
+
+def get_optional_read_actor(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    settings: Settings = Depends(get_settings), session: Session = Depends(get_session),
+) -> Actor | None:
+    if credentials is None:
+        return None
+    if not credentials.credentials.startswith("tof_pat_"):
+        # Public discovery has always tolerated stale browser JWTs. A PAT is
+        # an explicit delegation and must remain strict after revocation.
+        user = get_optional_user(credentials, settings, session)
+        return Actor(user=user, kind="user", scopes=frozenset({"*"})) if user else None
+    actor = get_actor(request, credentials, settings, session)
+    if actor.kind == "agent" and "events:read" not in actor.scopes:
+        raise HTTPException(403, "Missing required scope: events:read")
+    return actor
+
+
+def get_optional_planning_user(actor: Actor | None = Depends(get_optional_read_actor)) -> User | None:
+    # events-only credentials may plan against the public corpus without
+    # gaining access to personal saved/preference signals.
+    return actor.user if actor and (actor.kind == "user" or "profile:read" in actor.scopes) else None
 
 
 def get_optional_user(

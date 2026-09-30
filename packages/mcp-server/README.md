@@ -46,7 +46,7 @@ The API must be running (`make api`). Verify with `make status`.
 | Variable | Required | Notes |
 | --- | --- | --- |
 | `TOF_API_URL` | no | Defaults to `http://127.0.0.1:8000` |
-| `TOF_TOKEN` | no | A JWT from `POST /auth/login`. Enables the authenticated tools. |
+| `TOF_TOKEN` | no | Scoped `tof_pat_...` token recommended; legacy user JWT also supported. |
 | `TOF_EMAIL` / `TOF_PASSWORD` | no | Alternative to `TOF_TOKEN`: exchanged for a JWT once at startup. |
 | `TOF_OPS_TOKEN` | no | Operator token for `get_platform_status`. Without it that one tool reports that the endpoint is gated; every other tool is unaffected. |
 
@@ -54,24 +54,38 @@ Without credentials the read tools still work — the events API is
 unauthenticated. Personalization and anything that writes will return a clear
 "not authorized" message.
 
-### On credentials
+### Connect with a scoped token
 
-The platform has no scoped, individually revocable API tokens yet, so the user
-credential is a JWT or the password that mints one. JWTs expire according to
-the server's JWT settings (7 days by default). That means:
+Sign in to the API as the account owner, then use `POST /users/me/tokens`
+with your user JWT to mint a named token. For read-only MCP personalization:
 
-- `TOF_PASSWORD` puts your actual account password in a config file. Prefer
-  `TOF_TOKEN`, which at least expires.
-- A token today carries full user authority; it cannot be limited to read-only
-  or individually revoked. The platform has no password-change or session-revocation
-  endpoint, and changing a password hash alone would not invalidate an issued JWT.
-- Revoking a public itinerary link withdraws that link; it does not revoke your
-  authentication token.
+```json
+{ "name": "Claude read-only", "scopes": ["events:read", "profile:read"], "expires_in_days": 30 }
+```
 
-Scoped Personal Access Tokens are Workstream A of
-`docs/proposals/2026-07-agentic-platform.md`, and are the intended fix. Until
-they exist, treat this server as something you run against your own account on
-your own machine.
+Copy the returned `tof_pat_<prefix>_<secret>` into `TOF_TOKEN`. The raw secret
+is returned once; the API stores only its SHA-256 hash. `GET /users/me/tokens`
+shows last use, request count, expiry and revocation. `DELETE
+/users/me/tokens/{id}` revokes it. All three management routes require the
+owner's user JWT; agent tokens cannot manage credentials or reach
+`/internal/secrets/*`. This workflow never gives an agent your password.
+
+Supported scopes:
+
+| Scope | Tools / authority |
+| --- | --- |
+| `events:read` | search, event detail, corpus-only itinerary building |
+| `profile:read` | get_my_profile; with events:read, personalized recommendations/planning |
+| `signals:write` | save/feedback (learned signals only, not explicit vibe choices); also requires profile:read because the existing response contains profile state |
+| `plans:read` | list your existing itinerary links |
+
+Public publication/revocation, folder access, onboarding and explicit
+preference replacement retain their user-JWT requirements. Legacy JWT and
+startup login configurations remain compatible for those interactive actions;
+prefer scoped tokens for agent use. Tokens do not grant operator access.
+Agent requests are limited to 120 per minute per API replica, and existing
+per-IP auth/LLM/share caps still apply. Revocation blocks subsequent admissions;
+requests already admitted may finish. Anonymous public browsing remains public.
 
 ## Tools
 
@@ -80,14 +94,15 @@ your own machine.
 | `search_events` | no | Keyword / tag / time / geo search. Returns a page plus total match count. |
 | `get_event` | no | One event with source provenance and first-seen time. |
 | `build_itinerary` | no | Natural language → sequenced itinerary with travel buffers. Not saved. |
-| `share_itinerary` | yes | Publish selected event stops after an explicit request for a public link; requires `publish_publicly: true`. |
-| `list_my_itineraries` | yes | Inspect your published links, expiry dates, and revocation status. |
-| `revoke_itinerary` | yes | Revoke one of your public links when requested. |
+| `share_itinerary` | user JWT | Publish selected event stops after an explicit request for a public link; requires `publish_publicly: true`. |
+| `list_my_itineraries` | plans:read | Inspect your published links, expiry dates, and revocation status. |
+| `revoke_itinerary` | user JWT | Revoke one of your public links when requested. |
 | `get_platform_status` | operator token | Is the platform healthy? Use it to qualify freshness claims. |
-| `get_recommendations` | yes | Personalized ranking with per-event match scores. |
-| `save_event` | yes | Save an event; also feeds the recommender. |
-| `record_feedback` | yes | Record a like or a click. |
-| `list_folders` / `create_folder` / `add_event_to_folder` | yes | Shortlist folders — the shareable output of a planning session. |
+| `get_my_profile` | profile:read | Read preferences, saved IDs and learned weights. |
+| `get_recommendations` | events:read + profile:read | Personalized ranking with per-event match scores. |
+| `save_event` | signals:write + profile:read | Save an event; also feeds the recommender. |
+| `record_feedback` | signals:write + profile:read | Record a like or a click. |
+| `list_folders` / `create_folder` / `add_event_to_folder` | user JWT | Shortlist folders — the shareable output of a planning session. |
 
 ### Honesty rules the tools encode
 

@@ -19,6 +19,7 @@ class UserSignal(SQLModel, table=True):
     signal_type: str = Field(sa_column=Column(String(length=64), nullable=False, index=True))
     vibe_tag: Optional[str] = Field(default=None, sa_column=Column(String(length=128), nullable=True))
     weight: float = Field(sa_column=Column(Float, nullable=False))
+    created_via: str = Field(default="legacy", sa_column=Column(String(64), nullable=False, server_default="legacy"))
     created_at: datetime = Field(
         sa_column=Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     )

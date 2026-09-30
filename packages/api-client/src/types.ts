@@ -264,3 +264,16 @@ export type HealthSummary = {
     newest_event_first_seen_at?: string | null;
   };
 };
+
+
+export type AgentScope = "events:read" | "profile:read" | "signals:write" | "plans:read";
+export type AgentToken = {
+  id: number; name: string; token_prefix: string; scopes: AgentScope[];
+  created_at: string; expires_at: string; revoked_at: string | null;
+  last_used_at: string | null; request_count: number;
+};
+export type MintAgentTokenRequest = { name: string; scopes: AgentScope[]; expires_in_days?: number };
+export type MintAgentTokenResponse = AgentToken & { token: string };
+export type MyProfile = {
+  user_id: number; preferred_vibes: string[]; saved_event_ids: number[]; vibe_scores: Record<string, number>;
+};
