@@ -7,6 +7,8 @@ type Props = {
   children: ReactNode;
   tone?: Tone;
   className?: string;
+  /** Overrides the default live-region role for the tone. */
+  role?: "alert" | "status";
 };
 
 const toneStyles: Record<Tone, string> = {
@@ -18,9 +20,12 @@ const toneStyles: Record<Tone, string> = {
 
 // A div rather than a p: notices carry lists and other block content, which is
 // invalid inside a paragraph and gets reparented by the browser.
-export function InlineNotice({ children, tone = "info", className }: Props) {
+// Errors are announced to screen readers the moment they appear; success
+// messages are announced politely.
+export function InlineNotice({ children, tone = "info", className, role }: Props) {
+  const liveRole = role ?? (tone === "error" ? "alert" : tone === "success" ? "status" : undefined);
   return (
-    <div className={cn("rounded-ui border px-3 py-2 text-sm", toneStyles[tone], className)}>
+    <div role={liveRole} className={cn("rounded-ui border px-3 py-2 text-sm", toneStyles[tone], className)}>
       {children}
     </div>
   );

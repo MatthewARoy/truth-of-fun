@@ -50,26 +50,31 @@ test("failed pagination retries the same offset and ignores unsubmitted search t
 test("an older filter response cannot replace the current results", async ({ page }) => {
   let releaseOld: (() => void) | undefined;
   let oldStarted = false;
+  let sentLegacyPreset = false;
   await page.route(`${API}/events**`, async (route) => {
-    const location = new URL(route.request().url()).searchParams.get("location_preset");
+    const params = new URL(route.request().url()).searchParams;
+    if (params.has("location_preset")) sentLegacyPreset = true;
+    const location = params.get("region");
     if (location === "sf") {
       oldStarted = true;
       await new Promise<void>((resolve) => { releaseOld = resolve; });
       await route.fulfill({ json: [event(1, "Old SF result")] }).catch(() => {});
       return;
     }
-    await route.fulfill({ json: [event(2, location === "oakland" ? "Current Oakland result" : "Initial event")] });
+    await route.fulfill({ json: [event(2, location === "east_bay" ? "Current East Bay result" : "Initial event")] });
   });
   await page.goto("/explore");
   await expect(page.getByRole("heading", { name: "Initial event" })).toBeVisible();
   await page.getByRole("button", { name: "San Francisco", exact: true }).click();
   await expect.poll(() => oldStarted).toBe(true);
-  await page.getByRole("button", { name: "Oakland", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Current Oakland result" })).toBeVisible();
+  await page.getByRole("button", { name: "East Bay", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Current East Bay result" })).toBeVisible();
   releaseOld?.();
   await page.waitForTimeout(100);
   await expect(page.getByRole("heading", { name: "Old SF result" })).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: "Current Oakland result" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Current East Bay result" })).toBeVisible();
+  // The retired keyword preset must no longer be sent by the web app.
+  expect(sentLegacyPreset).toBe(false);
 });
 
 test("folder filter debounces events without rebuilding recommendations or reloading the folder", async ({ page }) => {
@@ -203,7 +208,9 @@ test("Explore reports total matches, ends pagination, and fits long titles witho
   const titleBox = await title.boundingBox();
   const lineHeight = await title.evaluate((element) => Number.parseFloat(getComputedStyle(element).lineHeight));
   expect(titleBox!.height).toBeLessThanOrEqual(2 * lineHeight + 1);
-  const actions = page.getByRole("button", { name: "Mark viewed", exact: true });
+  // The debug-only "Mark viewed" control is gone; views are recorded implicitly.
+  await expect(page.getByRole("button", { name: "Mark viewed" })).toHaveCount(0);
+  const actions = page.getByRole("button", { name: "Save", exact: true });
   const first = await actions.nth(0).boundingBox();
   const second = await actions.nth(1).boundingBox();
   expect(Math.abs(first!.y - second!.y)).toBeLessThan(1);

@@ -29,7 +29,7 @@ export default function AcceptInvitePage() {
 
   return (
     <section className="space-y-4">
-      <h2 className="text-xl font-semibold">Folder invite</h2>
+      <h1 className="text-xl font-semibold">Folder invite</h1>
       {ready && !token ? (
         <InlineNotice tone="info">
           <Link href={`/login?next=${encodeURIComponent(`/invites/${params.token}`)}`} className="underline">

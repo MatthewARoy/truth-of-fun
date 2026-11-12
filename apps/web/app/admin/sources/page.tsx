@@ -17,6 +17,9 @@ const STATUS_CLASSES: Record<SourceHealthEntry["status"], string> = {
   degraded: "border-amber-500/40 bg-amber-500/10 text-amber-200",
   failing: "border-rose-500/40 bg-rose-500/10 text-rose-200",
   unknown: "border-slate-700 bg-slate-800/40 text-slate-400",
+  // Not configured (an optional source without credentials). Deliberately
+  // quiet: it is a choice, not a fault.
+  disabled: "border-slate-800 bg-transparent text-slate-500",
 };
 
 const STATUS_DOT: Record<SourceHealthEntry["status"], string> = {
@@ -24,6 +27,18 @@ const STATUS_DOT: Record<SourceHealthEntry["status"], string> = {
   degraded: "bg-amber-400",
   failing: "bg-rose-400",
   unknown: "bg-slate-500",
+  disabled: "bg-slate-700",
+};
+
+// What a row's last_error is telling the operator, by status: a failure to
+// fix, a warning to look at (zero results, or stopped at the page budget), or
+// just the reason a source is switched off.
+const ERROR_TEXT_CLASSES: Record<SourceHealthEntry["status"], string> = {
+  healthy: "text-slate-400",
+  degraded: "text-amber-300/90",
+  failing: "text-rose-300/90",
+  unknown: "text-slate-400",
+  disabled: "text-slate-500",
 };
 
 // A stale row's status describes its last run, which may be days old. Render it
@@ -41,6 +56,10 @@ const SOURCE_TIER: Record<string, 1 | 2 | 3> = {
   dothebay: 2,
   sfstation: 2,
   minnesotastreet: 2,
+  stanford_events: 2,
+  sjsu_events: 2,
+  oakland_library: 2,
+  san_jose_library: 2,
   reddit: 3,
   eddies_list: 3,
 };
@@ -124,6 +143,9 @@ export default function AdminSourcesPage() {
     {} as Record<SourceHealthEntry["status"], number>
   );
 
+  // Disabled sources are not running by design; they are listed, but never
+  // counted towards (or against) the health of the feed.
+  const disabledCount = counts.disabled ?? 0;
   const totalEvents = sources.reduce((sum, s) => sum + (s.last_event_count ?? 0), 0);
   const workerStalled = summary?.sources.worker_stalled ?? false;
   const problems = summary?.problems ?? [];
@@ -131,19 +153,22 @@ export default function AdminSourcesPage() {
   return (
     <section className="space-y-6">
       <div className="space-y-1">
-        <h2 className="text-xl font-semibold">Source Health</h2>
+        <h1 className="text-xl font-semibold">Source Health</h1>
         <p className="text-sm text-slate-400">
           Status of the {sources.length || "–"} ingestion sources, as of each one&apos;s last run.
           The worker reports per source on every 6-hour cycle. A source flips to{" "}
-          <span className="text-amber-300">degraded</span> after one zero-result run and{" "}
-          <span className="text-rose-300">failing</span> after two, or immediately if its fetch
-          raised.
+          <span className="text-amber-300">degraded</span> after one zero-result run, or when it
+          returned events but stopped at its page budget, and{" "}
+          <span className="text-rose-300">failing</span> after two zero-result runs or immediately
+          if its fetch raised. The note under a status says which.{" "}
+          <span className="text-slate-300">Disabled</span> sources are optional ones with no
+          credentials configured; they are not a problem.
         </p>
       </div>
 
       {locked ? (
         <Card className="space-y-3">
-          <h3 className="font-medium">This page needs an operator token</h3>
+          <h2 className="font-medium">This page needs an operator token</h2>
           <p className="text-sm text-slate-400">
             <code className="rounded bg-slate-900 px-1">/health/sources</code> and{" "}
             <code className="rounded bg-slate-900 px-1">/health/summary</code> report which
@@ -207,7 +232,9 @@ export default function AdminSourcesPage() {
         </InlineNotice>
       ) : summary ? (
         <InlineNotice tone="success">
-          All sources healthy and the corpus is fresh.
+          {disabledCount > 0
+            ? "All enabled sources healthy and the corpus is fresh."
+            : "All sources healthy and the corpus is fresh."}
         </InlineNotice>
       ) : null}
 
@@ -260,6 +287,12 @@ export default function AdminSourcesPage() {
             These counts are from each source&apos;s last completed run, not current state.
           </p>
         ) : null}
+        {disabledCount > 0 ? (
+          <p className="text-xs text-slate-500" data-testid="disabled-sources-note">
+            {disabledCount} optional source{disabledCount === 1 ? " is" : "s are"} disabled (no
+            credentials configured) and not counted above.
+          </p>
+        ) : null}
       </div>
 
       {error ? <InlineNotice tone="error">Error loading source health: {error}</InlineNotice> : null}
@@ -284,22 +317,28 @@ export default function AdminSourcesPage() {
               <tbody className="divide-y divide-slate-800">
                 {sources.map((s) => {
                   const tier = SOURCE_TIER[s.name] ?? 3;
-                  const stale = Boolean(s.is_stale);
+                  const disabled = s.status === "disabled";
+                  // A source that is switched off has no run to go stale.
+                  const stale = Boolean(s.is_stale) && !disabled;
+                  const statusClasses = STATUS_CLASSES[s.status] ?? STATUS_CLASSES.unknown;
+                  const statusDot = STATUS_DOT[s.status] ?? STATUS_DOT.unknown;
                   return (
                     <tr key={s.name} className="align-top hover:bg-slate-900/40">
-                      <td className="px-4 py-3 font-medium text-slate-100">{s.name}</td>
+                      <td className={cn("px-4 py-3 font-medium", disabled ? "text-slate-400" : "text-slate-100")}>
+                        {s.name}
+                      </td>
                       <td className="px-4 py-3 text-slate-400">T{tier}</td>
                       <td className="px-4 py-3">
                         <span
                           className={cn(
                             "inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-medium",
-                            stale ? STALE_CLASSES : STATUS_CLASSES[s.status]
+                            stale ? STALE_CLASSES : statusClasses
                           )}
                         >
                           <span
                             className={cn(
                               "h-1.5 w-1.5 rounded-full",
-                              stale ? "bg-slate-500" : STATUS_DOT[s.status]
+                              stale ? "bg-slate-500" : statusDot
                             )}
                           />
                           {stale ? `${s.status} (stale)` : s.status}
@@ -307,9 +346,17 @@ export default function AdminSourcesPage() {
                             <span className="ml-1 opacity-75">({s.consecutive_zeros}× zero)</span>
                           ) : null}
                         </span>
-                        {/* The exception text is the thing that says what to fix. */}
+                        {/* The note is the thing that says what to fix: the
+                            exception for a failing source, why a degraded one is
+                            degraded (zero results or page budget), or why a
+                            disabled one is off. */}
                         {s.last_error ? (
-                          <p className="mt-1.5 max-w-md break-words font-mono text-xs text-rose-300/90">
+                          <p
+                            className={cn(
+                              "mt-1.5 max-w-md break-words font-mono text-xs",
+                              ERROR_TEXT_CLASSES[s.status] ?? ERROR_TEXT_CLASSES.unknown
+                            )}
+                          >
                             {s.last_error}
                           </p>
                         ) : null}

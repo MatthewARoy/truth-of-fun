@@ -1,7 +1,12 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
+import { pageMetadata } from "@/lib/metadata";
 
-export const metadata: Metadata = { title: "Folders | Truth of Fun" };
+export const metadata: Metadata = pageMetadata({
+  title: "Folders",
+  description: "Your shortlists of saved events.",
+  noindex: true,
+});
 
 export default function Layout({ children }: { children: ReactNode }) {
   return children;

@@ -1,11 +1,37 @@
+import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
+import Link from "next/link";
 import "./globals.css";
+import { SiteFooter } from "@/components/site-footer";
 import { SiteNav } from "@/components/site-nav";
 import { AuthProvider } from "@/lib/auth-context";
+import { SITE_DESCRIPTION, SITE_NAME, SITE_TAGLINE, SITE_URL } from "@/lib/site";
 
-export const metadata = {
-  title: "Truth of Fun",
-  description: "Find something fun to do",
+export const metadata: Metadata = {
+  metadataBase: new URL(SITE_URL),
+  title: {
+    default: `${SITE_NAME} — ${SITE_TAGLINE}`,
+    template: `%s | ${SITE_NAME}`,
+  },
+  description: SITE_DESCRIPTION,
+  applicationName: SITE_NAME,
+  openGraph: {
+    type: "website",
+    siteName: SITE_NAME,
+    locale: "en_US",
+    title: `${SITE_NAME} — ${SITE_TAGLINE}`,
+    description: SITE_DESCRIPTION,
+  },
+  twitter: {
+    card: "summary",
+    title: `${SITE_NAME} — ${SITE_TAGLINE}`,
+    description: SITE_DESCRIPTION,
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#020617",
+  colorScheme: "dark",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
@@ -13,16 +39,27 @@ export default function RootLayout({ children }: { children: ReactNode }) {
     <html lang="en">
       <body>
         <AuthProvider>
-          <main className="page-shell">
+          <div className="page-shell">
+            <a
+              href="#main-content"
+              className="sr-only rounded-ui bg-brand-500 px-3 py-2 text-sm text-white focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-[2000]"
+            >
+              Skip to content
+            </a>
             <header className="space-y-3">
               <div className="space-y-1">
-                <h1 className="text-2xl font-semibold">Truth of Fun</h1>
-                <p className="text-sm text-slate-400">Find something fun to do</p>
+                <Link href="/" className="text-2xl font-semibold tracking-tight text-slate-100 hover:text-white">
+                  {SITE_NAME}
+                </Link>
+                <p className="text-sm text-slate-400">{SITE_TAGLINE}</p>
               </div>
               <SiteNav />
             </header>
-            {children}
-          </main>
+            <main id="main-content" className="flex-1">
+              {children}
+            </main>
+            <SiteFooter />
+          </div>
         </AuthProvider>
       </body>
     </html>

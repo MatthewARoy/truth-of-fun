@@ -34,7 +34,7 @@ export default function SharedFolderPage() {
 
   return (
     <section className="space-y-4">
-      <h2 className="text-xl font-semibold">Shared Folder View</h2>
+      <h1 className="text-xl font-semibold">Shared Folder View</h1>
       {loading ? <InlineNotice>Loading shared folder...</InlineNotice> : null}
       {error ? <InlineNotice tone="error">Error: {error}</InlineNotice> : null}
       {folder ? (

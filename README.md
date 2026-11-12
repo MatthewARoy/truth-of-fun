@@ -4,7 +4,7 @@
 
 Truth of Fun pulls events from ticketing APIs, public calendars, scrapers, and community sources into a single deduplicated feed — and ranks them with a recommender that learns from what users actually do.
 
-The reference deployment is configured for the SF Bay Area (Ticketmaster DMA 382, FuncheapSF, 19hz, DoTheBay, SF Station, Minnesota Street Project, Reddit, Eddie's List newsletter). Sources are modular — drop in agents for other regions by editing `app/ingestion/sources/`.
+The reference deployment covers the nine-county San Francisco Bay Area: Ticketmaster DMA 382, Eventbrite listings for seven Bay Area cities, FuncheapSF, 19hz, DoTheBay, SF Station, Minnesota Street Project, Stern Grove, Luma, Stanford and San José State public calendars, the Oakland and San José public libraries, Reddit, and the Eddie's List newsletter. Every event is assigned a city and a region (San Francisco, East Bay, Peninsula, South Bay, North Bay) so the whole Bay is filterable. Sources are modular — drop in agents for other regions by editing `app/ingestion/sources/`.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 ![Python](https://img.shields.io/badge/python-3.11-blue)
@@ -28,7 +28,7 @@ The hard parts aren't the scrapers. They're:
 
 | Layer | Highlights |
 | --- | --- |
-| **Ingestion** | 11 source connectors (REST, GraphQL, Playwright-stealth, IMAP). Per-source rate limiting. 6-hour scheduled cycle. Canary alerting (zero-result detection vs historic average) with healthy/degraded/failing state machine. Key rotation with Redis quota tracking via AAIM (API-key Acquisition & Inventory Management — the internal key-rotation subsystem; see [Enabling AAIM key rotation](./docs/architecture.md#enabling-aaim-key-rotation)). |
+| **Ingestion** | 16 sources (REST, GraphQL, JSON calendar feeds, Playwright-stealth, IMAP). Per-source rate limiting and fetch budget. 6-hour scheduled cycle under a cross-process lock. Canary alerting (zero-result detection vs historic average) with a healthy/degraded/failing/disabled state machine that survives restarts. Key rotation with Redis quota tracking via AAIM (API-key Acquisition & Inventory Management — the internal key-rotation subsystem; see [Enabling AAIM key rotation](./docs/architecture.md#enabling-aaim-key-rotation)). |
 | **Pipeline** | Schema.org/Event canonical model with PostGIS geometry. Levenshtein title fuzzy match (≥ 85%) inside a 2-hour window. Tier-based source preference. Richer-value merge (longest description, earliest start, latest end, lowest price). Status-severity escalation (`scheduled` → `postponed` → `cancelled` → `past`). |
 | **Intelligence** | Anthropic Claude generates vibe tags from unstructured event descriptions. LLM-driven concierge intent parser (with deterministic keyword fallback) extracts intent + geography + timeframe from natural-language requests like *"date night in the Mission Saturday"*. |
 | **Ranking** | Multi-signal scoring: vibe match (50%) + popularity (25%) + freshness (15%) + diversity (10%). 30-day half-life decay on user behavioral signals. Consecutive-category penalty for spread. |
@@ -43,7 +43,7 @@ The hard parts aren't the scrapers. They're:
 
 ```mermaid
 flowchart LR
-    subgraph Sources["11 sources"]
+    subgraph Sources["16 sources"]
         TM[Ticketmaster<br/>REST]
         EB[Eventbrite<br/>scraper]
         MU[Meetup<br/>GraphQL]
@@ -55,6 +55,8 @@ flowchart LR
         MSP[Minnesota St<br/>httpx]
         RDT[Reddit<br/>JSON API]
         ED[Eddie's List<br/>IMAP]
+        UNI[Stanford · SJSU<br/>Localist JSON]
+        LIB[Oakland · San José<br/>libraries JSON]
     end
 
     Sources -->|raw payloads| Worker[Async ingestion worker<br/>6-hour cycle<br/>canary alerting]
@@ -111,20 +113,21 @@ To pull real data, set `TICKETMASTER_API_KEY` (and optionally `ANTHROPIC_API_KEY
 ## Repository layout
 
 ```
-app/                  FastAPI backend (~7,400 LoC Python)
-  api/                Routers: auth, discovery, social, health, internal_secrets
+app/                  FastAPI backend (~18,000 LoC Python)
+  api/                Routers: auth, account, discovery, social, health, internal_secrets
   services/           recommender, concierge (LLM), itinerary (portable export),
                       data_pipeline (dedupe), vibe_tagger
   ingestion/          Source connectors, base classes, canary metrics
   models/             SQLModel ORM
-  core/               config (with prod guard), database, security
+  core/               config (with prod guard), database, security, rate limits
 alembic/              Database migrations
-apps/web/             Next.js frontend (~2,300 LoC TS)
+apps/web/             Next.js frontend
 packages/api-client/  Shared TypeScript HTTP client + types
 packages/mcp-server/  MCP server exposing the platform to Claude and other agents
 scripts/              seed_demo.py, capture_screenshots.mjs, status.py
 docs/                 Public architecture, contract, and operations docs
-tests/                pytest suite (30 files)
+tests/                pytest suite (~95 files)
+deploy/               Production stack: compose, Caddy edge, env template, backups
 ```
 
 ## Configuration

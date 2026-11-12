@@ -91,7 +91,7 @@ requests already admitted may finish. Anonymous public browsing remains public.
 
 | Tool | Auth | What it does |
 | --- | --- | --- |
-| `search_events` | no | Keyword / tag / time / geo search. Returns a page plus total match count. |
+| `search_events` | no | Keyword / tag / category / time / region / city / free / geo search. Returns a page plus total match count. |
 | `get_event` | no | One event with source provenance and first-seen time. |
 | `build_itinerary` | no | Natural language → sequenced itinerary with travel buffers. Not saved. |
 | `share_itinerary` | user JWT | Publish selected event stops after an explicit request for a public link; requires `publish_publicly: true`. |

@@ -24,8 +24,10 @@ export function useEventSearch(query: EventsQuery) {
       ...(offset === 0 ? { events: [], nextOffset: 0, total: null, hasMore: false } : {}),
     }));
     try {
+      // Rebuilt from the key so the callback depends on the query's value,
+      // not on the identity of an object the caller may recreate each render.
       const page = await apiClient.getEventsPage(
-        { ...query, limit: PAGE_SIZE, offset }, { signal: controller.signal }
+        { ...(JSON.parse(key) as EventsQuery), limit: PAGE_SIZE, offset }, { signal: controller.signal }
       );
       if (controller.signal.aborted) return;
       const nextOffset = offset + page.events.length;
@@ -43,7 +45,7 @@ export function useEventSearch(query: EventsQuery) {
         error: error instanceof Error ? error.message : "Could not load events.",
       }));
     }
-  }, [key, query]);
+  }, [key]);
 
   useEffect(() => {
     void fetchPage(0);

@@ -2,6 +2,11 @@ import type {
   AgentToken, MintAgentTokenRequest, MintAgentTokenResponse, MyProfile,
   AuthRequest,
   AuthResponse,
+  ChangePasswordRequest,
+  DeleteAccountRequest,
+  DetailResponse,
+  PasswordResetConfirmRequest,
+  RegionsResponse,
   ConciergeRequest,
   ConciergeResponse,
   EventDetailResponse,
@@ -43,6 +48,70 @@ export type RequestOptions = {
   timeoutMs?: number;
 };
 
+/** Called when the API rejects the stored credential (HTTP 401). */
+export type UnauthorizedHandler = (error: ApiClientError) => void;
+
+export type ApiClientOptions = {
+  /** See {@link TruthOfFunApiClient.setUnauthorizedHandler}. */
+  onUnauthorized?: UnauthorizedHandler;
+};
+
+/** How a request relates to the stored user credential. */
+type AuthMode =
+  /** Send the token if there is one; a 401 means the session is no longer valid. */
+  | "session"
+  /** Never send the token (sign-in, sign-up, password reset): a 401 here is
+   * a wrong password, not an expired session. */
+  | "anonymous"
+  /** Send the token, but a 401 is the caller's to handle (logging out with an
+   * already-expired token is still a successful logout). */
+  | "silent";
+
+type InternalInit = RequestInit & { auth?: AuthMode };
+
+/** Encode one path segment so an id or token can never alter the route. */
+function seg(value: string | number): string {
+  return encodeURIComponent(String(value));
+}
+
+const LOCATION_PREFIXES = new Set(["body", "query", "path", "header", "cookie"]);
+
+/**
+ * Turn an error payload into one readable sentence.
+ *
+ * FastAPI reports its own errors as `{detail: "..."}`, but request validation
+ * (422) as `{detail: [{loc: ["body", "password"], msg: "...", type: "..."}]}`.
+ * Without flattening, every validation failure reads "Request failed: 422".
+ */
+export function describeErrorPayload(payload: unknown, status: number): string {
+  const fallback = `Request failed: ${status}`;
+  if (typeof payload !== "object" || payload === null || !("detail" in payload)) return fallback;
+  const detail = (payload as { detail?: unknown }).detail;
+  if (typeof detail === "string") return detail.trim() || fallback;
+  if (!Array.isArray(detail)) return fallback;
+  const messages: string[] = [];
+  for (const item of detail) {
+    if (typeof item === "string") {
+      if (item.trim()) messages.push(item.trim());
+      continue;
+    }
+    if (typeof item !== "object" || item === null) continue;
+    const { loc, msg } = item as { loc?: unknown; msg?: unknown };
+    if (typeof msg !== "string" || !msg.trim()) continue;
+    const field = Array.isArray(loc)
+      ? loc
+        .filter((part, index) => !(index === 0 && LOCATION_PREFIXES.has(String(part))))
+        .map(String)
+        .join(".")
+      : "";
+    // Pydantic prefixes custom validator messages with "Value error, ".
+    const text = msg.trim().replace(/^Value error,\s*/i, "");
+    const message = field ? `${field}: ${text}` : text;
+    if (!messages.includes(message)) messages.push(message);
+  }
+  return messages.length > 0 ? messages.join("; ") : fallback;
+}
+
 const TRANSIENT_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 
 function waitForRetry(delayMs: number, signal: AbortSignal): Promise<void> {
@@ -64,9 +133,29 @@ export class TruthOfFunApiClient {
   private readonly baseUrl: string;
   private token: string | null = null;
   private opsToken: string | null = null;
+  private onUnauthorized: UnauthorizedHandler | null = null;
 
-  constructor(baseUrl: string) {
-    this.baseUrl = baseUrl.replace(/\/$/, "");
+  /**
+   * `baseUrl` may be absolute (`https://api.example.com`) or, in a browser,
+   * relative to the page origin (`/api`).
+   */
+  constructor(baseUrl: string, options: ApiClientOptions = {}) {
+    this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.onUnauthorized = options.onUnauthorized ?? null;
+  }
+
+  getBaseUrl(): string {
+    return this.baseUrl;
+  }
+
+  /**
+   * Register a callback for an expired or revoked session: it fires when a
+   * request that carried the stored token comes back 401, as long as that
+   * token is still the stored one. Failed sign-in attempts never fire it.
+   * The request still rejects with the ApiClientError.
+   */
+  setUnauthorizedHandler(handler: UnauthorizedHandler | null) {
+    this.onUnauthorized = handler;
   }
 
   getMyProfile(options: RequestOptions = {}): Promise<MyProfile> {
@@ -83,7 +172,7 @@ export class TruthOfFunApiClient {
   }
 
   revokeAgentToken(id: number): Promise<void> {
-    return this.request<void>(`/users/me/tokens/${id}`, { method: "DELETE" });
+    return this.request<void>(`/users/me/tokens/${seg(id)}`, { method: "DELETE" });
   }
 
   setToken(token: string | null) {
@@ -109,7 +198,7 @@ export class TruthOfFunApiClient {
 
   private async request<T>(
     path: string,
-    init?: RequestInit,
+    init?: InternalInit,
     options?: RequestOptions
   ): Promise<T> {
     const { data } = await this.requestWithResponse<T>(path, init, options);
@@ -122,16 +211,17 @@ export class TruthOfFunApiClient {
    */
   private async requestWithResponse<T>(
     path: string,
-    init?: RequestInit,
+    internalInit?: InternalInit,
     options?: RequestOptions
   ): Promise<{ data: T; response: Response }> {
+    const { auth = "session", ...init } = internalInit ?? {};
     const url = `${this.baseUrl}${path}`;
-    const method = (init?.method || "GET").toUpperCase();
+    const method = (init.method || "GET").toUpperCase();
     const retryLimit = options?.retries ?? 1;
     const retries = method === "GET" && Number.isFinite(retryLimit)
       ? Math.min(3, Math.max(0, Math.floor(retryLimit))) : 0;
     const controller = new AbortController();
-    const callerSignal = options?.signal ?? init?.signal;
+    const callerSignal = options?.signal ?? init.signal;
     const abort = () => controller.abort(callerSignal?.reason);
     if (callerSignal?.aborted) abort();
     else callerSignal?.addEventListener("abort", abort, { once: true });
@@ -140,12 +230,15 @@ export class TruthOfFunApiClient {
       new DOMException("Request timed out. Please try again.", "TimeoutError")
     ), Math.max(0, deadline - Date.now()));
 
+    // Content-Type only accompanies a body: on a bodyless GET it is not a
+    // CORS-safelisted header, so it would force a preflight for every read.
     const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      ...(init?.headers as Record<string, string> || {}),
+      ...(init.body != null ? { "Content-Type": "application/json" } : {}),
+      ...(init.headers as Record<string, string> || {}),
     };
-    if (this.token) {
-      headers["Authorization"] = `Bearer ${this.token}`;
+    const sentToken = auth === "anonymous" ? null : this.token;
+    if (sentToken) {
+      headers["Authorization"] = `Bearer ${sentToken}`;
     }
     if (this.opsToken) {
       headers["X-Ops-Token"] = this.opsToken;
@@ -165,14 +258,17 @@ export class TruthOfFunApiClient {
           const payload = response.status === 204 ? null : await response.json().catch(() => null);
           controller.signal.throwIfAborted();
           if (!response.ok) {
-            const detail =
-              typeof payload === "object" &&
-              payload !== null &&
-              "detail" in payload &&
-              typeof (payload as { detail?: unknown }).detail === "string"
-                ? (payload as { detail: string }).detail
-                : `Request failed: ${response.status}`;
-            throw new ApiClientError(detail, response.status, payload);
+            const failure = new ApiClientError(
+              describeErrorPayload(payload, response.status), response.status, payload
+            );
+            if (
+              response.status === 401 && auth === "session" && sentToken
+              && sentToken === this.token && this.onUnauthorized
+            ) {
+              // A handler that throws must not mask the 401 the caller awaits.
+              try { this.onUnauthorized(failure); } catch { /* ignore */ }
+            }
+            throw failure;
           }
           return { data: payload as T, response };
         } catch (error) {
@@ -204,6 +300,7 @@ export class TruthOfFunApiClient {
     return this.request<AuthResponse>("/auth/register", {
       method: "POST",
       body: JSON.stringify(payload),
+      auth: "anonymous",
     });
   }
 
@@ -211,6 +308,60 @@ export class TruthOfFunApiClient {
     return this.request<AuthResponse>("/auth/login", {
       method: "POST",
       body: JSON.stringify(payload),
+      auth: "anonymous",
+    });
+  }
+
+  /**
+   * Ask for a password-reset link. The API answers 202 with the same neutral
+   * message whether or not the address has an account.
+   */
+  async requestPasswordReset(email: string): Promise<DetailResponse> {
+    return this.request<DetailResponse>("/auth/password-reset/request", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+      auth: "anonymous",
+    });
+  }
+
+  /** Set a new password with an emailed token; answers like a login. */
+  async confirmPasswordReset(payload: PasswordResetConfirmRequest): Promise<AuthResponse> {
+    return this.request<AuthResponse>("/auth/password-reset/confirm", {
+      method: "POST",
+      body: JSON.stringify({ token: payload.token, new_password: payload.new_password }),
+      auth: "anonymous",
+    });
+  }
+
+  /**
+   * Change the signed-in user's password. The response carries a NEW token;
+   * every token issued before it stops working, so store the new one.
+   */
+  async changePassword(payload: ChangePasswordRequest): Promise<AuthResponse> {
+    return this.request<AuthResponse>("/users/me/password", {
+      method: "POST",
+      body: JSON.stringify({
+        current_password: payload.current_password,
+        new_password: payload.new_password,
+      }),
+    });
+  }
+
+  /** Revoke every token issued to the account so far ("sign out everywhere"). */
+  async logoutEverywhere(): Promise<void> {
+    await this.request<void>("/auth/logout", { method: "POST", auth: "silent" });
+  }
+
+  /** Everything the service stores about the signed-in user, as one JSON document. */
+  async exportMyData(options?: RequestOptions): Promise<unknown> {
+    return this.request<unknown>("/users/me/export", { cache: "no-store" }, options);
+  }
+
+  /** Permanently delete the signed-in account. Requires the current password. */
+  async deleteAccount(payload: DeleteAccountRequest): Promise<void> {
+    await this.request<void>("/users/me/delete", {
+      method: "POST",
+      body: JSON.stringify({ password: payload.password }),
     });
   }
 
@@ -247,13 +398,26 @@ export class TruthOfFunApiClient {
     };
   }
 
-  async getEvent(eventId: number): Promise<EventDetailResponse> {
-    return this.request<EventDetailResponse>(`/events/${eventId}`);
+  async getEvent(eventId: number, options?: RequestOptions): Promise<EventDetailResponse> {
+    return this.request<EventDetailResponse>(`/events/${seg(eventId)}`, undefined, options);
+  }
+
+  /**
+   * URL of the public iCalendar download for one event. It is a plain link
+   * target (`<a href>`), not something to fetch through this client.
+   */
+  eventCalendarUrl(eventId: number): string {
+    return `${this.baseUrl}/events/${seg(eventId)}/calendar.ics`;
+  }
+
+  /** The five Bay Area regions with their cities and upcoming-event counts. */
+  async getRegions(options?: RequestOptions): Promise<RegionsResponse> {
+    return this.request<RegionsResponse>("/regions", undefined, options);
   }
 
   async getRecommendations(limit = 25, offset = 0, options?: RequestOptions): Promise<RecommendationResponse[]> {
     return this.request<RecommendationResponse[]>(
-      `/recommendations?limit=${limit}&offset=${offset}`, undefined, options
+      `/recommendations?limit=${seg(limit)}&offset=${seg(offset)}`, undefined, options
     );
   }
 
@@ -312,7 +476,7 @@ export class TruthOfFunApiClient {
 
   async getMyItineraries(limit = 25, offset = 0, options?: RequestOptions): Promise<SharedItinerarySummary[]> {
     return this.request<SharedItinerarySummary[]>(
-      `/users/me/itineraries?limit=${limit}&offset=${offset}`, { cache: "no-store" }, options
+      `/users/me/itineraries?limit=${seg(limit)}&offset=${seg(offset)}`, { cache: "no-store" }, options
     );
   }
 
@@ -343,11 +507,11 @@ export class TruthOfFunApiClient {
   }
 
   async getFolder(folderId: number, options?: RequestOptions): Promise<FolderDetailResponse> {
-    return this.request<FolderDetailResponse>(`/folders/${folderId}`, undefined, options);
+    return this.request<FolderDetailResponse>(`/folders/${seg(folderId)}`, undefined, options);
   }
 
   async addFolderItem(folderId: number, eventId: number): Promise<FolderDetailResponse> {
-    return this.request<FolderDetailResponse>(`/folders/${folderId}/items`, {
+    return this.request<FolderDetailResponse>(`/folders/${seg(folderId)}/items`, {
       method: "POST",
       body: JSON.stringify({ event_id: eventId }),
     });
@@ -358,32 +522,32 @@ export class TruthOfFunApiClient {
     folderItemId: number,
     voteValue: number
   ): Promise<FolderDetailResponse> {
-    return this.request<FolderDetailResponse>(`/folders/${folderId}/votes`, {
+    return this.request<FolderDetailResponse>(`/folders/${seg(folderId)}/votes`, {
       method: "POST",
       body: JSON.stringify({ folder_item_id: folderItemId, vote_value: voteValue }),
     });
   }
 
   async createFolderInvite(folderId: number): Promise<InviteResponse> {
-    return this.request<InviteResponse>(`/folders/${folderId}/invite`, {
+    return this.request<InviteResponse>(`/folders/${seg(folderId)}/invite`, {
       method: "POST",
     });
   }
 
   async revokeFolderInvite(folderId: number, inviteToken: string): Promise<void> {
-    await this.request<void>(`/folders/${folderId}/invites/${inviteToken}`, {
+    await this.request<void>(`/folders/${seg(folderId)}/invites/${seg(inviteToken)}`, {
       method: "DELETE",
     });
   }
 
   async acceptFolderInvite(inviteToken: string): Promise<FolderDetailResponse> {
     return this.request<FolderDetailResponse>(
-      `/folders/invites/${inviteToken}/accept`,
+      `/folders/invites/${seg(inviteToken)}/accept`,
       { method: "POST" }
     );
   }
 
-  async getSharedFolder(token: string): Promise<FolderDetailResponse> {
-    return this.request<FolderDetailResponse>(`/shared/folders/${token}`);
+  async getSharedFolder(token: string, options?: RequestOptions): Promise<FolderDetailResponse> {
+    return this.request<FolderDetailResponse>(`/shared/folders/${seg(token)}`, undefined, options);
   }
 }

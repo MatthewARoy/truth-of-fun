@@ -15,7 +15,7 @@ export default function FoldersPage() {
   if (!ready) return <InlineNotice>Loading folders...</InlineNotice>;
   if (!token) return (
     <section className="space-y-4">
-      <h2 className="text-xl font-semibold">Vibe Folders</h2>
+      <h1 className="text-xl font-semibold">Vibe Folders</h1>
       <InlineNotice tone="info">Sign in to create and share vibe folders.</InlineNotice>
     </section>
   );
@@ -65,7 +65,7 @@ function SignedInFolders() {
 
   return (
     <section className="space-y-4">
-      <h2 className="text-xl font-semibold">Vibe Folders</h2>
+      <h1 className="text-xl font-semibold">Vibe Folders</h1>
       <Card className="flex flex-col gap-2 sm:flex-row sm:items-end">
         <div className="flex-1">
           <Input

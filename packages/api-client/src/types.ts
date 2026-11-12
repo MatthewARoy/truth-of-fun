@@ -25,7 +25,27 @@ export type EventResponse = {
   attendee_count?: number;
   location_confidence?: number;
   is_free?: boolean;
+  /** City the event is in (e.g. "Oakland"), or null when unknown. */
+  city?: string | null;
+  /** A {@link RegionId}, "beyond" for places outside the Bay Area, or null. */
+  region?: RegionId | "beyond" | null;
 };
+
+/** The five Bay Area regions events can be filtered by, in display order. */
+export type RegionId = "sf" | "east_bay" | "peninsula" | "south_bay" | "north_bay";
+
+export type RegionCity = { name: string; upcoming_count: number };
+
+export type Region = {
+  id: RegionId;
+  label: string;
+  upcoming_count: number;
+  /** Only cities with upcoming events, most first. */
+  cities: RegionCity[];
+};
+
+/** GET /regions. Always the five regions in display order. */
+export type RegionsResponse = { regions: Region[] };
 
 /**
  * GET /events/{id}. Adds the provenance an agent needs to cite an event.
@@ -224,6 +244,13 @@ export type EventsQuery = {
   vibe_tag?: string;
   category?: string;
   time_preset?: "tonight" | "this_weekend";
+  /** One of the five Bay Area regions. */
+  region?: RegionId;
+  /** Exact city name as listed by GET /regions, e.g. "Oakland". */
+  city?: string;
+  /** Pass `true` to return only free events. */
+  is_free?: boolean;
+  /** @deprecated Keyword match kept for old clients; use `region` / `city`. */
   location_preset?: "sf" | "oakland" | "san_jose";
   sort_by?: "date" | "distance";
   start_at?: string;
@@ -253,9 +280,29 @@ export type AuthResponse = {
   email: string;
 };
 
+export type DetailResponse = { detail: string };
+
+export type PasswordResetConfirmRequest = {
+  token: string;
+  /** Same rules as registration: at least 12 characters, at most 72 bytes. */
+  new_password: string;
+};
+
+export type ChangePasswordRequest = {
+  current_password: string;
+  new_password: string;
+};
+
+export type DeleteAccountRequest = { password: string };
+
 export type SourceHealthEntry = {
   name: string;
-  status: "healthy" | "degraded" | "failing" | "unknown";
+  /**
+   * `disabled`: an optional source with no credentials configured — expected,
+   * not a problem. `degraded` covers a zero-result run and also a run that
+   * returned events but stopped at its page budget; `last_error` says which.
+   */
+  status: "healthy" | "degraded" | "failing" | "unknown" | "disabled";
   last_run_at: string | null;
   last_event_count: number | null;
   consecutive_zeros: number;

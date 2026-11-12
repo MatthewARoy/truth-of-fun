@@ -14,7 +14,15 @@ export default defineConfig({
   outputDir: "./apps/web/test-results/integration",
   workers: 1,
   timeout: 60_000,
-  use: { baseURL: webUrl, trace: "retain-on-failure" },
+  use: {
+    baseURL: webUrl,
+    trace: "retain-on-failure",
+    // Opt-in: use an already-installed Chromium where `playwright install`
+    // is not possible (same switch as apps/web/playwright.config.ts).
+    ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+      ? { launchOptions: { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH } }
+      : {}),
+  },
   webServer: [
     {
       command: ".venv/bin/python tests/browser/serve_api.py",

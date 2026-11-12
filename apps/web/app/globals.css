@@ -23,7 +23,7 @@ h3 {
 }
 
 .page-shell {
-  @apply mx-auto min-h-screen max-w-6xl space-y-6 px-4 py-6 sm:px-6;
+  @apply mx-auto flex min-h-screen max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6;
 }
 
 /* Leaflet map markers (built as divIcons in components/event-map.tsx) */
@@ -66,4 +66,8 @@ h3 {
 
 .tof-popup span {
   @apply text-slate-400;
+}
+
+.leaflet-container .tof-popup a {
+  @apply text-brand-200 underline;
 }

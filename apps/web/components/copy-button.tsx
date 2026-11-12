@@ -4,7 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 
 type Props = {
-  value: string;
+  /** Text to copy, or a function evaluated at click time (e.g. the current URL). */
+  value: string | (() => string);
   label?: string;
   copiedLabel?: string;
   variant?: "primary" | "secondary" | "ghost";
@@ -33,7 +34,7 @@ export function CopyButton({
       // Absent over plain HTTP, which is how this gets opened on a phone on a
       // LAN address during development.
       if (!navigator.clipboard) throw new Error("Clipboard unavailable");
-      await navigator.clipboard.writeText(value);
+      await navigator.clipboard.writeText(typeof value === "function" ? value() : value);
       setState("copied");
     } catch {
       setState("failed");

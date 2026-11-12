@@ -19,7 +19,7 @@ export default function FolderDetailPage() {
   if (!ready) return <InlineNotice>Loading folder...</InlineNotice>;
   if (!token) return (
     <section className="space-y-4">
-      <h2 className="text-xl font-semibold">Folder Detail</h2>
+      <h1 className="text-xl font-semibold">Folder Detail</h1>
       <InlineNotice tone="info">Sign in to view this folder.</InlineNotice>
     </section>
   );
@@ -146,7 +146,7 @@ function SignedInFolder({ folderId }: { folderId: number }) {
 
   return (
     <section className="space-y-4">
-      <h2 className="text-xl font-semibold">Folder Detail</h2>
+      <h1 className="text-xl font-semibold">Folder Detail</h1>
       {loading ? <InlineNotice>Loading folder...</InlineNotice> : null}
       {error ? <InlineNotice tone="error">Error: {error}</InlineNotice> : null}
       {folder ? (
@@ -217,7 +217,7 @@ function SignedInFolder({ folderId }: { folderId: number }) {
       ) : null}
 
       <Card className="space-y-3">
-        <h3 className="text-base font-semibold">Add from suggested events</h3>
+        <h2 className="text-base font-semibold">Add from suggested events</h2>
         <Input
           label="Vibe filter (optional)"
           placeholder="#Chill"
@@ -242,7 +242,7 @@ function SignedInFolder({ folderId }: { folderId: number }) {
       </Card>
 
       <Card className="space-y-3">
-        <h3 className="text-base font-semibold">Add from recommendations</h3>
+        <h2 className="text-base font-semibold">Add from recommendations</h2>
         <div className="grid gap-2">
           {recommendations.map((event) => (
             <div key={event.id} className="flex items-center justify-between rounded-ui border border-slate-800 p-2">

@@ -3,7 +3,7 @@ import { test, expect } from "@playwright/test";
 test("home route renders hero", async ({ page }) => {
   await page.goto("/");
   await expect(
-    page.getByRole("heading", { name: /fragmented event landscape/i })
+    page.getByRole("heading", { level: 1, name: /something fun to do around the Bay/i })
   ).toBeVisible();
   await expect(page.getByRole("link", { name: /Explore events/i })).toBeVisible();
 });

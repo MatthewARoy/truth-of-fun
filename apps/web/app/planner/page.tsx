@@ -115,7 +115,7 @@ function PlannerContent() {
   return (
     <div className="mx-auto max-w-2xl space-y-6">
       <div className="space-y-2">
-        <h2 className="text-xl font-semibold">Plan Something</h2>
+        <h1 className="text-xl font-semibold">Plan Something</h1>
         <p className="text-sm text-slate-400">
           Describe what you want to do in plain English. We&apos;ll find events and build an itinerary for you.
         </p>
@@ -129,6 +129,8 @@ function PlannerContent() {
 
       <form onSubmit={handleSubmit} className="space-y-4">
         <Textarea
+          aria-label="What would you like to do?"
+          name="plan-request"
           placeholder="e.g. I want to plan a date in the Mission for Saturday afternoon..."
           value={query}
           onChange={(e) => setQuery(e.target.value)}
@@ -164,7 +166,7 @@ function PlannerContent() {
       {result && (
         <div className="space-y-4">
           <Card className="space-y-3">
-            <h3 className="text-lg font-semibold">{result.title || "Your Plan"}</h3>
+            <h2 className="text-lg font-semibold">{result.title || "Your Plan"}</h2>
             <div className="flex flex-wrap gap-2">
               {result.intent && <Badge active>{result.intent.replace(/_/g, " ")}</Badge>}
               {result.timeframe && <Badge>{result.timeframe}</Badge>}
@@ -184,7 +186,7 @@ function PlannerContent() {
               {/* Take it with you */}
               <Card className="space-y-3">
                 <div>
-                  <h3 className="font-semibold">Take it with you</h3>
+                  <h2 className="font-semibold">Take it with you</h2>
                   <p className="text-sm text-slate-400">
                     Copy the plan as text, or create a public link you can manage later.
                   </p>

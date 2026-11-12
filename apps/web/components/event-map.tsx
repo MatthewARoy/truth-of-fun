@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { EventResponse } from "@truth-of-fun/api-client";
+import { eventStartLabel, hasVenuePin, statusNotice } from "@/lib/event-format";
 
 type Props = {
   events: EventResponse[];
@@ -17,10 +18,18 @@ export function EventMap({ events, selectedId, onSelect }: Props) {
   const markersRef = useRef<Map<number, unknown>>(new Map());
   const [mapReady, setMapReady] = useState(false);
 
-  const points = useMemo(
-    () => events.filter((e) => typeof e.lat === "number" && typeof e.lng === "number"),
+  // Low-confidence coordinates are a source's city-centre fallback. Plotting
+  // them would stack dozens of unrelated events on one pin in the middle of
+  // town and claim a venue location nobody published, so they stay off the
+  // map and the reader is told how many were left out.
+  const points = useMemo(() => events.filter(hasVenuePin), [events]);
+  const hiddenCount = useMemo(
+    () => events.filter(
+      (e) => typeof e.lat === "number" && typeof e.lng === "number" && !hasVenuePin(e)
+    ).length,
     [events]
   );
+  const unlocatedCount = events.length - points.length - hiddenCount;
 
   useEffect(() => {
     let cancelled = false;
@@ -110,12 +119,7 @@ export function EventMap({ events, selectedId, onSelect }: Props) {
         });
         const marker = L.marker([event.lat, event.lng], { icon })
           .addTo(map as L.Map)
-          .bindPopup(
-            `<div class="tof-popup">
-              <strong>${escapeHtml(event.title)}</strong><br/>
-              <span>${escapeHtml(event.venue_name ?? "Venue TBD")}</span>
-            </div>`
-          )
+          .bindPopup(popupHtml(event))
           .on("click", () => {
             onSelect?.(event.id);
           });
@@ -146,21 +150,56 @@ export function EventMap({ events, selectedId, onSelect }: Props) {
 
   // The map container always renders so the Leaflet instance survives filter
   // changes; an overlay communicates the empty state instead of unmounting it.
+  const notes: string[] = [];
+  if (hiddenCount > 0) {
+    notes.push(
+      `${hiddenCount.toLocaleString()} ${hiddenCount === 1 ? "event is" : "events are"} not shown on the map because `
+      + `${hiddenCount === 1 ? "its" : "their"} location is only approximate.`
+    );
+  }
+  if (unlocatedCount > 0) {
+    notes.push(
+      `${unlocatedCount.toLocaleString()} ${unlocatedCount === 1 ? "event has" : "events have"} no location to plot.`
+    );
+  }
+
   return (
-    <div className="relative h-[480px] w-full overflow-hidden rounded-ui border border-slate-800">
-      <div
-        ref={containerRef}
-        className="h-full w-full"
-        role="application"
-        aria-label="Event venue map"
-      />
-      {points.length === 0 ? (
-        <div className="absolute inset-0 z-[1000] flex items-center justify-center bg-slate-950/80 text-sm text-slate-400">
-          No mappable events. Try adjusting filters.
-        </div>
+    <div className="space-y-2">
+      <div className="relative h-[480px] w-full overflow-hidden rounded-ui border border-slate-800">
+        <div
+          ref={containerRef}
+          className="h-full w-full"
+          role="application"
+          aria-label="Event venue map"
+        />
+        {points.length === 0 ? (
+          <div className="absolute inset-0 z-[1000] flex items-center justify-center bg-slate-950/80 px-4 text-center text-sm text-slate-400">
+            No mappable events. Try adjusting filters.
+          </div>
+        ) : null}
+      </div>
+      {events.length > 0 ? (
+        <p className="text-xs text-slate-400" data-testid="map-summary">
+          Showing {points.length.toLocaleString()} of {events.length.toLocaleString()} loaded events on the map.
+          {notes.length > 0 ? ` ${notes.join(" ")} Switch to the list to see them.` : ""}
+        </p>
       ) : null}
     </div>
   );
+}
+
+// Leaflet popups are HTML strings, so every value from the API is escaped and
+// the only link is a same-site path built from the numeric id.
+function popupHtml(event: EventResponse): string {
+  const notice = statusNotice(event.status);
+  const when = `${notice ? `${notice.label} · originally ` : ""}${eventStartLabel(event)}`;
+  const place = [event.venue_name ?? "Venue TBD", event.city].filter(Boolean).join(" · ");
+  return `<div class="tof-popup">
+    <strong>${escapeHtml(event.title)}</strong><br/>
+    <span>${escapeHtml(when)}</span><br/>
+    <span>${escapeHtml(place)}</span><br/>
+    <a href="/events/${encodeURIComponent(String(event.id))}">View event details</a>
+  </div>`;
 }
 
 function escapeHtml(s: string): string {

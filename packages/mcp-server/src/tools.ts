@@ -134,8 +134,9 @@ export function registerTools(server: McpServer, client: TruthOfFunApiClient): v
     {
       title: "Search events",
       description:
-        "Search upcoming events by keyword, vibe tag, time window, location, " +
-        "or distance from a point. Returns a page of events plus the total " +
+        "Search upcoming events by keyword, vibe tag, category, time window, " +
+        "Bay Area region or city, price, or distance from a point. Each event " +
+        "carries its city and region. Returns a page of events plus the total " +
         "number of matches, so you can tell whether to page further. " +
         CITATION_NOTE,
       inputSchema: {
@@ -151,7 +152,23 @@ export function registerTools(server: McpServer, client: TruthOfFunApiClient): v
           .enum(["tonight", "this_weekend"])
           .optional()
           .describe("Convenience time window, resolved in San Francisco local time"),
-        location_preset: z.enum(["sf", "oakland", "san_jose"]).optional(),
+        region: z
+          .enum(["sf", "east_bay", "peninsula", "south_bay", "north_bay"])
+          .optional()
+          .describe("Bay Area region the event is in"),
+        city: z
+          .string()
+          .optional()
+          .describe("City the event is in, e.g. 'Oakland', 'Palo Alto', 'San Rafael'"),
+        is_free: z.boolean().optional().describe("true: only free events"),
+        category: z
+          .string()
+          .optional()
+          .describe("Activity category, e.g. 'Music', 'Comedy', 'Outdoors', 'Fitness'"),
+        location_preset: z
+          .enum(["sf", "oakland", "san_jose"])
+          .optional()
+          .describe("Deprecated city shortcut; prefer region / city"),
         start_at: z
           .string()
           .optional()

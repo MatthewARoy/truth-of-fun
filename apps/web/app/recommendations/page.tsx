@@ -14,7 +14,7 @@ export default function RecommendationsPage() {
   if (!ready) return <InlineNotice>Loading recommendations...</InlineNotice>;
   if (!token) return (
     <section className="space-y-4">
-      <h2 className="text-xl font-semibold">Recommendations</h2>
+      <h1 className="text-xl font-semibold">Recommendations</h1>
       <InlineNotice tone="info">Sign in to see personalized recommendations.</InlineNotice>
     </section>
   );
@@ -48,7 +48,7 @@ function SignedInRecommendations() {
 
   return (
     <section className="space-y-4">
-      <h2 className="text-xl font-semibold">Recommendations</h2>
+      <h1 className="text-xl font-semibold">Recommendations</h1>
       <Card className="space-y-2">
         <p className="text-sm text-slate-300">Personalized picks based on your onboarding and recent signals.</p>
       </Card>
