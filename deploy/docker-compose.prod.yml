@@ -1,0 +1,230 @@
+# Production stack for a single host: Caddy (TLS) -> web + api, plus the
+# ingestion worker, Postgres/PostGIS, Redis, and a nightly database backup.
+#
+#   cp deploy/.env.production.example deploy/.env.production   # fill it in
+#   docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml up -d --build
+#
+# See docs/deployment.md for the full runbook (first deploy, upgrades,
+# rollback, restore). Unlike the root docker-compose.yml — a development
+# stack with a published database port and a checked-in password — nothing
+# here has a default credential: compose refuses to start with one missing.
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+x-app-env: &app-env
+  APP_ENV: production
+  LOG_FORMAT: json
+  DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-truth_of_fun}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-truth_of_fun}
+  REDIS_URL: redis://redis:6379/0
+  RATE_LIMIT_BACKEND: redis
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY:?set JWT_SECRET_KEY}
+  OPS_TOKEN: ${OPS_TOKEN:?set OPS_TOKEN}
+  PUBLIC_WEB_URL: https://${SITE_DOMAIN:?set SITE_DOMAIN}
+  # Same-origin deployment: the browser never makes a cross-origin API call,
+  # so the allowlist is just the site itself.
+  CORS_ALLOWED_ORIGINS: '["https://${SITE_DOMAIN}"]'
+  ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+  SENTRY_DSN: ${SENTRY_DSN:-}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  TICKETMASTER_API_KEY: ${TICKETMASTER_API_KEY:-}
+  MEETUP_API_TOKEN: ${MEETUP_API_TOKEN:-}
+  REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID:-}
+  REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET:-}
+  GEOCODING_PROVIDER: ${GEOCODING_PROVIDER:-nominatim}
+  GEOCODING_USER_AGENT: ${GEOCODING_USER_AGENT:?set GEOCODING_USER_AGENT (Nominatim requires a contact)}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USERNAME: ${SMTP_USERNAME:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_FROM: ${SMTP_FROM:-}
+  IMAP_HOST: ${IMAP_HOST:-}
+  IMAP_USER: ${IMAP_USER:-}
+  IMAP_PASSWORD: ${IMAP_PASSWORD:-}
+  PROXY_URL: ${PROXY_URL:-}
+
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      SITE_DOMAIN: ${SITE_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    networks: [edge]
+
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: /api
+        NEXT_PUBLIC_SITE_URL: https://${SITE_DOMAIN}
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      # Server-side rendering (share-link previews) reaches the API over the
+      # compose network instead of hair-pinning through the public edge.
+      API_INTERNAL_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [edge]
+
+  # One-shot schema migration. api and worker start only after it exits 0, so
+  # replicas never race each other through `alembic upgrade head`.
+  migrate:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: api
+    restart: "no"
+    logging: *default-logging
+    command: ["alembic", "upgrade", "head"]
+    environment: *app-env
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [backend]
+
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: api
+    restart: unless-stopped
+    logging: *default-logging
+    # Migrations ran in the `migrate` service; serve only. Forwarded headers
+    # are trusted from the edge network alone, so rate limits key on the real
+    # client address and a direct caller cannot forge one.
+    command:
+      - sh
+      - -c
+      - exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${API_WORKERS:-2} --proxy-headers --forwarded-allow-ips=172.28.0.0/24
+    environment:
+      <<: *app-env
+      # One pathological query fails alone instead of pinning a connection.
+      # API only: the worker's bulk statements and migrations are legitimately slow.
+      DB_STATEMENT_TIMEOUT_MS: "15000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=4)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    networks: [edge, backend]
+
+  worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: worker
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["python", "-m", "app.worker"]
+    environment: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    # Chromium (FuncheapSF, Luma) needs more shared memory than Docker's 64MB.
+    shm_size: "1gb"
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.worker", "--healthcheck"]
+      interval: 5m
+      timeout: 20s
+      retries: 2
+      start_period: 2m
+    networks: [backend]
+
+  db:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-truth_of_fun}
+      POSTGRES_USER: ${POSTGRES_USER:-truth_of_fun}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-truth_of_fun} -d ${POSTGRES_DB:-truth_of_fun}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [backend]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    logging: *default-logging
+    # Rate-limit windows and the AAIM key inventory; small, but persisted so a
+    # restart does not hand every client a fresh quota.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [backend]
+
+  # Nightly logical backup with retention. Copy ./backups off the host (object
+  # storage, another machine) — a backup on the same disk is not a backup.
+  backup:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      PGHOST: db
+      PGDATABASE: ${POSTGRES_DB:-truth_of_fun}
+      PGUSER: ${POSTGRES_USER:-truth_of_fun}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+    volumes:
+      - ./backup.sh:/usr/local/bin/backup.sh:ro
+      - ./backups:/backups
+    entrypoint: ["/bin/bash", "/usr/local/bin/backup.sh"]
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [backend]
+
+networks:
+  # Fixed subnet so the API can trust forwarded headers from exactly the edge
+  # network (see the api command above).
+  edge:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+  backend: {}
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:

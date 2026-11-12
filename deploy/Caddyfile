@@ -1,0 +1,43 @@
+# Single-origin edge for Truth of Fun.
+#
+#   https://{$SITE_DOMAIN}/api/*  ->  FastAPI (prefix stripped)
+#   https://{$SITE_DOMAIN}/*      ->  Next.js
+#
+# Caddy obtains and renews the TLS certificate automatically; SITE_DOMAIN must
+# resolve to this host and ports 80/443 must be reachable. For a local smoke
+# test set SITE_DOMAIN=localhost (Caddy then issues a locally-trusted cert).
+{
+	email {$ACME_EMAIL}
+}
+
+{$SITE_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	# The AAIM key-inventory endpoints are for in-cluster automation only and
+	# are never routed from the public edge. (/api/health/sources and
+	# /api/health/summary stay reachable: they are gated by OPS_TOKEN and back
+	# the /admin/sources page and `make status API_URL=https://<domain>/api`.)
+	@internal path /api/internal/*
+	respond @internal 404
+
+	handle_path /api/* {
+		reverse_proxy api:8000 {
+			health_uri /health/ready
+			health_interval 15s
+		}
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

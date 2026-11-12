@@ -37,3 +37,8 @@ tmp/
 
 # Local brainstorming artifacts
 .superpowers/
+
+# Production deployment state
+deploy/.env.production
+deploy/backups/
+deploy/.env.ci

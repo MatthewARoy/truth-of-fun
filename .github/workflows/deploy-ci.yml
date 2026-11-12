@@ -1,0 +1,69 @@
+name: deploy-ci
+
+# Proves the production artifacts still build and the production stack still
+# boots: the images are otherwise only built on the server, where a broken
+# Dockerfile or compose file is found during an outage instead of in review.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "deploy/**"
+      - "apps/web/**"
+      - "packages/api-client/**"
+      - "app/**"
+      - "alembic/**"
+      - "alembic.ini"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/deploy-ci.yml"
+
+jobs:
+  production-stack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COMPOSE: docker compose --env-file deploy/.env.ci -f deploy/docker-compose.prod.yml -f deploy/docker-compose.ci.yml
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write throwaway production configuration
+        run: |
+          cat > deploy/.env.ci <<ENV
+          SITE_DOMAIN=localhost
+          ACME_EMAIL=ci@example.com
+          JWT_SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(48))")
+          OPS_TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(48))")
+          POSTGRES_PASSWORD=$(python3 -c "import secrets; print(secrets.token_urlsafe(24))")
+          GEOCODING_USER_AGENT=truth-of-fun-ci/0.1 (deploy-ci smoke test)
+          ENV
+      - name: Production compose refuses to start without secrets
+        run: |
+          if docker compose -f deploy/docker-compose.prod.yml config --quiet 2>/dev/null; then
+            echo "::error::production compose rendered with no secrets configured"; exit 1
+          fi
+      - name: Build production images
+        run: $COMPOSE build web api migrate
+      - name: Boot the stack (edge, web, API, database, Redis)
+        run: $COMPOSE up -d --no-build --wait --wait-timeout 180 caddy web api db redis
+      - name: Smoke test through the edge
+        run: |
+          set -euo pipefail
+          curl_edge() { curl --silent --show-error --fail --insecure --resolve localhost:8443:127.0.0.1 "$@"; }
+          curl_edge https://localhost:8443/healthz
+          curl_edge https://localhost:8443/api/health/ready
+          curl_edge https://localhost:8443/api/regions | grep -q '"east_bay"'
+          curl_edge https://localhost:8443/explore | grep -qi '<html'
+          # Operator and internal surfaces stay closed from the edge.
+          test "$(curl --silent --insecure --resolve localhost:8443:127.0.0.1 -o /dev/null -w '%{http_code}' https://localhost:8443/api/health/summary)" = 403
+          test "$(curl --silent --insecure --resolve localhost:8443:127.0.0.1 -o /dev/null -w '%{http_code}' https://localhost:8443/api/internal/secrets/ticketmaster/health)" = 404
+          curl_edge -D - -o /dev/null https://localhost:8443/ | grep -qi '^strict-transport-security:'
+      - name: Dump logs on failure
+        if: failure()
+        run: $COMPOSE logs --no-color --tail 200
+      - name: Tear down
+        if: always()
+        run: $COMPOSE down --volumes

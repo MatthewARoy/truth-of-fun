@@ -37,7 +37,7 @@ The hard parts aren't the scrapers. They're:
 | **Frontend** | Next.js 15 / React 19 / Tailwind. Typed API client (`packages/api-client`) consumable by any client (web today, mobile later). |
 | **Agent access** | MCP server (`packages/mcp-server`) exposing 10 tools — search, event detail, itinerary building, recommendations, saves, folders, platform health — to Claude Desktop/Code over stdio. Wraps the HTTP API, so auth and rate limits are enforced in one place. |
 | **Operability** | Request-id correlation on every log line, text or JSON output, per-source error capture persisted to the database, and `GET /health/summary` — one call that answers "is anything broken?". See the [operations runbook](./docs/operations.md). |
-| **Infra** | FastAPI (async) + SQLModel + Alembic + Redis. Docker Compose for local. Production guard refuses to boot if `JWT_SECRET_KEY` is unset outside development. |
+| **Infra** | FastAPI (async) + SQLModel + Alembic + Redis. Docker Compose for local development; a separate single-host production stack under [`deploy/`](./docs/deployment.md) (Caddy TLS edge, one-shot migrations, Redis-backed rate limits, nightly backups). Production guard refuses to boot if `JWT_SECRET_KEY` is unset outside development. |
 
 ## Architecture
 
@@ -144,14 +144,22 @@ All runtime config is read from environment variables — see [`.env.example`](.
 | `RATE_LIMIT_LLM_PER_HOUR` etc. | optional | Per-client inbound rate limits on the LLM-backed, share, and auth endpoints (defaults 30/60/20; `0` disables). Behind a reverse proxy, run uvicorn with `--proxy-headers` so limits key on the real client IP. |
 | `OPS_TOKEN` | yes for non-dev | Gates `GET /health/sources`, `GET /health/summary`, and the `/admin/sources` page that reads them, via an `X-Ops-Token` header. The `/health`, `/health/live` and `/health/ready` probes stay public. Unset in development leaves the gated endpoints open; unset anywhere else refuses them. Must be at least 32 bytes outside development. |
 | `MAX_REQUEST_BODY_BYTES` | optional | Maximum API request body size (default 1 MB, including chunked bodies; `0` disables). |
+| `RATE_LIMIT_BACKEND` | production | `memory` (default) keeps rate-limit windows in the process — correct for a single API process only. `redis` shares them across workers/replicas through `REDIS_URL`. |
+| `PUBLIC_WEB_URL` | production | Public origin of the web app, used for absolute links in copied itineraries and password-reset emails. |
+| `SMTP_HOST` / `SMTP_FROM` (+ port, username, password) | for password resets | Any SMTP provider. Unset means reset requests are accepted but no email is sent. |
+| `SENTRY_DSN` | optional | Reports API and worker exceptions. Unset sends nothing. |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` / `DB_STATEMENT_TIMEOUT_MS` | optional | Connection pool per process and a per-statement time limit (set the limit for the API only). |
+| `WORKER_SOURCE_TIMEOUT_SECONDS` / `WORKER_WATCHDOG_SECONDS` | optional | Per-source fetch budget (default 20 min) and the no-progress limit after which the worker exits for its supervisor to restart it (default 1 h). |
 | `FORWARDED_ALLOW_IPS` | production proxy deployments | IP/CIDR allowlist for proxies whose forwarded-client headers Uvicorn may trust. Defaults to loopback; never use `*` on a directly reachable API port. |
 
 ## Documentation
 
 - [Architecture](./docs/architecture.md) — pipeline, dedupe heuristic, scoring weights, intelligence plane
+- [Deployment](./docs/deployment.md) — the production stack (`deploy/`), first deploy, upgrades, backups and restore
 - [Operations runbook](./docs/operations.md) — health checks, reading logs, what each failure means
+- [Production readiness review, 2026-11-12](./docs/production-readiness-2026-11-12.md) — what was audited, what changed, what is still open
 - [MCP server](./packages/mcp-server/README.md) — connecting Claude to the platform
-- [API contract (v1)](./docs/api-contract-v1.md) — request/response shapes for all 20 endpoints
+- [API contract (v1)](./docs/api-contract-v1.md) — request/response shapes for every endpoint
 - [Frontend architecture](./docs/frontend-architecture.md) — shared-client strategy
 - [Input agents](./docs/input-agents/README.md) — per-source ingestion specs
 - [Integration testability matrix](./docs/INTEGRATIONS.md) — which sources need credentials

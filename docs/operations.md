@@ -218,7 +218,32 @@ There is no alerting on the API's own error rate yet — that comes from
 whatever scrapes `/health/summary`. Wiring `make status` into cron is the
 simplest version.
 
+## Worker safety nets
+
+- **Per-source budget.** A source whose fetch exceeds
+  `WORKER_SOURCE_TIMEOUT_SECONDS` (default 20 minutes) is cancelled and
+  reported as `failing — TimeoutError: source exceeded the …s fetch budget`;
+  the remaining sources still run.
+- **One cycle at a time.** A cycle holds a Postgres advisory lock. A second
+  worker (a deploy overlap, or `python -m app.worker --once` beside the loop)
+  logs "Another worker holds the ingestion lock" and skips rather than
+  crawling everything twice.
+- **Heartbeat and watchdog.** The worker touches a heartbeat file as it makes
+  progress. `python -m app.worker --healthcheck` exits non-zero when the last
+  progress is older than `WORKER_WATCHDOG_SECONDS` (default 1 hour); in the
+  loop, a watchdog exits the process at the same limit so the container
+  restart policy brings up a clean one.
+- **Restarts keep history.** Source health (last success, consecutive empty
+  runs, the canary baseline) is reloaded from `source_health` at startup, so a
+  deploy no longer resets a failing source to "degraded".
+- **Alert cooldown.** An identical alert is sent at most once per 24 hours.
+- **Failed cycles retry in 15 minutes** (`WORKER_FAILURE_RETRY_SECONDS`), not
+  after a full six-hour interval.
+
 ## Before going live
+
+Production deployment, upgrades, backups and restore are covered in
+[deployment.md](deployment.md), which ends with the full pre-launch checklist.
 
 For the itinerary sharing release, coordinate migration `202609290002` with the
 new API: old API processes cannot create links after expiry becomes required.

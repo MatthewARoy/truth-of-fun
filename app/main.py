@@ -2,7 +2,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import DataError, IntegrityError, StatementError
@@ -18,6 +18,7 @@ from app.api.social import router as social_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.core.observability import init_error_reporting
+from app.core.ratelimit import general_rate_limit
 from app.core.request_limits import RequestBodyLimitMiddleware
 
 settings = get_settings()
@@ -57,6 +58,7 @@ app = FastAPI(
     title=settings.app_name,
     version=API_VERSION,
     lifespan=lifespan,
+    dependencies=[Depends(general_rate_limit)],
     description=(
         "Truth of Fun event discovery API. The current v1 contract and privacy "
         "changes are documented in docs/api-contract-v1.md. This OpenAPI schema is "

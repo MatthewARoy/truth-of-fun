@@ -18,6 +18,7 @@ Two backends, chosen by ``RATE_LIMIT_BACKEND``:
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import threading
 import time
@@ -181,15 +182,69 @@ def _hit(limiter: SlidingWindowLimiter, key: str) -> float | None:
     return limiter.hit(key)
 
 
+def client_key(request: Request) -> str:
+    """Rate-limit identity for a request: its address, or its /64 for IPv6.
+
+    A residential IPv6 customer controls an entire /64 (2^64 addresses), so
+    keying on the full address would give them that many separate windows.
+    """
+    host = request.client.host if request.client else "unknown"
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if address.version == 6:
+        if address.ipv4_mapped is not None:
+            return str(address.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{address}/64", strict=False).network_address) + "/64"
+    return str(address)
+
+
+def _is_internal_caller(request: Request) -> bool:
+    """Loopback or private-network peer: our own infrastructure, not a visitor.
+
+    The web app's server-side rendering and container health checks reach the
+    API directly over the private network. Real visitors arrive with their
+    public address (restored from the proxy's forwarded headers).
+    """
+    host = request.client.host if request.client else ""
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_private
+
+
 def _enforce(limiter: SlidingWindowLimiter, request: Request) -> None:
-    key = request.client.host if request.client else "unknown"
-    retry_after = _hit(limiter, key)
+    retry_after = _hit(limiter, client_key(request))
     if retry_after is not None:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Rate limit exceeded. Try again later.",
             headers={"Retry-After": str(max(1, int(retry_after + 0.999)))},
         )
+
+
+@lru_cache(maxsize=1)
+def get_general_limiter() -> SlidingWindowLimiter:
+    return SlidingWindowLimiter(
+        name="general",
+        limit=get_settings().rate_limit_general_per_minute,
+        window_seconds=60,
+    )
+
+
+def general_rate_limit(request: Request) -> None:
+    """Ceiling on any one client's total request rate, applied to every route.
+
+    The targeted limits above protect specific costs; this one stops a single
+    scraper or runaway script from occupying the whole API through endpoints
+    that have no limit of their own (search, event detail, folders). It is
+    far above interactive use and never applies to internal callers.
+    """
+    if _is_internal_caller(request):
+        return
+    _enforce(get_general_limiter(), request)
 
 
 def llm_rate_limit(request: Request) -> None:

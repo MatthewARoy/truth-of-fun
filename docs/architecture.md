@@ -150,6 +150,23 @@ Scrapers break silently when sites change. The worker mitigates this with:
 
 After each run the worker persists per-source health to the `source_health` table, so the API process (a separate process in the normal deployment) serves real state at `GET /health/sources`, rendered in the web UI at `/admin/sources` for at-a-glance ops.
 
+## Geography: city and region
+
+Every event carries a `city` and one of five `region` values — `sf`,
+`east_bay`, `peninsula`, `south_bay`, `north_bay` (`beyond` marks listings
+outside the nine counties, such as Santa Cruz or Sacramento). They are derived
+in `app/services/regions.py` from the event's coordinates by nearest anchor:
+each city has one or more anchor points (San Francisco, Oakland and San José
+have several, so Ocean Beach is not handed to Daly City), and an event belongs
+to the city of the closest one. When the coordinates are only a low-confidence
+centroid fallback, a city written in postal position in the address
+(`…, Oakland, CA`) wins instead.
+
+The assignment happens whenever an event row is written through the ORM, and
+the worker assigns any row that still lacks one at the start and end of every
+cycle, so there is no separate backfill to run. `GET /regions` returns the
+regions and the cities that currently have upcoming events, with counts.
+
 ## Storage
 
 PostgreSQL 16 + PostGIS. The canonical event model follows [Schema.org/Event](https://schema.org/Event) where practical. Venue locations are `GEOMETRY(POINT, 4326)` so distance/radius queries (used by the concierge and any future map view) are first-class.
@@ -159,12 +176,13 @@ PostgreSQL 16 + PostGIS. The canonical event model follows [Schema.org/Event](ht
 Routers under `app/api/`:
 
 - `auth` — bcrypt + JWT registration/login
-- `discovery` — `GET /events`, `GET /recommendations`, `POST /concierge/itinerary`, onboarding/interest signal capture
+- `auth` / `account` — password reset by emailed link, password change, sign out everywhere, data export, account deletion
+- `discovery` — `GET /events` (filterable by `region` / `city` / `is_free`), `GET /regions`, `GET /events/{id}/calendar.ics`, `GET /recommendations`, `POST /concierge/itinerary`, onboarding/interest signal capture
 - `social` — folders, items, votes, public share tokens
 - `health` — `GET /health`, `GET /health/sources`
 - `internal_secrets` — AAIM (API-key Acquisition & Inventory Management, the internal key-rotation subsystem — see below) endpoints (404 unless `AAIM_ENABLED=true`; then gated by JWT scope)
 
-20 endpoints total. Full request/response shapes in [`api-contract-v1.md`](./api-contract-v1.md).
+Full request/response shapes in [`api-contract-v1.md`](./api-contract-v1.md).
 
 ## Enabling AAIM key rotation
 
@@ -202,7 +220,7 @@ The worker and connectors need only `AAIM_ENABLED` + `REDIS_URL`. The `internal_
 
 ## What's deliberately not done yet
 
-- **Production deploy automation.** The Dockerfile and `docker-compose.yml` are local-dev oriented. A real deploy needs managed Postgres, secret-management, log shipping, and a real proxy pool for scrapers.
+- **Managed infrastructure.** `deploy/` is a complete single-host production stack (see [deployment.md](./deployment.md)): TLS edge, one-shot migrations, shared rate limits, backups. It is not a multi-host design — a larger deployment would move Postgres to a managed service first, ship logs to an aggregator, and put secrets in a secret manager rather than an env file.
 - **CDN / image proxy.** Source-provided image URLs are rendered directly. A production deploy should proxy + cache them.
 - **Worker concurrency.** Sources run sequentially within a cycle. Parallelizing is a `asyncio.gather` away but isn't necessary at current scale.
 - **Real entity resolution for venues.** The same venue from two sources (e.g., "The Fillmore" vs "Fillmore") is currently treated as two records. A canonical-venue table with fuzzy matching is on the roadmap.

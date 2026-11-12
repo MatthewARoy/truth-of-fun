@@ -22,7 +22,9 @@ Abuse-prone endpoints enforce per-client sliding windows and return **429** with
 |---|---|---|
 | LLM | 30 / hour | `POST /concierge/itinerary`, `POST /users/me/onboarding` |
 | Share | 60 / hour | `POST /concierge/itinerary/share` |
-| Auth | 20 / 15 min | `POST /auth/login`, `POST /auth/register` (shared window) |
+| Auth | 20 / 15 min | `POST /auth/login`, `POST /auth/register`, the password-reset endpoints, `POST /users/me/password`, `POST /users/me/delete` (shared window) |
+
+With `RATE_LIMIT_BACKEND=redis` the windows are shared by every API process; with the default `memory` backend they are per process.
 
 ## Endpoint index
 
@@ -30,8 +32,16 @@ Abuse-prone endpoints enforce per-client sliding windows and return **429** with
 |---|---|---|
 | POST | `/auth/register` | none |
 | POST | `/auth/login` | none |
+| POST | `/auth/password-reset/request` | none |
+| POST | `/auth/password-reset/confirm` | none (emailed token) |
+| POST | `/auth/logout` | user JWT |
+| POST | `/users/me/password` | user JWT |
+| GET | `/users/me/export` | user JWT |
+| POST | `/users/me/delete` | user JWT |
 | GET | `/events` | none |
+| GET | `/regions` | none |
 | GET | `/events/{event_id}` | none |
+| GET | `/events/{event_id}/calendar.ics` | none |
 | GET | `/recommendations` | user JWT |
 | PUT | `/users/me/preferences` | user JWT |
 | POST | `/users/me/onboarding` | user JWT |
@@ -149,16 +159,19 @@ Query parameters:
 | `vibe_tag` | string | Filter by vibe tag |
 | `category` | string | Filter by activity category (e.g. `Fitness`, `Music`). Synonyms like `gym`/`workout`/`yoga` resolve to `Fitness` |
 | `time_preset` | `"tonight"` \| `"this_weekend"` | Friendly time window (computed in SF local time) |
-| `location_preset` | `"sf"` \| `"oakland"` \| `"san_jose"` | Friendly location filter |
+| `region` | `"sf"` \| `"east_bay"` \| `"peninsula"` \| `"south_bay"` \| `"north_bay"` | Bay Area region the event is in (see `GET /regions`) |
+| `city` | string | City the event is in, e.g. `Oakland`, `Palo Alto` (case-insensitive; `400` for a city the platform does not know) |
+| `is_free` | bool | `true`: only free events; `false`: only paid or unpriced ones |
+| `location_preset` | `"sf"` \| `"oakland"` \| `"san_jose"` | Legacy shortcut for `city`; prefer `region` / `city` |
 | `start_at` | datetime | Window lower bound, including ongoing events (overrides preset start) |
 | `end_at` | datetime | Start-time upper bound (overrides preset end) |
 | `include_past` | bool (default `false`) | Include past events |
 | `sort_by` | `"date"` (default) \| `"distance"` | `distance` requires `lat`/`lng` |
 | `status` | string | Filter by event status; defaults to scheduled when `include_past=false` |
 | `limit` | int 1–200 (default 25) | |
-| `offset` | int ≥ 0 (default 0) | |
+| `offset` | int 0–1,000,000 (default 0) | |
 
-Response: `EventResponse[]`.
+Response: `EventResponse[]`. Each event carries `city` (string or null) and `region` (one of the ids above, `beyond` for a listing outside the nine counties, or null until assigned), both derived from the event's location.
 
 Response headers:
 
@@ -743,3 +756,78 @@ with database default `legacy`, preserving existing rows and foreign keys. Apply
 release procedures before serving new code; this task validates only disposable
 databases. Downgrade removes agent credentials/provenance but retains user/event
 and signal rows. Credential rotation/recovery for existing JWTs is separate work.
+
+
+## Bay Area geography, calendar export and account lifecycle (additive, 2026-11-12)
+
+### GET /regions
+
+Auth: none. The values `GET /events` accepts for `region` and `city`, with the
+number of scheduled upcoming events in each. Always returns the five regions
+in display order; a region's `cities` lists only cities that currently have
+upcoming events, busiest first. `Cache-Control: public, max-age=300`.
+
+```json
+{"regions": [{"id": "east_bay", "label": "East Bay", "upcoming_count": 412,
+  "cities": [{"name": "Oakland", "upcoming_count": 230}, {"name": "Berkeley", "upcoming_count": 96}]}]}
+```
+
+### GET /events/{event_id}/calendar.ics
+
+Auth: none. One event as an iCalendar file (`text/calendar`, served as an
+attachment) for "add to calendar". An event whose clock time is a connector
+placeholder (`start_time_is_estimated`) is written as an all-day entry on its
+Pacific date rather than with an invented time. `404` for an unknown id.
+
+### POST /auth/password-reset/request
+
+Body `{"email": string}`. Always `202 {"detail": "…"}` with the same body
+whether or not the address has an account. When it does, a single-use link
+(`{PUBLIC_WEB_URL}/reset-password?token=…`, valid `PASSWORD_RESET_EXPIRE_MINUTES`)
+is emailed over SMTP; at most three unexpired links exist per account.
+
+### POST /auth/password-reset/confirm
+
+Body `{"token": string, "new_password": string}` (12 characters minimum, 72
+bytes maximum). `200` with the login response shape; every token issued to the
+account before the reset stops working. `400` for an invalid, used or expired
+token.
+
+### POST /auth/logout
+
+User JWT. `204`. Revokes every JWT issued to the account so far ("sign out
+everywhere"): each token carries a `ver` claim that must match the account's
+current version. A revoked token receives `401 {"detail": "Token has been revoked."}`
+on authenticated routes; public discovery routes keep treating a stale token
+as anonymous.
+
+### POST /users/me/password
+
+User JWT. Body `{"current_password": string, "new_password": string}`. `200`
+with the login response shape and a **new** token (all earlier tokens are
+revoked). `400` if the current password is wrong.
+
+### GET /users/me/export
+
+User JWT. `200` JSON attachment with everything stored about the account:
+profile, saved events, activity signals, owned folders and their items,
+memberships, votes, shared itineraries, and agent-token metadata. No password
+hash or token secret is included.
+
+### POST /users/me/delete
+
+User JWT. Body `{"password": string}`. `204`; `400` if the password is wrong.
+Irreversibly deletes the account, its signals, agent tokens and shared
+itineraries, the folders it owns (with their items, votes, members and
+invites), and its votes and memberships in other people's folders.
+
+These six account routes accept only a user JWT, never an agent token.
+
+### Error responses
+
+A value the database cannot store (a NUL byte, an out-of-range number) is a
+`400` with a stable `detail`; a write that loses a race with an identical
+concurrent write (double-submitted vote, duplicate registration) is a `409`.
+Both carry `request_id`. Migrations: `202611120001` (event `city`/`region`,
+discovery indexes) and `202611120002` (`users.token_version`,
+`password_reset_tokens`) are additive.

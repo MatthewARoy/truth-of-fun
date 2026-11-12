@@ -448,6 +448,11 @@ def _canonical_tag_filter(vibe_tag: str):
 # under this value or its centroid fallback is returned as a real location.
 DEFAULT_MIN_LOCATION_CONFIDENCE = 0.5
 
+# Same ceiling PUT /users/me/preferences enforces. Every preferred vibe becomes
+# a correlated subquery in the recommendations ranking, so a list that "like"
+# could grow without bound was both a slow query and a way to make one.
+_MAX_PREFERRED_VIBES = 50
+
 
 def overlaps_window(window_start: datetime, window_end: datetime):
     """SQL predicate: the event overlaps [window_start, window_end].
@@ -941,7 +946,11 @@ def update_me_interests(
         tag = payload.vibe_tag.strip()
         if not tag.startswith("#"):
             tag = f"#{tag}"
-        if actor.kind == "user" and tag not in user.preferred_vibes:
+        if (
+            actor.kind == "user"
+            and tag not in user.preferred_vibes
+            and len(user.preferred_vibes) < _MAX_PREFERRED_VIBES
+        ):
             user.preferred_vibes.append(tag)
         _user_profile_service.record_signal(
             session=session,
@@ -997,7 +1006,7 @@ async def set_onboarding_profile(
         raise HTTPException(status_code=400, detail="perfect_saturday must not be empty.")
     extracted_tags = await _user_profile_service.extract_onboarding_tags(prompt)
     for tag in extracted_tags:
-        if tag not in user.preferred_vibes:
+        if tag not in user.preferred_vibes and len(user.preferred_vibes) < _MAX_PREFERRED_VIBES:
             user.preferred_vibes.append(tag)
         _user_profile_service.record_signal(
             session=session,

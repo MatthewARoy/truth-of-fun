@@ -1,0 +1,12 @@
+# Overlay used by .github/workflows/deploy-ci.yml (and handy for a local
+# rehearsal): binds the edge to loopback high ports so it needs no privileges
+# and cannot collide with anything already listening on 80/443.
+#
+#   docker compose --env-file <env> -f deploy/docker-compose.prod.yml \
+#     -f deploy/docker-compose.ci.yml up -d --build
+#   curl -k https://localhost:8443/api/health/ready
+services:
+  caddy:
+    ports: !override
+      - "127.0.0.1:8080:80"
+      - "127.0.0.1:8443:443"

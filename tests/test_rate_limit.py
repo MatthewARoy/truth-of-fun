@@ -197,3 +197,50 @@ class TestRedisBackend:
         assert ratelimit._hit(limiter, "a") is None
         # Still limited — neither an outage nor an unlimited endpoint.
         assert ratelimit._hit(limiter, "a") is not None
+
+
+class TestGeneralLimit:
+    """One client cannot occupy the API through endpoints with no limit of their own."""
+
+    def _request(self, host: str):
+        from starlette.requests import Request
+
+        return Request({"type": "http", "client": (host, 1234), "headers": []})
+
+    def test_ipv6_clients_are_keyed_by_their_slash_64(self) -> None:
+        from app.core.ratelimit import client_key
+
+        a = client_key(self._request("2001:db8:1:2:aaaa::1"))
+        b = client_key(self._request("2001:db8:1:2:bbbb::9"))
+        other = client_key(self._request("2001:db8:1:3::1"))
+        assert a == b != other
+        assert client_key(self._request("8.8.4.4")) == "8.8.4.4"
+        assert client_key(self._request("::ffff:8.8.4.4")) == "8.8.4.4"
+
+    def test_public_client_is_capped_and_internal_callers_are_not(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi import HTTPException
+
+        from app.core import ratelimit
+
+        limiter = SlidingWindowLimiter(name="general-test", limit=3, window_seconds=60)
+        monkeypatch.setattr(ratelimit, "get_general_limiter", lambda: limiter)
+        public = self._request("8.8.8.8")
+        for _ in range(3):
+            ratelimit.general_rate_limit(public)
+        with pytest.raises(HTTPException) as refused:
+            ratelimit.general_rate_limit(public)
+        assert refused.value.status_code == 429
+        assert int(refused.value.headers["Retry-After"]) >= 1
+        # The web container's server-side rendering and health probes.
+        for host in ("127.0.0.1", "172.28.0.5", "10.0.0.8"):
+            for _ in range(10):
+                ratelimit.general_rate_limit(self._request(host))
+
+    def test_every_route_is_behind_the_general_limit(self) -> None:
+        from app.core.ratelimit import general_rate_limit
+
+        assert any(
+            dependency.dependency is general_rate_limit for dependency in app.router.dependencies
+        )

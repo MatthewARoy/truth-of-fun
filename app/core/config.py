@@ -304,6 +304,14 @@ class Settings(BaseSettings):
         ),
     )
 
+    rate_limit_general_per_minute: int = Field(
+        default=300,
+        ge=0,
+        description=(
+            "Per-client cap on total API requests per minute, across all "
+            "routes (internal/private-network callers are exempt). 0 disables."
+        ),
+    )
     rate_limit_backend: Literal["memory", "redis"] = Field(
         default="memory",
         description=(
