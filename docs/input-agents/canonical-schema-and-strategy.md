@@ -8,7 +8,7 @@ This document defines the shared contract used by all source input agents.
 {
   "event_id": "uuid-or-deterministic-hash",
   "source": {
-    "source_id": "ticketmaster|eventbrite|meetup|funcheapsf|19hz|luma|dothebay|sfstation|minnesotastreet|reddit|eddies_list",
+    "source_id": "ticketmaster|eventbrite|meetup|funcheapsf|19hz|luma|dothebay|sfstation|minnesotastreet|reddit|eddies_list|stanford_events|sjsu_events|oakland_library|san_jose_library",
     "source_record_id": "string-or-null",
     "source_url": "https://...",
     "ingested_at": "2026-03-01T12:00:00Z",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -25,7 +26,31 @@ SF_TZ = ZoneInfo("America/Los_Angeles")
 # downstream mistakes the placeholder hour for a published one.
 DEFAULT_EVENT_HOUR = 19
 
-LISTING_BASE_URL = "https://www.eventbrite.com/d/ca--san-francisco"
+LISTING_ROOT_URL = "https://www.eventbrite.com/d"
+#: The primary (San Francisco) listing; kept as a module constant for callers.
+LISTING_BASE_URL = f"{LISTING_ROOT_URL}/ca--san-francisco"
+
+#: The one slice crawled for every location other than the primary one.
+ALL_EVENTS_ONLY: tuple[tuple[str, str | None], ...] = (("all-events", None),)
+
+
+@dataclass(frozen=True)
+class ListingLocation:
+    """One Eventbrite browse location (``/d/<slug>/...``) and how deep to read it.
+
+    ``city`` is only a label: it names the listing in crawl diagnostics and is
+    the last-resort city for a card whose own JSON-LD address has no locality.
+    It is never stamped over an event's published city — Eventbrite's location
+    listings are metro-radius searches, so the Oakland listing is mostly San
+    Francisco events (15 of the first 20 when captured 2026-11-12).
+    """
+
+    slug: str
+    city: str
+    #: None => the source's ``listing_slices`` (the full category set).
+    slices: tuple[tuple[str, str | None], ...] | None = None
+    #: None => the source's ``max_pages_per_slice``.
+    max_pages: int | None = None
 
 # The search results' own pagination block, e.g.
 # "events":{"pagination":{"object_count":218,"page_count":11,...}}
@@ -52,11 +77,31 @@ class EventbriteSource(InputAgentSource):
         ("food-and-drink--events", "Food"),
         ("all-events", None),
     )
+    #: Browse locations crawled in order. Every slug below was checked live on
+    #: 2026-11-12 (200, same JSON-LD ItemList and pagination block as SF).
+    #: San Francisco keeps the full category slices; the others read only
+    #: ``all-events``, a few pages deep, so the run stays bounded. Their
+    #: listings overlap (Berkeley's first page shared 15 of 20 events with
+    #: Oakland's), which costs nothing but the request: events are merged by
+    #: URL across every location and slice. ``ca--san-mateo`` also exists but
+    #: is left out — its first page shared 14 of 20 events with Palo Alto's.
+    listing_locations: tuple[ListingLocation, ...] = (
+        ListingLocation("ca--san-francisco", "San Francisco"),
+        ListingLocation("ca--oakland", "Oakland", ALL_EVENTS_ONLY, 3),
+        ListingLocation("ca--berkeley", "Berkeley", ALL_EVENTS_ONLY, 3),
+        ListingLocation("ca--san-jose", "San Jose", ALL_EVENTS_ONLY, 3),
+        ListingLocation("ca--palo-alto", "Palo Alto", ALL_EVENTS_ONLY, 3),
+        ListingLocation("ca--walnut-creek", "Walnut Creek", ALL_EVENTS_ONLY, 3),
+        ListingLocation("ca--santa-rosa", "Santa Rosa", ALL_EVENTS_ONLY, 3),
+    )
     #: Days covered by every slice, starting today (SF time).
     horizon_days = 14
     max_pages_per_slice = 5
-    #: Hard cap on listing requests per run, across all slices.
-    max_requests = 25
+    #: Hard cap on listing requests per run, across all locations and slices.
+    #: 25 was the San Francisco budget (5 slices x 5 pages); the six added
+    #: locations read one slice x 3 pages each, so the full plan is 25 + 18 =
+    #: 43 requests — under a minute at 1 request/second, every 6 hours.
+    max_requests = 43
 
     async def discover_candidates(self, **kwargs: Any) -> list[Any]:
         html = kwargs.get("html")
@@ -67,58 +112,84 @@ class EventbriteSource(InputAgentSource):
         return await self._crawl_listing_slices(today)
 
     async def _crawl_listing_slices(self, today: date) -> list[dict[str, Any]]:
-        """Walk each slice page by page, merging events listed in several slices."""
+        """Walk each location's slices page by page, merging events by URL."""
         end = today + timedelta(days=self.horizon_days - 1)
         merged: dict[str, dict[str, Any]] = {}
         requests_made = 0
+        #: Listings that stopped at a page/request cap rather than their last page.
+        capped: list[str] = []
 
-        for slug, category in self.listing_slices:
-            slice_urls: set[str] = set()
-            page = 1
-            while (
-                page <= self.max_pages_per_slice and requests_made < self.max_requests
-            ):
-                url = self._slice_url(slug, start=today, end=end, page=page)
-                requests_made += 1
-                try:
-                    html = await self._get_text(url)
-                except httpx.HTTPError as exc:
-                    if not merged:
-                        raise
-                    # Keep the pages already read, but report the crawl as partial.
-                    self.last_fetch_error = describe_fetch_error(exc)
-                    return list(merged.values())
+        for location in self.listing_locations:
+            slices = location.slices if location.slices is not None else self.listing_slices
+            max_pages = (
+                location.max_pages
+                if location.max_pages is not None
+                else self.max_pages_per_slice
+            )
+            for slug, category in slices:
+                slice_urls: set[str] = set()
+                page = 1
+                while page <= max_pages and requests_made < self.max_requests:
+                    url = self._slice_url(
+                        slug, start=today, end=end, page=page, location=location.slug
+                    )
+                    requests_made += 1
+                    try:
+                        html = await self._get_text(url)
+                    except httpx.HTTPError as exc:
+                        if not merged:
+                            raise
+                        # Keep the pages already read, but report the crawl as partial.
+                        self.last_fetch_error = describe_fetch_error(exc)
+                        return list(merged.values())
 
-                added = 0
-                for candidate in self._extract_listing_candidates(html):
-                    source_url = candidate["source_url"]
-                    if source_url not in slice_urls:
-                        slice_urls.add(source_url)
-                        added += 1
-                    event = merged.setdefault(source_url, candidate)
-                    if category and category not in event["categories"]:
-                        event["categories"].append(category)
+                    added = 0
+                    for candidate in self._extract_listing_candidates(html):
+                        source_url = candidate["source_url"]
+                        if source_url not in slice_urls:
+                            slice_urls.add(source_url)
+                            added += 1
+                        candidate["listing_city"] = location.city
+                        event = merged.setdefault(source_url, candidate)
+                        if category and category not in event["categories"]:
+                            event["categories"].append(category)
 
-                page_count = self._page_count(html)
-                # Stop on the slice's last page, and on a page that adds nothing:
-                # a listing that ignores ?page= repeats itself rather than ending.
-                if page_count is None:
-                    self.last_fetch_error = "Pagination metadata missing; crawl coverage unknown"
-                    break
-                if page >= page_count:
-                    break
-                if added == 0:
-                    self.last_fetch_error = "Listing repeated before its last page; crawl incomplete"
-                    break
-                page += 1
-            else:
-                self.last_fetch_error = "Listing page/request cap reached; crawl incomplete"
+                    page_count = self._page_count(html)
+                    # Stop on the slice's last page, and on a page that adds nothing:
+                    # a listing that ignores ?page= repeats itself rather than ending.
+                    if page_count is None:
+                        self.last_fetch_error = "Pagination metadata missing; crawl coverage unknown"
+                        break
+                    if page >= page_count:
+                        break
+                    if added == 0:
+                        self.last_fetch_error = "Listing repeated before its last page; crawl incomplete"
+                        break
+                    page += 1
+                else:
+                    capped.append(f"{location.slug}/{slug}")
 
+        if capped:
+            shown = ", ".join(capped[:12]) + (", ..." if len(capped) > 12 else "")
+            cap_error = f"Listing page/request cap reached; crawl incomplete ({shown})"
+            # Keep an earlier, more specific reason (missing pagination, a
+            # repeating listing) alongside the cap.
+            self.last_fetch_error = "; ".join(
+                reason for reason in (self.last_fetch_error, cap_error) if reason
+            )[:1000]
         return list(merged.values())
 
-    def _slice_url(self, slug: str, *, start: date, end: date, page: int) -> str:
+    def _slice_url(
+        self,
+        slug: str,
+        *,
+        start: date,
+        end: date,
+        page: int,
+        location: str = "ca--san-francisco",
+    ) -> str:
         url = (
-            f"{LISTING_BASE_URL}/{slug}/"
+            f"{LISTING_ROOT_URL}/{location}/{slug}/"
             f"?start_date={start.isoformat()}&end_date={end.isoformat()}"
         )
         return url if page == 1 else f"{url}&page={page}"
@@ -169,7 +240,10 @@ class EventbriteSource(InputAgentSource):
             location=LocationModel(
                 venue_name=location_text,
                 address_line1=self._pick_first_str(raw_item, "street_address"),
-                city=self._pick_first_str(raw_item, "city") or "San Francisco",
+                # The event's own JSON-LD locality. A card without one takes
+                # the label of the listing it was found on; with neither, the
+                # city is left blank rather than assumed to be San Francisco.
+                city=self._pick_first_str(raw_item, "city", "listing_city") or "",
                 region=self._pick_first_str(raw_item, "region") or "CA",
                 postal_code=self._pick_first_str(raw_item, "postal_code"),
                 lat=lat,

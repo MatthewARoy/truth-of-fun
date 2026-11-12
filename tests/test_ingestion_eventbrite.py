@@ -234,3 +234,97 @@ def test_eventbrite_candidate_preserves_the_time_component() -> None:
 
     assert len(candidates) == 1
     assert candidates[0]["start_date"] == "2026-06-20T14:30:00-07:00"
+
+
+# Trimmed from the REAL Oakland and San Jose listing pages
+# (https://www.eventbrite.com/d/ca--oakland/all-events/ and
+# .../d/ca--san-jose/all-events/), captured 2026-11-12. A location listing is
+# a metro-radius search: the Oakland page carried San Francisco events and the
+# San Jose page a Mountain View one, so the city must be read from each
+# event's own address rather than from the listing it appeared on.
+LIVE_EAST_AND_SOUTH_BAY_LDJSON_HTML = """
+<script type="application/ld+json">
+{"@context": "https://schema.org", "@type": "ItemList", "itemListElement": [
+ {"position": 1, "@type": "ListItem", "item": {
+   "@type": "Event",
+   "name": "Choir Rehearsal with Friends - OAKLAND",
+   "description": "\\"It's a Choir Rehearsal with your FRIENDS\\"",
+   "startDate": "2026-11-21", "endDate": "2026-11-21",
+   "url": "https://www.eventbrite.com/e/choir-rehearsal-with-friends-oakland-tickets-1997751337027",
+   "location": {"@type": "Place", "name": "Evergreen Missionary Baptist Church",
+     "address": {"@type": "PostalAddress", "addressRegion": "CA",
+       "streetAddress": "408 West MacArthur Boulevard", "addressLocality": "Oakland",
+       "addressCountry": "US", "postalCode": "94609"},
+     "geo": {"@type": "GeoCoordinates", "latitude": "37.825626", "longitude": "-122.2622634"}},
+   "eventAttendanceMode": "https://schema.org/OfflineEventAttendanceMode"}},
+ {"position": 2, "@type": "ListItem", "item": {
+   "@type": "Event",
+   "name": "Bhangra & Beats Night Market-Official City of SF Diwali Celebration",
+   "description": "A free night market series in downtown SF.",
+   "startDate": "2026-11-13", "endDate": "2026-11-13",
+   "url": "https://www.eventbrite.com/e/bhangra-beats-night-market-official-city-of-sf-diwali-celebration-tickets-1996185713204",
+   "location": {"@type": "Place", "name": "Yerba Buena Gardens",
+     "address": {"@type": "PostalAddress", "addressRegion": "CA",
+       "streetAddress": "750 Howard Street", "addressLocality": "San Francisco",
+       "addressCountry": "US", "postalCode": "94103"},
+     "geo": {"@type": "GeoCoordinates", "latitude": "37.7849884", "longitude": "-122.4023514"}},
+   "eventAttendanceMode": "https://schema.org/OfflineEventAttendanceMode"}},
+ {"position": 3, "@type": "ListItem", "item": {
+   "@type": "Event",
+   "name": "NOV 13 | FRI | HABIBI PLEASE 2.0 \\u2014 A MIDDLE EASTERN PARTY | MOUNTAIN VIEW",
+   "description": "Habibi Please returns to bay area.",
+   "startDate": "2026-11-13", "endDate": "2026-11-14",
+   "url": "https://www.eventbrite.com/e/nov-13-fri-habibi-please-20-a-middle-eastern-party-mountain-view-tickets-1998925436791",
+   "location": {"@type": "Place", "name": "Opal nightlcub",
+     "address": {"@type": "PostalAddress", "addressRegion": "CA",
+       "streetAddress": "251 castro st.", "addressLocality": "Mountain View",
+       "addressCountry": "US", "postalCode": "94105"},
+     "geo": {"@type": "GeoCoordinates", "latitude": "37.3931085", "longitude": "-122.0790175"}},
+   "eventAttendanceMode": "https://schema.org/OfflineEventAttendanceMode"}}
+]}
+</script>
+"""
+
+
+def test_eventbrite_city_is_the_events_own_address_locality() -> None:
+    source = EventbriteSource()
+    candidates = source._extract_listing_candidates(LIVE_EAST_AND_SOUTH_BAY_LDJSON_HTML)
+    # As the crawl would: all three cards were found on the Oakland listing.
+    for candidate in candidates:
+        candidate["listing_city"] = "Oakland"
+
+    events = [source.normalize_raw(candidate) for candidate in candidates]
+
+    assert all(event is not None for event in events)
+    assert [event.location.city for event in events] == [
+        "Oakland",
+        "San Francisco",
+        "Mountain View",
+    ]
+    oakland = events[0]
+    assert oakland.location.address_line1 == "408 West MacArthur Boulevard"
+    assert oakland.location.postal_code == "94609"
+    assert (oakland.location.lat, oakland.location.lon) == (37.825626, -122.2622634)
+    assert oakland.location.location_confidence == 0.9
+
+
+def test_eventbrite_never_defaults_an_unknown_city_to_san_francisco() -> None:
+    source = EventbriteSource()
+    raw_item = {
+        "title": "Lakeside Session",
+        "source_url": "https://www.eventbrite.com/e/lakeside-session-tickets-654",
+        "start_date": "2026-11-21",
+        "venue_name": "Lakeside Park",
+        "lat": "37.8080",
+        "lon": "-122.2500",
+    }
+
+    unknown = source.normalize_raw(dict(raw_item))
+    listed = source.normalize_raw({**raw_item, "listing_city": "Oakland"})
+
+    assert unknown is not None and listed is not None
+    # No locality and no listing context: blank, which the pipeline stores as
+    # "unknown" - not the LocationModel default of San Francisco.
+    assert unknown.location.city == ""
+    # Found on the Oakland listing, with no locality of its own.
+    assert listed.location.city == "Oakland"

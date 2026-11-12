@@ -20,6 +20,11 @@ SourceId = Literal[
     "minnesotastreet",
     "reddit",
     "eddies_list",
+    # Official calendars: one source per institution, so health is per calendar.
+    "stanford_events",
+    "sjsu_events",
+    "oakland_library",
+    "san_jose_library",
 ]
 
 CaptureMode = Literal["api", "scrape", "email_ingest", "llm_extract"]

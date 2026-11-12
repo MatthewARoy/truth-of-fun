@@ -22,8 +22,21 @@ def test_registry_includes_all_prd_sources() -> None:
         "minnesotastreet",
         "reddit",
         "eddies_list",
+        "stanford_events",
+        "sjsu_events",
+        "oakland_library",
+        "san_jose_library",
     }
     assert expected.issubset(set(registry.list_sources()))
+
+
+def test_every_registered_source_name_is_a_known_source_id() -> None:
+    """A source the registry runs but ``SourceId`` rejects cannot build a CanonicalEvent."""
+    from typing import get_args
+
+    from app.ingestion.contracts import SourceId
+
+    assert set(registry.list_sources()) <= set(get_args(SourceId))
 
 
 def test_canonical_event_maps_to_legacy_payload() -> None:

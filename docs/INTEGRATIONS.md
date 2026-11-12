@@ -5,7 +5,7 @@ Playwright-based scrapers (FuncheapSF, Luma) need browser binaries: `make instal
 | Source | Testable | Notes |
 |--------|----------|-------|
 | **Ticketmaster** | No | Requires `TICKETMASTER_API_KEY` or AAIM secrets |
-| **Eventbrite** | Yes | Public scraper, no API key |
+| **Eventbrite** | Yes | Public scraper, no API key; crawls SF, Oakland, Berkeley, San Jose, Palo Alto, Walnut Creek and Santa Rosa listings (≤ 43 requests/run) |
 | **Meetup** | No | Requires `MEETUP_API_TOKEN` |
 | **FuncheapSF** | Yes | Playwright scraper, no API key |
 | **19hz** | Yes | Public httpx scraper |
@@ -15,6 +15,10 @@ Playwright-based scrapers (FuncheapSF, Luma) need browser binaries: `make instal
 | **Minnesota Street Project** | Yes | Public httpx scraper |
 | **Reddit** | No | Requires `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` (script app); anonymous search.json is 403-blocked |
 | **Eddie's List** | No | Requires IMAP credentials (mailbox integration) |
+| **Stanford Events** (`stanford_events`) | Yes | Localist public JSON API (`events.stanford.edu/api/2/events`), no key; public in-person events only |
+| **SJSU Events** (`sjsu_events`) | Yes | Localist public JSON API (`events.sjsu.edu/api/2/events`), no key; public in-person events only |
+| **Oakland Public Library** (`oakland_library`) | Yes | BiblioCommons public JSON gateway, no key; one-off events only |
+| **San José Public Library** (`san_jose_library`) | Yes | BiblioCommons public JSON gateway, no key; one-off events only |
 
 ## Non-source integrations
 

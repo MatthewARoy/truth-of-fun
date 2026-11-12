@@ -134,7 +134,7 @@ _CITIES: dict[str, tuple[str, list[tuple[float, float]]]] = {
     "Redwood City": (PENINSULA, [(37.4852, -122.2364)]),
     "Menlo Park": (PENINSULA, [(37.4530, -122.1817)]),
     "East Palo Alto": (PENINSULA, [(37.4688, -122.1411)]),
-    "Palo Alto": (PENINSULA, [(37.4419, -122.1430)]),
+    "Palo Alto": (PENINSULA, [(37.4419, -122.1430), (37.4220, -122.1130)]),  # downtown, Mitchell Park
     "Stanford": (PENINSULA, [(37.4275, -122.1697)]),
     "Half Moon Bay": (PENINSULA, [(37.4636, -122.4286)]),
     # --- South Bay (Santa Clara County) ------------------------------------------

@@ -20,6 +20,8 @@ Each agent spec is designed to support:
 - [Minnesota Street Project + Arts Venues](./source-minnesota-street-arts.md)
 - [Reddit (r/AskSF, r/bayarea, r/sanfrancisco)](./source-reddit.md)
 - [Newsletters (Eddie's List)](./source-newsletters-eddies-list.md)
+- [Localist university calendars (Stanford, SJSU)](./source-localist.md)
+- [BiblioCommons library calendars (Oakland, San José)](./source-bibliocommons.md)
 
 ## Shared Standards
 - [Canonical Schema + Strategy](./canonical-schema-and-strategy.md)
