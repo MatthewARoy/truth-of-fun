@@ -614,3 +614,84 @@ def test_healthcheck_reflects_heartbeat_age(tmp_path, monkeypatch: Any) -> None:
     stale = time.time() - 601
     os.utime(beat, (stale, stale))
     assert worker_module.run_healthcheck() == 1
+
+
+class _PartialSource(_FakeSource):
+    """Returns events but reports that its crawl stopped short."""
+
+    last_fetch_error = "Listing page cap reached; crawl incomplete"
+
+
+async def test_capped_crawl_that_returned_events_is_degraded_not_failing() -> None:
+    from app import worker as worker_module
+
+    worker_module._source_health_state.clear()
+    worker = IngestionWorker(
+        pipeline_service=_FakePipeline(),
+        session_factory=lambda: nullcontext(object()),
+        source_registry=_FakeRegistry(
+            {"alpha": _PartialSource(source_name="alpha", events=[_event("a1")])}
+        ),
+    )
+    await worker.run_once()
+    state = worker_module._source_health_state["alpha"]
+    assert state["status"] == "degraded"
+    assert "cap reached" in state["last_error"]
+    # Not a complete success: coverage audits must still see it as partial.
+    assert state["last_success_at"] is None
+
+
+async def test_unconfigured_sources_are_disabled_and_never_escalate(monkeypatch: Any) -> None:
+    from app import worker as worker_module
+    from app.ingestion.base import SourceNotConfigured
+    from app.ingestion.sources.meetup import MeetupSource
+
+    monkeypatch.delenv("MEETUP_API_TOKEN", raising=False)
+
+    class _Registry(_FakeRegistry):
+        def create(self, name: str) -> Any:
+            if name == "ticketmaster":
+                raise SourceNotConfigured("Disabled: set TICKETMASTER_API_KEY to enable")
+            return super().create(name)
+
+    worker_module._source_health_state.clear()
+    worker = IngestionWorker(
+        pipeline_service=_FakePipeline(),
+        session_factory=lambda: nullcontext(object()),
+        source_registry=_Registry({"meetup": MeetupSource(), "ticketmaster": None}),
+    )
+    for _ in range(3):
+        await worker.run_once()
+    state = worker_module._source_health_state
+    for name, hint in (("meetup", "MEETUP_API_TOKEN"), ("ticketmaster", "TICKETMASTER_API_KEY")):
+        assert state[name]["status"] == "disabled", name
+        assert state[name]["consecutive_zeros"] == 0
+        assert hint in state[name]["last_error"]
+
+
+def test_ticketmaster_without_a_key_reports_not_configured(monkeypatch: Any) -> None:
+    from app.core.config import get_settings
+    from app.ingestion.base import SourceNotConfigured
+    from app.ingestion.ticketmaster import TicketmasterSource
+
+    monkeypatch.setattr(get_settings(), "ticketmaster_api_key", None)
+    monkeypatch.setattr(get_settings(), "aaim_enabled", False)
+    with pytest.raises(SourceNotConfigured, match="TICKETMASTER_API_KEY"):
+        TicketmasterSource()
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("Day page cap reached; crawl incomplete", True),
+        ("Listing page/request cap reached; crawl incomplete (ca--oakland/all-events)", True),
+        ("Pagination cap reached in minimum date window; search incomplete", True),
+        ("TimeoutError on page 2: upstream timed out", False),
+        ("Calendar page cap reached; crawl incomplete; 3 of 40 candidates failed (ValueError=3)", False),
+        ("", False),
+    ],
+)
+def test_only_configured_budgets_count_as_truncation(reason: str, expected: bool) -> None:
+    from app.worker import _is_budget_truncation
+
+    assert _is_budget_truncation(reason) is expected

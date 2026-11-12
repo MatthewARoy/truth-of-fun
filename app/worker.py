@@ -26,6 +26,7 @@ from app.core.logging import configure_logging
 from app.core.observability import init_error_reporting
 from app.core.redaction import redact_secrets
 from app.ingestion import registry
+from app.ingestion.base import SourceNotConfigured
 from app.models.event import Event
 from app.models.source_health import SourceHealthRecord
 from app.services.alerting import send_alert
@@ -47,6 +48,15 @@ _CYCLE_LOCK_KEY = 0x546F46_494E47  # "ToF" "ING"
 #: Identical alerts are suppressed for this long. Without it a source that
 #: stays broken re-pages the channel every cycle until people mute it.
 _ALERT_COOLDOWN = timedelta(hours=24)
+
+
+def _is_budget_truncation(reason: str) -> bool:
+    """Whether every part of a partial-fetch reason is a configured cap."""
+    parts = [part.strip().lower() for part in reason.split(";") if part.strip()]
+    return bool(parts) and all(
+        "cap reached" in part or part.startswith(("crawl incomplete", "search incomplete"))
+        for part in parts
+    )
 
 
 def heartbeat_path() -> Path:
@@ -228,6 +238,10 @@ class IngestionWorker:
         all_events: list[dict[str, Any]] = []
         per_source_counts: dict[str, int] = {}
         source_runs: list[tuple[str, SourceLike | None, str | None]] = []
+        # Sources with no credentials configured, and sources whose only
+        # problem is a crawl cut short after it already returned events.
+        not_configured: dict[str, str] = {}
+        partial_fetches: set[str] = set()  # stopped at a configured budget
 
         # Roll over quota windows before fetching so a key whose daily cap has
         # reset is available again for this run.
@@ -243,6 +257,9 @@ class IngestionWorker:
                 source = self._registry.create(source_name)
                 async with asyncio.timeout(self._source_timeout_seconds) as budget:
                     fetched_events = await source.fetch_events()
+            except SourceNotConfigured as exc:
+                not_configured[source_name] = redact_secrets(str(exc))[:1000]
+                logger.info("Source '%s' is not configured: %s", source_name, exc)
             except Exception as exc:
                 if budget is not None and budget.expired():
                     # Our budget, not the source's own timeout (a Playwright
@@ -273,6 +290,8 @@ class IngestionWorker:
                         partial = getattr(source, "last_fetch_error", None)
                         if partial:
                             fetch_error = redact_secrets(str(partial))[:1000]
+                            if _is_budget_truncation(fetch_error):
+                                partial_fetches.add(source_name)
                             logger.warning(
                                 "Source '%s' completed with a partial failure: %s",
                                 source_name,
@@ -328,12 +347,20 @@ class IngestionWorker:
                 except Exception as exc:
                     fetch_error = f"Checkpoint {type(exc).__name__}: {redact_secrets(str(exc))}"[:1000]
                     logger.exception("Could not save source '%s' checkpoint.", source_name)
+            empty_reason = not_configured.get(source_name) or getattr(
+                source, "last_empty_reason", None
+            )
             self._log_canary_metrics(
                 source_name=source_name,
                 current_count=per_source_counts[source_name],
                 error=fetch_error,
                 empty_is_success=bool(getattr(source, "last_fetch_was_incremental", False)),
-                empty_reason=getattr(source, "last_empty_reason", None),
+                empty_reason=empty_reason,
+                disabled=fetch_error is None
+                and per_source_counts[source_name] == 0
+                and isinstance(empty_reason, str)
+                and empty_reason.startswith("Disabled:"),
+                partial=source_name in partial_fetches,
             )
             if fetch_error:
                 self._pending_alerts.append((f"Source {source_name} incomplete", fetch_error, "warning"))
@@ -465,7 +492,24 @@ class IngestionWorker:
         self, *, source_name: str, current_count: int, error: str | None = None,
         empty_is_success: bool = False,
         empty_reason: str | None = None,
+        disabled: bool = False,
+        partial: bool = False,
     ) -> None:
+        if disabled:
+            # Switched off by configuration: not a health event at all. Keep
+            # the reason visible so the operator can see how to enable it.
+            prev = _source_health_state.get(source_name, {})
+            _source_health_state[source_name] = {
+                "last_run_at": datetime.now(timezone.utc).isoformat(),
+                "last_event_count": 0,
+                "status": "disabled",
+                "consecutive_zeros": 0,
+                "last_error": redact_secrets(empty_reason),
+                "last_error_at": prev.get("last_error_at"),
+                "last_success_at": prev.get("last_success_at"),
+            }
+            return
+
         history = self._source_count_history[source_name]
         historic_avg = (sum(history) / len(history)) if history else 0.0
 
@@ -506,7 +550,15 @@ class IngestionWorker:
         # An exception is a harder signal than a zero count: report it as
         # failing on the first occurrence rather than waiting for the
         # consecutive-zero ladder to escalate.
-        if error is not None:
+        if error is not None and partial and current_count > 0:
+            # The source delivered events and stopped only because it reached
+            # its own page/request budget. Coverage is reduced and the reason
+            # is recorded, but nothing is broken — reporting it as "failing"
+            # every cycle made that status meaningless for the sources whose
+            # listings are always longer than their budget. A crawl cut short
+            # by an error (a timeout on page 2) still reports as failing.
+            status = "degraded"
+        elif error is not None:
             status = "failing"
         elif consecutive_zeros == 0:
             status = "healthy"

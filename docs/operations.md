@@ -218,6 +218,22 @@ There is no alerting on the API's own error rate yet — that comes from
 whatever scrapes `/health/summary`. Wiring `make status` into cron is the
 simplest version.
 
+## Source statuses
+
+| Status | Meaning | Counts as a problem? |
+| --- | --- | --- |
+| `healthy` | Last run returned events and completed its crawl. | no |
+| `degraded` | Last run returned nothing, **or** returned events but stopped at its own page/request budget (`last_error` reads "… cap reached; crawl incomplete"). | yes — `make status` exits 1 |
+| `failing` | The fetch raised, timed out, was cut short by an error, or returned nothing twice running. | yes — exits 2 |
+| `disabled` | An optional source with no credentials configured (`last_error` says which variable enables it). | no |
+
+Several listings (DoTheBay, SF Station, Eventbrite) are routinely longer than
+the page budget the connectors allow themselves, so they report `degraded`
+with a cap message on most cycles. That is accurate — coverage of those
+listings is truncated — and it is the operator's call whether to raise the
+budgets (the `max_*` attributes on each source class) at the cost of more
+requests to that site.
+
 ## Worker safety nets
 
 - **Per-source budget.** A source whose fetch exceeds

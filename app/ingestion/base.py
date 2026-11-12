@@ -7,6 +7,16 @@ import httpx
 from app.ingestion.rate_limiter import AsyncRateLimiter
 
 
+class SourceNotConfigured(ValueError):
+    """An optional source has no credentials: it is switched off, not broken.
+
+    Raised from a source's constructor (or surfaced as an empty reason that
+    starts with "Disabled:"). The worker records such a source as ``disabled``
+    instead of walking it up the degraded → failing ladder and alerting on it
+    every cycle.
+    """
+
+
 class BaseSource(ABC):
     """Common async ingestion source behavior."""
 

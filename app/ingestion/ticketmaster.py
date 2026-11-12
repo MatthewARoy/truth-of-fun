@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from app.core.config import get_settings
-from app.ingestion.base import BaseSource
+from app.ingestion.base import BaseSource, SourceNotConfigured
 from app.services.secrets_store import get_secrets_store
 
 logger = logging.getLogger(__name__)
@@ -100,7 +100,10 @@ class TicketmasterSource(BaseSource):
             self._key_id = "env-ticketmaster"
 
         if not self._api_key:
-            raise ValueError("Ticketmaster API key is required.")
+            raise SourceNotConfigured(
+                "Disabled: set TICKETMASTER_API_KEY (or seed an AAIM key) to enable "
+                "Ticketmaster ingestion"
+            )
 
     @property
     def usage_key_id(self) -> str:
