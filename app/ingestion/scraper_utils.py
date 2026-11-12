@@ -83,6 +83,29 @@ def parse_price(text: str | None) -> tuple[float | None, bool]:
     return None, False
 
 
+def infer_listing_year(month: int, day: int, today: date) -> int:
+    """Year for a listing date published without one ("Sat Jan 3").
+
+    Calendars list what is coming up, so a yearless date means its next
+    occurrence. Assuming the current year put every January event seen in
+    November ten months into the past, where it was inserted and immediately
+    marked ``past``. A date that would be more than two months gone belongs to
+    next year; one more than ten months ahead (a late-December listing still
+    visible in early January) belongs to last year.
+    """
+    year = today.year
+    try:
+        candidate = date(year, month, day)
+    except ValueError:  # Feb 29 in a non-leap year
+        return year
+    delta = (candidate - today).days
+    if delta < -60:
+        return year + 1
+    if delta > 300:
+        return year - 1
+    return year
+
+
 def parse_datetime_flexible(
     text: str,
     *,
@@ -120,7 +143,11 @@ def parse_datetime_flexible(
             if month is None:
                 return None
             day = int(md_match.group("day"))
-            year = int(md_match.group("year")) if md_match.group("year") else ref.year
+            year = (
+                int(md_match.group("year"))
+                if md_match.group("year")
+                else infer_listing_year(month, day, ref)
+            )
             try:
                 base_date = date(year, month, day)
             except ValueError:

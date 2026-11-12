@@ -145,7 +145,9 @@ class EddiesListSource(InputAgentSource):
     def _fetch_imap_messages(self) -> list[bytes]:
         """Fetch recent newsletter issues from the configured mailbox."""
         messages: list[bytes] = []
-        connection = imaplib.IMAP4_SSL(self._imap_host, self._imap_port)
+        # Without a timeout a mailbox host that accepts and goes silent blocks
+        # this call forever — and, since imaplib is synchronous, the whole worker.
+        connection = imaplib.IMAP4_SSL(self._imap_host, self._imap_port, timeout=30)
         try:
             connection.login(self._imap_user, self._imap_password)
             status, _ = connection.select(self._imap_mailbox, readonly=True)

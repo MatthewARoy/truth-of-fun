@@ -129,3 +129,71 @@ def test_register_shares_the_auth_window_with_login() -> None:
             json={"email": "new@example.com", "password": "hunter2hunter2"},
         )
         assert response.status_code == 429
+
+
+class TestRedisBackend:
+    """The shared window is what makes limits hold across API processes."""
+
+    @pytest.fixture
+    def redis_backend(self, monkeypatch: pytest.MonkeyPatch):
+        import os
+        from uuid import uuid4
+
+        from redis import Redis
+
+        from app.core import ratelimit
+        from app.core.config import get_settings
+
+        url = os.environ.get("TEST_REDIS_URL")
+        if not url:
+            pytest.skip("Set TEST_REDIS_URL to a disposable Redis to verify shared windows")
+        client = Redis.from_url(url, decode_responses=True, socket_connect_timeout=2, socket_timeout=2)
+        client.ping()
+        prefix = f"tof-test-ratelimit-{uuid4().hex}"
+        monkeypatch.setattr(get_settings(), "rate_limit_redis_prefix", prefix)
+        monkeypatch.setattr(ratelimit, "_redis_client", lambda: client)
+        try:
+            yield client
+        finally:
+            keys = list(client.scan_iter(match=f"{prefix}:*"))
+            if keys:
+                client.delete(*keys)
+            client.close()
+
+    def test_window_is_shared_between_limiter_instances(self, redis_backend) -> None:
+        from app.core.ratelimit import _hit
+
+        # Two instances stand in for two API processes: same name, separate
+        # in-process state. Only a shared store can make the second one refuse.
+        first = SlidingWindowLimiter(name="shared", limit=2, window_seconds=60)
+        second = SlidingWindowLimiter(name="shared", limit=2, window_seconds=60)
+        assert _hit(first, "203.0.113.9") is None
+        assert _hit(second, "203.0.113.9") is None
+        retry_after = _hit(first, "203.0.113.9")
+        assert retry_after is not None and 0 < retry_after <= 60
+        assert _hit(second, "203.0.113.9") is not None
+        assert _hit(second, "203.0.113.10") is None
+
+    def test_window_expires_from_redis(self, redis_backend) -> None:
+        import time as _time
+
+        from app.core.ratelimit import _hit
+
+        limiter = SlidingWindowLimiter(name="short", limit=1, window_seconds=0.2)
+        assert _hit(limiter, "a") is None
+        assert _hit(limiter, "a") is not None
+        _time.sleep(0.3)
+        assert _hit(limiter, "a") is None
+
+    def test_unreachable_redis_degrades_to_process_window(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.core import ratelimit
+
+        class Broken:
+            def eval(self, *args: object, **kwargs: object) -> None:
+                raise ConnectionError("redis down")
+
+        monkeypatch.setattr(ratelimit, "_redis_client", lambda: Broken())
+        limiter = SlidingWindowLimiter(name="fallback", limit=1, window_seconds=60)
+        assert ratelimit._hit(limiter, "a") is None
+        # Still limited — neither an outage nor an unlimited endpoint.
+        assert ratelimit._hit(limiter, "a") is not None

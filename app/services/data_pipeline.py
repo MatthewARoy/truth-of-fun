@@ -162,7 +162,11 @@ class DataPipelineService:
         if existing is None:
             existing = Event(**{
                 key: value for key, value in event_payload.items()
-                if key in Event.model_fields
+                # "city" in the payload is the source's own guess (several
+                # connectors default it to San Francisco); the stored city and
+                # region are derived from the final location when the row is
+                # flushed (see the mapper hooks in app/models/event.py).
+                if key in Event.model_fields and key not in ("city", "region")
             })
             session.add(existing)
             session.flush()
@@ -977,7 +981,7 @@ class DataPipelineService:
                 self._normalize_str(event.get("venue_name")), _MAX_VENUE_NAME
             ),
             "raw_address": self._normalize_str(event.get("raw_address")),
-            "city": self._normalize_str(event.get("city")),
+            "city": self._clamp(self._normalize_str(event.get("city")), 100),
             "location": location.strip(),
             "categories": categories_v1(infer_categories(
                 title=title.strip(),

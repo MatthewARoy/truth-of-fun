@@ -38,6 +38,20 @@ REQUEST_ID_HEADER = "X-Request-ID"
 _QUIET_PATHS = frozenset({"/health", "/health/live", "/health/ready"})
 
 
+def _loggable_path(request: Request) -> str:
+    """The matched route template (``/itinerary/{token}``), not the raw path.
+
+    Share, invite and folder tokens are bearer credentials that travel in the
+    URL path; writing the concrete path to the access log would hand them to
+    anyone who can read logs. The template is also what you want to aggregate
+    on. Unmatched requests (404s) have no route and log the raw path — by
+    definition it did not address a token-bearing endpoint.
+    """
+    route = request.scope.get("route")
+    template = getattr(route, "path", None)
+    return template if isinstance(template, str) else request.url.path
+
+
 class RequestContextMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: ASGIApp) -> None:
         super().__init__(app)
@@ -63,11 +77,12 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 logger.exception(
                     "Unhandled error %s %s after %.1fms",
                     request.method,
-                    request.url.path,
+                    _loggable_path(request),
                     duration_ms,
                     extra={
                         "http_method": request.method,
-                        "http_path": request.url.path,
+                        "http_path": _loggable_path(request),
+                        "client_ip": request.client.host if request.client else None,
                         "duration_ms": round(duration_ms, 1),
                         "outcome": "unhandled_exception",
                     },
@@ -95,12 +110,15 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                     level,
                     "%s %s -> %s (%.1fms)",
                     request.method,
-                    request.url.path,
+                    _loggable_path(request),
                     response.status_code,
                     duration_ms,
                     extra={
                         "http_method": request.method,
-                        "http_path": request.url.path,
+                        "http_path": _loggable_path(request),
+                        # Without the caller there is no way to attribute
+                        # abuse from the logs alone.
+                        "client_ip": request.client.host if request.client else None,
                         "http_status": response.status_code,
                         "duration_ms": round(duration_ms, 1),
                     },

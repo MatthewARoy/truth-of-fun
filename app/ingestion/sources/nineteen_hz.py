@@ -11,6 +11,7 @@ from app.ingestion.contracts import OffersModel
 from app.ingestion.contracts import SourceMetadata
 from app.ingestion.input_agent import InputAgentSource
 from app.ingestion.scraper_utils import parse_price
+from app.ingestion.scraper_utils import infer_listing_year
 from app.ingestion.venue_cache import lookup_city_coordinates, lookup_venue_coordinates
 
 SF_TZ = ZoneInfo("America/Los_Angeles")
@@ -200,12 +201,7 @@ class NineteenHzSource(InputAgentSource):
         if month_value is None:
             return None, None
 
-        year = datetime.now(SF_TZ).year
-        now = datetime.now(SF_TZ)
-        if now.month == 12 and month_value == 1:
-            year += 1
-        elif now.month == 1 and month_value == 12:
-            year -= 1
+        year = infer_listing_year(month_value, day_value, datetime.now(SF_TZ).date())
 
         start_time_match = re.search(
             r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*-\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)",

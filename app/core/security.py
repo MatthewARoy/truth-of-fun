@@ -145,6 +145,29 @@ def get_internal_principal(
     )
 
 
+def _user_for_claims(session: Session, payload: dict[str, Any]) -> User | None:
+    """Resolve the token's user by id, falling back to the subject email.
+
+    The id is authoritative (an email can in principle be re-registered after
+    an account is deleted); tokens minted before ``user_id`` was a claim only
+    carry ``sub``.
+    """
+    user_id = payload.get("user_id")
+    email = payload.get("sub")
+    if isinstance(user_id, int):
+        user = session.get(User, user_id)
+        return user if user is not None and user.email == email else None
+    return session.exec(select(User).where(User.email == email)).first()
+
+
+def _token_is_current(user: User, payload: dict[str, Any]) -> bool:
+    """False once the account's sessions were revoked after this token was issued."""
+    try:
+        return int(payload.get("ver", 0)) == int(user.token_version or 0)
+    except (TypeError, ValueError):
+        return False
+
+
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     settings: Settings = Depends(get_settings),
@@ -181,11 +204,16 @@ def get_current_user(
             detail="Token missing subject.",
         )
 
-    user = session.exec(select(User).where(User.email == email)).first()
+    user = _user_for_claims(session, payload)
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found.",
+        )
+    if not _token_is_current(user, payload):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked.",
         )
     if not user.is_active:
         raise HTTPException(
@@ -311,8 +339,8 @@ def get_optional_user(
     if not email:
         return None
 
-    user = session.exec(select(User).where(User.email == email)).first()
-    if user is None or not user.is_active:
+    user = _user_for_claims(session, payload)
+    if user is None or not user.is_active or not _token_is_current(user, payload):
         return None
     return user
 

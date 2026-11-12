@@ -56,7 +56,8 @@ class MeetupSource(InputAgentSource):
         city = self._pick_first_str(venue, "city") or "San Francisco"
         lat = self._to_float(venue.get("lat")) if isinstance(venue, dict) else None
         lon = self._to_float(venue.get("lon")) if isinstance(venue, dict) else None
-        if lat is None or lon is None:
+        has_coordinates = lat is not None and lon is not None
+        if not has_coordinates:
             lat = DEFAULT_SF_LAT
             lon = DEFAULT_SF_LON
 
@@ -88,7 +89,11 @@ class MeetupSource(InputAgentSource):
                 city=city,
                 lat=lat,
                 lon=lon,
-                location_confidence=0.85 if venue_name else 0.6,
+                # A venue's own coordinates are trustworthy; the fallback is
+                # only the San Francisco centroid and must stay below the
+                # radius-search threshold, or every venue-less (often online)
+                # meetup shows up as a confident pin on Market Street.
+                location_confidence=(0.85 if venue_name else 0.6) if has_coordinates else 0.3,
             ),
             organizer=organizer,
             category_tags=self._coerce_tags(raw_item.get("topics")),

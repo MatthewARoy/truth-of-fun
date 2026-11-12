@@ -75,7 +75,7 @@ class RedditSource(InputAgentSource):
             self._llm_client = llm_client
         else:
             api_key = settings.anthropic_api_key
-            self._llm_client = anthropic.AsyncAnthropic(api_key=api_key) if api_key else None
+            self._llm_client = anthropic.AsyncAnthropic(api_key=api_key, timeout=30.0, max_retries=1) if api_key else None
         self._client_id = settings.reddit_client_id if client_id is _UNSET else client_id
         self._client_secret = (
             settings.reddit_client_secret if client_secret is _UNSET else client_secret

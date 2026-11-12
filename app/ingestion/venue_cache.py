@@ -75,8 +75,8 @@ VENUE_COORDINATES: dict[str, tuple[float, float]] = {
     "the saloon": (37.7976, -122.4057),
 
     # Oakland
-    "fox theater": (37.8048, -122.2712),
-    "fox theater oakland": (37.8048, -122.2712),
+    "fox theater": (37.8080, -122.2702),
+    "fox theater oakland": (37.8080, -122.2702),
     "the new parish": (37.8084, -122.2665),
     "oakland arena": (37.7504, -122.2028),
     "the paramount theatre": (37.8092, -122.2685),
@@ -86,6 +86,9 @@ VENUE_COORDINATES: dict[str, tuple[float, float]] = {
     "crybaby": (37.8097, -122.2671),
     "complex oakland": (37.8013, -122.2752),
     "lake merritt amphitheater": (37.8037, -122.2568),
+    # Not The Chapel (Valencia St): longest key wins, so this keeps the
+    # Piedmont Avenue columbarium's concerts out of the Mission.
+    "chapel of the chimes": (37.8322, -122.2393),
 
     # Berkeley / East Bay
     "uc theatre": (37.8681, -122.2597),
@@ -165,6 +168,64 @@ VENUE_COORDINATES: dict[str, tuple[float, float]] = {
     "thee stork club": (37.8118, -122.2686),
     "chabot space & science center": (37.8188, -122.1815),
     "marin county fairgrounds": (37.9857, -122.5194),
+
+    # --- Beyond San Francisco -------------------------------------------------
+    # The table used to be ~80% San Francisco, so an Oakland or San Jose venue
+    # nearly always fell through to a city centroid (and out of radius search).
+    # Coordinates below were checked against OpenStreetMap (Nominatim) on
+    # 2026-11-12; each resolved to the named venue or its grounds.
+    # San Francisco
+    "oracle park": (37.7786, -122.3895),
+    "cow palace": (37.7062, -122.4202),
+    # East Bay
+    "yoshi's": (37.7961, -122.2783),
+    "oakland coliseum": (37.7516, -122.2005),
+    "oakland-alameda county coliseum": (37.7516, -122.2005),
+    "the crucible": (37.805, -122.2906),
+    "oakland museum of california": (37.7986, -122.2636),
+    "oakland zoo": (37.7508, -122.1452),
+    "jack london square": (37.7958, -122.2747),
+    "zellerbach hall": (37.869, -122.2608),
+    "berkeley repertory theatre": (37.8713, -122.2697),
+    "freight & salvage": (37.8708, -122.2695),
+    "freight and salvage": (37.8708, -122.2695),
+    "california memorial stadium": (37.871, -122.2507),
+    "lawrence hall of science": (37.8803, -122.2465),
+    "924 gilman": (37.8796, -122.2994),
+    "toyota pavilion at concord": (37.96, -121.9404),
+    "concord pavilion": (37.96, -121.9404),
+    "lesher center for the arts": (37.9009, -122.0635),
+    "bankhead theater": (37.6834, -121.7683),
+    "craneway pavilion": (37.9093, -122.3582),
+    # Peninsula
+    "bing concert hall": (37.432, -122.1661),
+    "stanford stadium": (37.4345, -122.162),
+    "cantor arts center": (37.433, -122.1709),
+    "fox theatre redwood city": (37.4864, -122.2296),
+    "club fox": (37.4864, -122.2295),
+    "san mateo county event center": (37.5467, -122.3021),
+    # South Bay
+    "levi's stadium": (37.403, -121.9696),
+    "paypal park": (37.3513, -121.9247),
+    "san jose center for the performing arts": (37.3297, -121.8925),
+    "hammer theatre center": (37.3338, -121.8865),
+    "hammer theatre": (37.3338, -121.8865),
+    "san jose improv": (37.3356, -121.8883),
+    "tech interactive": (37.3314, -121.8902),
+    "the tech interactive": (37.3314, -121.8902),
+    "san jose museum of art": (37.3337, -121.89),
+    "san pedro square market": (37.3364, -121.8947),
+    "mountain winery": (37.2601, -122.0648),
+    "california's great america": (37.3954, -121.9721),
+    "computer history museum": (37.4143, -122.0774),
+    # North Bay
+    "mystic theatre": (38.2334, -122.6401),
+    "luther burbank center for the arts": (38.493, -122.7493),
+    "green music center": (38.344, -122.6699),
+    "uptown theatre napa": (38.2965, -122.2875),
+    "oxbow public market": (38.3017, -122.2817),
+    "sonoma raceway": (38.1594, -122.4547),
+    "six flags discovery kingdom": (38.1386, -122.2339),
 }
 
 
@@ -218,6 +279,37 @@ def _normalize_venue(value: str) -> str:
     text = html.unescape(value)
     text = unicodedata.normalize("NFKC", text).translate(_PUNCTUATION_FOLD)
     return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _strip_article(value: str) -> str:
+    return value[4:] if value.startswith("the ") else value
+
+
+def _contains_phrase(text: str, phrase: str, *, strict: bool = False) -> bool:
+    """Whether *phrase* occurs in *text* delimited by non-word characters.
+
+    ``strict`` is for one-word venue names ("audio", "halcyon", "f8"), which
+    are also ordinary words: there a plain space is not a boundary, so
+    "Audio Visual Lab" is not Audio, while "Audio - SF" and "Audio (21+)" are.
+    """
+    def boundary(char: str) -> bool:
+        return not char.isalnum() and not (strict and char == " ")
+
+    start = text.find(phrase)
+    while start != -1:
+        end = start + len(phrase)
+        before_ok = start == 0 or boundary(text[start - 1]) or (
+            strict and text[start - 1] == " " and not text[:start].strip(" ").replace("-", "").strip()
+        )
+        after = text[end:].lstrip(" ") if strict else text[end:]
+        # "Halcyon SF" / "Yoshi's Oakland": a bare city suffix is decoration.
+        after_ok = not after or boundary(after[0]) or (
+            strict and (after in CITY_COORDINATES or after == "sf")
+        )
+        if before_ok and after_ok:
+            return True
+        start = text.find(phrase, start + 1)
+    return False
 
 
 def _haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -284,17 +376,26 @@ def lookup_venue_coordinates(venue_name: str | None) -> tuple[float, float] | No
         return None
 
     candidates: list[tuple[int, tuple[float, float]]] = []
-    exact = VENUE_COORDINATES.get(normalized)
+    exact = VENUE_COORDINATES.get(normalized) or VENUE_COORDINATES.get(_strip_article(normalized))
     if exact is not None:
         candidates.append((len(normalized), exact))
     else:
+        # A known venue named inside a longer string ("The Fillmore - San
+        # Francisco", "Cobb's Comedy Club (18+)"), on word boundaries: a bare
+        # substring test read "audio" in "Audio Visual Lab" and "f8" in
+        # anything containing those two characters.
         for key, coords in VENUE_COORDINATES.items():
-            if key in normalized:
+            if _contains_phrase(normalized, key, strict=" " not in key):
                 candidates.append((len(key), coords))
         if not candidates:
+            # The same venue without its article ("Fillmore" for "the
+            # fillmore"). This used to accept any substring of a key, so
+            # "Oakland" resolved to the Fox Theater, "San Jose" to the Civic
+            # and "Center" to Chase Center — all at full confidence.
+            bare = _strip_article(normalized)
             for key, coords in VENUE_COORDINATES.items():
-                if normalized in key:
-                    candidates.append((len(normalized), coords))
+                if _strip_article(key) == bare:
+                    candidates.append((len(key), coords))
 
     if not candidates:
         return None

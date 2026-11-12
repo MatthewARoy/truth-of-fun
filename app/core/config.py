@@ -1,5 +1,6 @@
 import random
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,6 +22,58 @@ class Settings(BaseSettings):
     database_url: str = Field(
         default="postgresql+psycopg2://postgres:postgres@127.0.0.1:5433/truth_of_fun"
     )
+    db_pool_size: int = Field(
+        default=10, ge=1,
+        description="Persistent connections per process (API worker or ingestion worker).",
+    )
+    db_max_overflow: int = Field(
+        default=20, ge=0,
+        description=(
+            "Extra connections a process may open under burst. pool_size + "
+            "max_overflow, times the number of processes, must stay under "
+            "Postgres' max_connections (100 by default)."
+        ),
+    )
+    db_pool_timeout_seconds: int = Field(
+        default=10, ge=1,
+        description="How long a request waits for a pooled connection before failing.",
+    )
+    db_pool_recycle_seconds: int = Field(
+        default=1800, ge=-1,
+        description="Reconnect after this long so idle-timeout proxies cannot strand a connection.",
+    )
+    db_statement_timeout_ms: int = Field(
+        default=0, ge=0,
+        description=(
+            "Postgres statement_timeout applied to every connection of this "
+            "process; 0 leaves the server default. Set it for the API "
+            "(e.g. 15000) so one pathological query cannot pin a connection. "
+            "Leave it unset for the worker and migrations, whose bulk "
+            "statements are legitimately slow."
+        ),
+    )
+    public_web_url: str = Field(
+        default="",
+        description=(
+            "Public origin of the web app, e.g. https://truthoffun.example. "
+            "Used to build absolute links in text that leaves the site "
+            "(copied itineraries, password-reset emails). Empty keeps links "
+            "relative, which only works inside the web app itself."
+        ),
+    )
+    llm_request_timeout_seconds: float = Field(
+        default=8.0, gt=0,
+        description=(
+            "Deadline for an LLM call made while a user is waiting (concierge "
+            "intent parsing). On timeout the request falls back to the "
+            "deterministic keyword parser."
+        ),
+    )
+    sentry_dsn: str | None = Field(
+        default=None,
+        description="Optional Sentry DSN; unset disables error reporting entirely.",
+    )
+    sentry_traces_sample_rate: float = Field(default=0.0, ge=0.0, le=1.0)
     ticketmaster_api_key: str | None = None
     anthropic_api_key: str | None = None
     anthropic_model: str = Field(
@@ -78,6 +131,28 @@ class Settings(BaseSettings):
     worker_interval_seconds: int = Field(
         default=6 * 60 * 60,
         description="Ingestion worker polling interval in seconds",
+    )
+
+    worker_source_timeout_seconds: float = Field(
+        default=1200.0, gt=0,
+        description=(
+            "Hard ceiling on a single source's fetch per cycle. The slowest "
+            "healthy source (a Playwright crawl of ~100 detail pages) takes a "
+            "few minutes; anything near this limit is hung."
+        ),
+    )
+    worker_failure_retry_seconds: int = Field(
+        default=900, ge=1,
+        description="Delay before retrying after a cycle that failed outright.",
+    )
+    worker_watchdog_seconds: int = Field(
+        default=3600, ge=0,
+        description=(
+            "The worker exits (for its supervisor to restart it) if it makes "
+            "no progress for this long, and --healthcheck reports unhealthy. "
+            "Must exceed worker_source_timeout_seconds plus the slowest "
+            "pipeline pass. 0 disables the watchdog."
+        ),
     )
 
     log_level: str = Field(
@@ -178,6 +253,26 @@ class Settings(BaseSettings):
         ge=1,
         description="JWT expiration in minutes (default 7 days)",
     )
+    password_reset_expire_minutes: int = Field(
+        default=60, ge=5,
+        description="How long an emailed password-reset link stays valid.",
+    )
+    smtp_host: str | None = Field(
+        default=None,
+        description=(
+            "SMTP server for transactional email (password resets). Unset "
+            "disables sending: reset requests are accepted but no mail leaves, "
+            "which is logged as a warning."
+        ),
+    )
+    smtp_port: int = Field(default=587)
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_starttls: bool = Field(default=True, description="Upgrade the connection with STARTTLS.")
+    smtp_from: str = Field(
+        default="",
+        description="From address for transactional email, e.g. 'Truth of Fun <no-reply@example.com>'.",
+    )
     max_request_body_bytes: int = Field(
         default=1_000_000,
         ge=0,
@@ -207,6 +302,20 @@ class Settings(BaseSettings):
             "Per-client cap on login/register attempts per 15 minutes "
             "(credential-stuffing and signup-abuse guard). 0 disables."
         ),
+    )
+
+    rate_limit_backend: Literal["memory", "redis"] = Field(
+        default="memory",
+        description=(
+            "Where rate-limit windows live. 'memory' is per process — correct "
+            "for a single API process only. 'redis' shares them across every "
+            "worker/replica via REDIS_URL and survives restarts; required when "
+            "running more than one API process."
+        ),
+    )
+    rate_limit_redis_prefix: str = Field(
+        default="tof:ratelimit",
+        description="Redis key prefix for shared rate-limit windows.",
     )
 
     alert_webhook_url: str | None = Field(

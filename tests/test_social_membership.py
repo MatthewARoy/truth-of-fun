@@ -80,6 +80,8 @@ def _build_client() -> Generator[TestClient, None, None]:
                     attendee_count INTEGER NOT NULL DEFAULT 0,
                     location_confidence FLOAT NOT NULL DEFAULT 1.0,
                     is_free BOOLEAN NOT NULL DEFAULT 0,
+                    city VARCHAR,
+                    region VARCHAR,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )

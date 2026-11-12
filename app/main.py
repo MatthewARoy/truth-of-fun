@@ -2,9 +2,12 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import DataError, IntegrityError, StatementError
 
+from app.api.account import router as account_router
 from app.api.agent_tokens import router as agent_tokens_router
 from app.api.auth import router as auth_router
 from app.api.discovery import router as discovery_router
@@ -14,6 +17,7 @@ from app.api.middleware import RequestContextMiddleware
 from app.api.social import router as social_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.core.observability import init_error_reporting
 from app.core.request_limits import RequestBodyLimitMiddleware
 
 settings = get_settings()
@@ -22,6 +26,7 @@ settings = get_settings()
 # use the configured format rather than Python's default lastResort handler.
 configure_logging()
 logger = logging.getLogger(__name__)
+init_error_reporting(component="api")
 
 API_VERSION = "1.0.0"
 
@@ -79,9 +84,66 @@ app.add_middleware(
 )
 app.add_middleware(RequestContextMiddleware)
 
+
+
+def _bad_input(request: Request, reason: str) -> JSONResponse:
+    logger.warning("Rejected unstorable input: %s", reason)
+    return JSONResponse(
+        status_code=400,
+        content={
+            "detail": "The request contains a value the server cannot store.",
+            "request_id": getattr(request.state, "request_id", None),
+        },
+    )
+
+
+@app.exception_handler(DataError)
+async def _data_error_handler(request: Request, exc: DataError) -> JSONResponse:
+    """A value Postgres refuses (out-of-range integer, over-long string, bad
+    encoding) is the caller's mistake, not a server fault: answer 400 instead
+    of a 500 with a traceback and a page to whoever is on call."""
+    return _bad_input(request, type(exc.orig).__name__)
+
+
+def _is_nul_rejection(exc: BaseException | None) -> bool:
+    return isinstance(exc, ValueError) and "NUL (0x00)" in str(exc)
+
+
+# psycopg2 rejects NUL bytes while adapting parameters, before the statement
+# reaches the server. Depending on the code path that surfaces bare or wrapped.
+@app.exception_handler(ValueError)
+async def _value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
+    if _is_nul_rejection(exc):
+        return _bad_input(request, "NUL byte in string parameter")
+    raise exc
+
+
+@app.exception_handler(StatementError)
+async def _statement_error_handler(request: Request, exc: StatementError) -> JSONResponse:
+    if _is_nul_rejection(exc.orig):
+        return _bad_input(request, "NUL byte in string parameter")
+    raise exc
+
+
+@app.exception_handler(IntegrityError)
+async def _integrity_error_handler(request: Request, exc: IntegrityError) -> JSONResponse:
+    """Two requests racing through a check-then-insert (double-click on vote,
+    duplicate registration) trip a unique constraint. The data is fine — one
+    of them won — so report a conflict rather than a server error."""
+    logger.warning("Write conflict: %s", type(exc.orig).__name__)
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": "This change conflicts with one made at the same time. Please retry.",
+            "request_id": getattr(request.state, "request_id", None),
+        },
+    )
+
+
 app.include_router(health_router)
 app.include_router(auth_router)
 app.include_router(agent_tokens_router)
+app.include_router(account_router)
 app.include_router(discovery_router)
 app.include_router(social_router)
 app.include_router(internal_secrets_router)

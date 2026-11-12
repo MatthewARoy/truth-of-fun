@@ -79,7 +79,7 @@ def mint_token(payload: MintTokenRequest, response: Response,
 @router.get("/tokens", response_model=list[TokenResponse], operation_id="listAgentTokens",
     summary="List token metadata and usage (user JWT only)")
 def list_tokens(response: Response, limit: int = Query(default=50, ge=1, le=100),
-    offset: int = Query(default=0, ge=0), session: Session = Depends(get_session),
+    offset: int = Query(default=0, ge=0, le=1_000_000), session: Session = Depends(get_session),
     user: User = Depends(get_current_user)):
     response.headers["Cache-Control"] = "private, no-store"
     rows = session.exec(select(AgentToken).where(AgentToken.user_id == user.id)

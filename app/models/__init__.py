@@ -5,6 +5,7 @@ from app.models.api_key import ApiKeyInventory, ApiKeyUsageSnapshot
 from app.models.event import Event
 from app.models.geocode_cache import GeocodeCacheEntry
 from app.models.itinerary import SavedItinerary
+from app.models.password_reset import PasswordResetToken
 from app.models.social import FolderInvite, FolderItem, FolderMember, FolderVote, VibeFolder
 from app.models.source_health import SourceHealthRecord
 from app.models.source_record import EventSourceRecord
@@ -24,6 +25,7 @@ __all__ = [
     "FolderItem",
     "FolderMember",
     "FolderVote",
+    "PasswordResetToken",
     "SavedItinerary",
     "SourceHealthRecord",
     "User",

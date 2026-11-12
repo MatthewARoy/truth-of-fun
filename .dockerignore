@@ -1,0 +1,25 @@
+# Keep build contexts small and keep local secrets/state out of image layers.
+.git
+.github
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+node_modules
+**/node_modules
+apps/web/.next
+apps/web/test-results
+apps/web/playwright-report
+packages/*/dist
+coverage
+docs
+tests
+tmp
+.env
+.env.*
+!.env.example
+.ticketmaster_sync_state.json
+.claude
+.superpowers
+deploy/.env.production
+deploy/backups

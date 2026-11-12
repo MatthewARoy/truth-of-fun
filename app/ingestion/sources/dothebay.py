@@ -413,12 +413,16 @@ class DoTheBaySource(InputAgentSource):
                 except ValueError:
                     base_date = None
             elif md:
-                from app.ingestion.scraper_utils import MONTH_ABBREV
+                from app.ingestion.scraper_utils import MONTH_ABBREV, infer_listing_year
 
                 m = MONTH_ABBREV.get(md.group(1).lower()[:3])
                 if m is not None:
                     d = int(md.group(2))
-                    y = int(md.group(3)) if md.group(3) else datetime.now(SF_TZ).year
+                    y = (
+                        int(md.group(3))
+                        if md.group(3)
+                        else infer_listing_year(m, d, datetime.now(SF_TZ).date())
+                    )
                     try:
                         base_date = date(y, m, d)
                     except ValueError:

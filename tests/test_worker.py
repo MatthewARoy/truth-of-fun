@@ -419,3 +419,198 @@ async def test_checkpoint_admission_requires_complete_persistence(outcome):
     else:
         await worker.run_once()
     assert acknowledgments == ([True] if outcome == "success" else [])
+
+
+class _HangingSource:
+    """A source whose fetch never returns — a host that accepts and goes silent."""
+
+    def __init__(self, *, source_name: str) -> None:
+        self.source_name = source_name
+        self.closed = False
+
+    async def fetch_events(self, **kwargs: Any) -> list[dict[str, Any]]:
+        import asyncio
+
+        await asyncio.sleep(3600)
+        return []
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+async def test_hung_source_is_cancelled_and_does_not_block_the_others() -> None:
+    from app import worker as worker_module
+
+    worker_module._source_health_state.clear()
+    hung = _HangingSource(source_name="alpha")
+    healthy = _FakeSource(source_name="beta", events=[_event("b1")])
+    pipeline = _FakePipeline()
+    worker = IngestionWorker(
+        pipeline_service=pipeline,
+        session_factory=lambda: nullcontext(object()),
+        source_registry=_FakeRegistry({"alpha": hung, "beta": healthy}),
+        source_timeout_seconds=0.05,
+    )
+
+    result = await worker.run_once()
+
+    assert result.per_source_counts == {"alpha": 0, "beta": 1}
+    assert hung.closed is True
+    state = worker_module._source_health_state
+    assert state["alpha"]["status"] == "failing"
+    assert "fetch budget" in state["alpha"]["last_error"]
+    assert state["beta"]["status"] == "healthy"
+
+
+async def test_a_sources_own_timeout_error_keeps_its_message() -> None:
+    from app import worker as worker_module
+
+    worker_module._source_health_state.clear()
+    worker = IngestionWorker(
+        pipeline_service=_FakePipeline(),
+        session_factory=lambda: nullcontext(object()),
+        source_registry=_FakeRegistry(
+            {"alpha": _FailingSource(source_name="alpha", error=TimeoutError("page.goto exceeded 30000ms"))}
+        ),
+    )
+    await worker.run_once()
+    assert "page.goto exceeded" in worker_module._source_health_state["alpha"]["last_error"]
+
+
+async def test_identical_alerts_are_sent_once_within_the_cooldown(monkeypatch: Any) -> None:
+    from app import worker as worker_module
+
+    sent: list[str] = []
+
+    async def fake_alert(*, title: str, message: str, severity: str) -> None:
+        sent.append(title)
+
+    monkeypatch.setattr(worker_module, "send_alert", fake_alert)
+    worker_module._source_health_state.clear()
+    worker = IngestionWorker(
+        pipeline_service=_FakePipeline(),
+        session_factory=lambda: nullcontext(object()),
+        source_registry=_FakeRegistry(
+            {"alpha": _FailingSource(source_name="alpha", error=RuntimeError("layout changed"))}
+        ),
+    )
+    for _ in range(3):
+        await worker.run_once()
+    assert sent == ["Source alpha incomplete"]
+
+
+def _real_engine():
+    from sqlalchemy import create_engine
+
+    from app.core.config import get_settings
+
+    engine = create_engine(get_settings().database_url)
+    try:
+        with engine.connect():
+            pass
+    except Exception:
+        engine.dispose()
+        pytest.skip("Postgres is required for the cycle lock")
+    if engine.dialect.name != "postgresql":
+        engine.dispose()
+        pytest.skip("Postgres is required for the cycle lock")
+    return engine
+
+
+async def test_second_worker_skips_the_cycle_while_the_first_holds_the_lock() -> None:
+    from app.worker import CycleAlreadyRunning
+
+    engine = _real_engine()
+    try:
+        def build() -> IngestionWorker:
+            return IngestionWorker(
+                pipeline_service=_FakePipeline(),
+                session_factory=lambda: nullcontext(object()),
+                source_registry=_FakeRegistry({"alpha": _FakeSource(source_name="alpha", events=[])}),
+                lock_engine=engine,
+            )
+
+        first, second = build(), build()
+        with first._cycle_lock():
+            with pytest.raises(CycleAlreadyRunning):
+                await second.run_once()
+        # Released: the next cycle runs.
+        result = await second.run_once()
+        assert result.per_source_counts == {"alpha": 0}
+    finally:
+        engine.dispose()
+
+
+async def test_restart_keeps_last_success_and_the_canary_baseline() -> None:
+    """A deploy must not erase when a source last worked or reset its ladder."""
+    from datetime import datetime, timezone
+
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import Session, SQLModel, create_engine
+
+    from app import worker as worker_module
+    from app.models.source_health import SourceHealthRecord
+
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    SQLModel.metadata.create_all(engine, tables=[SourceHealthRecord.__table__])
+    succeeded = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        session.add(SourceHealthRecord(
+            source_name="alpha", status="degraded", last_event_count=0,
+            consecutive_zeros=1, last_run_at=succeeded, last_success_at=succeeded,
+        ))
+        session.add(SourceHealthRecord(
+            source_name="beta", status="healthy", last_event_count=40,
+            consecutive_zeros=0, last_run_at=succeeded, last_success_at=succeeded,
+        ))
+        session.commit()
+
+    worker_module._source_health_state.clear()  # a fresh process
+    alerts: list[tuple[str, str, str]] = []
+    worker = IngestionWorker(
+        pipeline_service=_FakePipeline(),
+        session_factory=lambda: Session(engine),
+        source_registry=_FakeRegistry({
+            "alpha": _FakeSource(source_name="alpha", events=[]),
+            "beta": _FakeSource(source_name="beta", events=[]),
+        }),
+    )
+    original_flush = worker._flush_alerts
+
+    async def capture() -> None:
+        alerts.extend(worker._pending_alerts)
+        await original_flush()
+
+    worker._flush_alerts = capture  # type: ignore[method-assign]
+    await worker.run_once()
+
+    with Session(engine) as session:
+        alpha = session.get(SourceHealthRecord, "alpha")
+        beta = session.get(SourceHealthRecord, "beta")
+    # Second consecutive zero across the restart: escalates instead of resetting.
+    assert alpha.consecutive_zeros == 2 and alpha.status == "failing"
+    assert alpha.last_success_at is not None
+    # The baseline survived, so the drop to zero still trips the canary.
+    assert any("returned 0 events" in title for title, _, _ in alerts)
+    assert beta.last_success_at is not None
+
+
+def test_healthcheck_reflects_heartbeat_age(tmp_path, monkeypatch: Any) -> None:
+    import os
+    import time
+
+    from app import worker as worker_module
+    from app.core.config import get_settings
+
+    beat = tmp_path / "beat"
+    monkeypatch.setenv("WORKER_HEARTBEAT_FILE", str(beat))
+    monkeypatch.setattr(get_settings(), "worker_watchdog_seconds", 600)
+
+    assert worker_module.run_healthcheck() == 1  # never started
+    worker_module.touch_heartbeat()
+    assert worker_module.run_healthcheck() == 0
+    stale = time.time() - 601
+    os.utime(beat, (stale, stale))
+    assert worker_module.run_healthcheck() == 1

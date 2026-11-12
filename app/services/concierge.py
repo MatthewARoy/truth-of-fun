@@ -198,17 +198,35 @@ _GEOGRAPHIES = [
 ]
 
 
+def _geography_patterns() -> list[tuple[str, "re.Pattern[str]"]]:
+    # Neighborhood words plus every city and region the platform can filter
+    # on, matched on word boundaries: a plain substring search read "sf" in
+    # "transfer", "noe" in "canoe" and "mission" in "admission".
+    from app.services.regions import CITIES_BY_REGION, _REGION_ALIASES
+
+    names = set(_GEOGRAPHIES) | set(_REGION_ALIASES)
+    for cities in CITIES_BY_REGION.values():
+        names.update(city.lower() for city in cities)
+    return [(name, re.compile(rf"(?<![\w]){re.escape(name)}(?![\w])")) for name in names]
+
+
+_GEOGRAPHY_PATTERNS: list[tuple[str, "re.Pattern[str]"]] | None = None
+
+
 def _extract_geography(text: str) -> str | None:
-    # Pick the neighborhood that appears earliest in the request (so "noe
+    # Pick the place that appears earliest in the request (so "noe
     # downtown" resolves to the more specific "noe"), tie-broken toward the
     # longer phrase ("noe valley" over "noe" at the same position).
+    global _GEOGRAPHY_PATTERNS
+    if _GEOGRAPHY_PATTERNS is None:
+        _GEOGRAPHY_PATTERNS = _geography_patterns()
     best_key: tuple[int, int] | None = None
     best_geo: str | None = None
-    for geography in _GEOGRAPHIES:
-        idx = text.find(geography)
-        if idx == -1:
+    for geography, pattern in _GEOGRAPHY_PATTERNS:
+        match = pattern.search(text)
+        if match is None:
             continue
-        key = (idx, -len(geography))
+        key = (match.start(), -len(geography))
         if best_key is None or key < best_key:
             best_key = key
             best_geo = geography
@@ -313,8 +331,18 @@ class ClaudeIntentParser:
         settings = get_settings()
         self._api_key = api_key or settings.anthropic_api_key
         self._model = model or settings.anthropic_model
+        # A user is waiting on this call and the keyword parser is a complete
+        # fallback, so fail fast: the SDK defaults (10-minute timeout, two
+        # retries) would hold the request — and its database connection —
+        # through an Anthropic brownout.
         self._client = (
-            anthropic.AsyncAnthropic(api_key=self._api_key) if self._api_key else None
+            anthropic.AsyncAnthropic(
+                api_key=self._api_key,
+                timeout=settings.llm_request_timeout_seconds,
+                max_retries=0,
+            )
+            if self._api_key
+            else None
         )
 
     async def parse(self, prompt: str, *, now: datetime) -> ParsedIntent | None:

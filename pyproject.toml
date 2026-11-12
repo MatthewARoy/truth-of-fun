@@ -28,6 +28,7 @@ dependencies = [
   "bcrypt",
   "email-validator",
   "tzdata",
+  "sentry-sdk[fastapi]>=2.74.0",
 ]
 
 [tool.pytest.ini_options]

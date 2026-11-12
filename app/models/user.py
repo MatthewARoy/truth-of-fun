@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, Column, DateTime, String, func
+from sqlalchemy import JSON, Column, DateTime, Integer, String, func
 from sqlalchemy.ext.mutable import MutableList
 from sqlmodel import Field, SQLModel
 
@@ -20,6 +20,13 @@ class User(SQLModel, table=True):
     is_active: bool = Field(default=True, nullable=False)
     full_name: Optional[str] = Field(default=None, max_length=255)
     role: str = Field(default="user", max_length=64, nullable=False)
+    # Stamped into every JWT as ``ver``. Bumping it (password change or reset,
+    # "sign out everywhere") invalidates every token issued before the bump —
+    # stateless tokens otherwise cannot be revoked before they expire.
+    token_version: int = Field(
+        default=0,
+        sa_column=Column(Integer, nullable=False, server_default="0"),
+    )
     # MutableList tracks in-place appends; a plain JSON column would silently
     # drop them at commit (the attribute is never marked dirty).
     saved_event_ids: list[int] = Field(

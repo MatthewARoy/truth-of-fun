@@ -15,6 +15,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Session, select
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.core.config import get_settings
 from app.core.database import get_session
 from app.core.localtime import LOCAL_TZ, tonight_end, weekend_window
 from app.core.ratelimit import llm_rate_limit, share_rate_limit
@@ -25,6 +26,8 @@ from app.models.user import User
 from app.models.user_signal import UserSignal
 from app.services.categories import canonical_category
 from app.services.catalog_taxonomy_v1 import ALIASES, CANONICAL, categories_v1, legacy_genres_v1
+from app.services.regions import CITIES_BY_REGION, REGION_LABELS, canonical_city, canonical_region
+from app.services.calendar_export import event_to_ics
 from app.services.planning import PlanningPlace, SearchArea, TravelMode, UserStop, resolve_search_area, travel_minutes
 from app.services.concierge import (
     anchor_hour_range,
@@ -75,6 +78,10 @@ class EventResponse(BaseModel):
     attendee_count: int = 0
     location_confidence: float = 1.0
     is_free: bool = False
+    # Bay Area geography derived from the location: a city name and one of
+    # sf / east_bay / peninsula / south_bay / north_bay ("beyond" = outside).
+    city: str | None = None
+    region: str | None = None
 
 
 class RecommendationResponse(EventResponse):
@@ -335,6 +342,8 @@ def _serialize_event(event: Event, *, people_interested: int = 0) -> EventRespon
         if event.location_confidence is not None
         else 1.0,
         is_free=bool(event.is_free),
+        city=event.city,
+        region=event.region,
     )
 
 
@@ -454,9 +463,31 @@ def overlaps_window(window_start: datetime, window_end: datetime):
     )
 
 
+def _legacy_place_text_match(keyword: str):
+    """Keyword match for rows whose city/region has not been assigned yet.
+
+    Rows written outside the ORM (raw SQL, anything predating the columns)
+    have a NULL region until the worker's next assignment pass; without this
+    they would vanish from every place filter in the meantime.
+    """
+    like = f"%{keyword}%"
+    return and_(
+        Event.region.is_(None),
+        Event.venue_name.ilike(like) | Event.raw_address.ilike(like) | Event.title.ilike(like),
+    )
+
+
 def _apply_concierge_geography_filter(stmt: object, geography: str | None) -> object:
     if not geography:
         return stmt
+    # "in Oakland" / "in the East Bay" mean where the event is, not whether
+    # its listing happens to contain the word.
+    region = canonical_region(geography)
+    if region:
+        return stmt.where(or_(Event.region == region, _legacy_place_text_match(geography)))
+    city = canonical_city(geography)
+    if city:
+        return stmt.where(or_(Event.city == city, _legacy_place_text_match(geography)))
     geography_like = f"%{geography}%"
     return stmt.where(
         Event.venue_name.ilike(geography_like)
@@ -529,6 +560,63 @@ def _location_keyword_for_preset(location_preset: str | None) -> str | None:
     return None
 
 
+class CityFacet(BaseModel):
+    name: str
+    upcoming_count: int
+
+
+class RegionFacet(BaseModel):
+    id: str
+    label: str
+    upcoming_count: int
+    cities: list[CityFacet]
+
+
+class RegionsResponse(BaseModel):
+    regions: list[RegionFacet]
+
+
+@router.get(
+    "/regions",
+    response_model=RegionsResponse,
+    operation_id="listRegions",
+    summary="Bay Area regions and cities with upcoming-event counts",
+)
+def list_regions(*, response: Response, session: Session = Depends(get_session)) -> RegionsResponse:
+    """The values `GET /events` accepts for `region` and `city`, with how many
+    scheduled upcoming events each currently has. Always returns the five
+    regions in display order; a region's `cities` lists only cities that have
+    upcoming events, busiest first."""
+    rows = session.exec(
+        select(Event.region, Event.city, func.count())
+        .where(
+            func.coalesce(Event.end_at, Event.start_at) >= func.now(),
+            Event.status == "scheduled",
+            Event.region.in_(list(REGION_LABELS)),
+        )
+        .group_by(Event.region, Event.city)
+    ).all()
+    totals: dict[str, int] = {region: 0 for region in REGION_LABELS}
+    cities: dict[str, list[CityFacet]] = {region: [] for region in REGION_LABELS}
+    for region_id, city_name, count in rows:
+        totals[region_id] += int(count)
+        if city_name and city_name in CITIES_BY_REGION[region_id]:
+            cities[region_id].append(CityFacet(name=city_name, upcoming_count=int(count)))
+    # Counts move only when the worker runs; let browsers and the edge reuse them.
+    response.headers["Cache-Control"] = "public, max-age=300"
+    return RegionsResponse(
+        regions=[
+            RegionFacet(
+                id=region_id,
+                label=label,
+                upcoming_count=totals[region_id],
+                cities=sorted(cities[region_id], key=lambda c: (-c.upcoming_count, c.name)),
+            )
+            for region_id, label in REGION_LABELS.items()
+        ]
+    )
+
+
 @router.get(
     "/events",
     response_model=list[EventResponse],
@@ -566,7 +654,19 @@ def search_events(
     ),
     location_preset: Literal["sf", "oakland", "san_jose"] | None = Query(
         default=None,
-        description="Friendly location filter for quick UI controls",
+        description="Legacy city shortcut; prefer `region` / `city`.",
+    ),
+    region: Literal["sf", "east_bay", "peninsula", "south_bay", "north_bay"] | None = Query(
+        default=None,
+        description="Bay Area region the event is in (see GET /regions).",
+    ),
+    city: str | None = Query(
+        default=None,
+        max_length=100,
+        description="City the event is in, e.g. 'Oakland' or 'Palo Alto' (see GET /regions).",
+    ),
+    is_free: bool | None = Query(
+        default=None, description="true: only free events; false: only paid or unpriced ones."
     ),
     start_at: datetime | None = Query(default=None, description="Window lower bound; includes ongoing events"),
     end_at: datetime | None = Query(default=None, description="Start time upper bound"),
@@ -576,7 +676,7 @@ def search_events(
     ),
     status: str | None = Query(None, max_length=50, description="Filter by event status"),
     limit: int = Query(default=25, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
 ) -> list[EventResponse]:
     if any(value is not None for value in (lat, lng, radius_miles)) and any(
         value is None for value in (lat, lng, radius_miles)
@@ -630,14 +730,22 @@ def search_events(
         resolved_category = canonical_category(category) or category.strip()
         stmt = stmt.where(_category_filter(resolved_category))
 
-    location_keyword = _location_keyword_for_preset(location_preset)
-    if location_keyword:
-        geography_like = f"%{location_keyword}%"
-        stmt = stmt.where(
-            Event.venue_name.ilike(geography_like)
-            | Event.raw_address.ilike(geography_like)
-            | Event.title.ilike(geography_like)
-        )
+    # The legacy presets name cities; resolve them the same way as `city`
+    # (they used to be a keyword match on the venue/address/title text, which
+    # missed any Oakland event whose listing did not spell out "Oakland").
+    city_name = city or _location_keyword_for_preset(location_preset)
+    if city_name:
+        resolved_city = canonical_city(city_name)
+        if resolved_city is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Unknown city. See GET /regions for the cities that can be filtered.",
+            )
+        stmt = stmt.where(or_(Event.city == resolved_city, _legacy_place_text_match(resolved_city)))
+    if region:
+        stmt = stmt.where(Event.region == region)
+    if is_free is not None:
+        stmt = stmt.where(Event.is_free.is_(is_free))
 
     if has_geo and radius_miles is not None:
         radius_meters = radius_miles * 1609.34
@@ -729,6 +837,44 @@ def get_event(
         source_name=event.source_name,
         source_tier=event.source_tier,
         raw_address=event.raw_address,
+    )
+
+
+@router.get(
+    "/events/{event_id}/calendar.ics",
+    operation_id="getEventCalendarFile",
+    summary="Download one event as an iCalendar (.ics) file",
+    response_class=Response,
+    responses={200: {"content": {"text/calendar": {}}}},
+)
+def get_event_calendar_file(
+    *,
+    event_id: int,
+    session: Session = Depends(get_session),
+) -> Response:
+    """"Add to calendar" for any calendar app, with no account or API key."""
+    event = session.get(Event, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found.")
+    body = event_to_ics(
+        uid=f"event-{event_id}@truth-of-fun",
+        title=event.title,
+        start_at=event.start_at,
+        end_at=event.end_at,
+        all_day=bool(event.start_time_is_estimated),
+        location=", ".join(part for part in (event.venue_name, event.raw_address) if part) or None,
+        description=event.description,
+        url=event.external_url or _absolute_web_url(f"/events/{event_id}"),
+        cancelled=event.status == "cancelled",
+        updated_at=event.updated_at,
+    )
+    return Response(
+        content=body,
+        media_type="text/calendar; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="event-{event_id}.ics"',
+            "Cache-Control": "public, max-age=300",
+        },
     )
 
 
@@ -883,7 +1029,7 @@ def get_recommendations(
     session: Session = Depends(get_session),
     user: User = Depends(scoped_user("events:read", "profile:read")),
     limit: int = Query(default=25, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
 ) -> list[RecommendationResponse]:
     preferred_vibes = set(v.lower() for v in (user.preferred_vibes or []) if isinstance(v, str))
     profile_scores = _user_profile_service.compute_vibe_scores_for_user(
@@ -1192,6 +1338,17 @@ def _share_url_for(token: str) -> str:
     return f"/itinerary/{token}"
 
 
+def _absolute_web_url(path: str) -> str:
+    """Absolute form of a web path for text that leaves the site.
+
+    A copied plan gets pasted into a text message, where "/itinerary/abc" is
+    a dead string. With PUBLIC_WEB_URL unset (local development) the path is
+    returned unchanged.
+    """
+    base = get_settings().public_web_url.rstrip("/")
+    return f"{base}{path}" if base else path
+
+
 def _utc_datetime(value: datetime) -> datetime:
     # SQLite fixtures return naive timestamps; PostgreSQL stores timestamptz.
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
@@ -1263,7 +1420,7 @@ def _portable_response(itinerary: SavedItinerary) -> PortableItineraryResponse:
         expires_at=_utc_datetime(itinerary.expires_at),
         itinerary=stops,
         text=render_itinerary_text(
-            title=itinerary.title, stops=stops, share_url=share_url
+            title=itinerary.title, stops=stops, share_url=_absolute_web_url(share_url)
         ),
     )
 
@@ -1381,7 +1538,7 @@ def get_shared_itinerary(
 def list_owned_itineraries(
     *,
     limit: int = Query(default=25, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
     session: Session = Depends(get_session),
     user: User = Depends(scoped_user("plans:read")),
 ) -> list[OwnedItineraryResponse]:
