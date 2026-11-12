@@ -34,7 +34,10 @@ on:
 
 jobs:
   web-checks:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04, where the locked Playwright
+    # (1.59) refuses to install its browser ("does not support chromium on
+    # ubuntu26.04"). Return to ubuntu-latest once Playwright is upgraded.
+    runs-on: ubuntu-24.04
     services:
       db:
         image: postgis/postgis:16-3.4
