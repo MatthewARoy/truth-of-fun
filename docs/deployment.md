@@ -173,7 +173,10 @@ tof exec worker python -m app.worker --once     # refuses if a cycle is already 
 
 Operational:
 
-- [ ] `make status API_URL=https://<domain>/api` returns `ok`.
+- [ ] `make status API_URL=https://<domain>/api` reports no `failing` source
+      and nothing unexpected. Page-budget notices ("… cap reached; crawl
+      incomplete") show as `degraded`; see "Source statuses" in the
+      operations runbook.
 - [ ] External uptime check on `/api/health/ready` and `/healthz`.
 - [ ] `ALERT_WEBHOOK_URL` and `SENTRY_DSN` set, and a test alert seen.
 - [ ] Off-host copy of `deploy/backups/` scheduled, and one restore rehearsed.

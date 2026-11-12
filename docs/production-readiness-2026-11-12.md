@@ -371,6 +371,13 @@ behaviour under load.
     sentence as tags ("#perfect", "#saturday") and spends the LLM rate budget
     without calling an LLM.
 13. **No pruning** of past events or of the geocode and vibe-tag caches.
-14. **Eight moderate `npm audit` advisories remain** in lint tooling
+14. **README screenshots show the previous UI**, and
+    `scripts/capture_screenshots.mjs` no longer runs as written (it registers
+    with a password shorter than the 12-character minimum and waits for
+    headings that have changed).
+15. **Playwright is pinned behind the CI runner.** The web workflow is held
+    on `ubuntu-24.04` because the locked Playwright 1.59 cannot install its
+    browser on 26.04; upgrading Playwright lets it return to `ubuntu-latest`.
+16. **Eight moderate `npm audit` advisories remain** in lint tooling
     (the typescript-eslint chain); fixing them needs a major-version bump.
     The high and critical ones were resolved on this branch.
