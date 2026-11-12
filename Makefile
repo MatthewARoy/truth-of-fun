@@ -17,7 +17,7 @@ help:
 	@echo "  make db-up         Start Postgres+PostGIS via docker compose"
 	@echo "  make db-down       Stop Postgres"
 	@echo "  make migrate       Apply database migrations"
-	@echo "  make seed          Seed ~40 demo events (idempotent)"
+	@echo "  make seed          Seed ~70 demo events (idempotent)"
 	@echo "  make seed-reset    Wipe events and re-seed"
 	@echo "  make demo          db-up + migrate + seed (then start api/web in two terminals)"
 	@echo "  make api           Start FastAPI on :8000"

@@ -96,7 +96,7 @@ Requires Python 3.11, [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astr
 # One-time install
 make install
 
-# Bring up Postgres+PostGIS, run migrations, seed ~40 demo events
+# Bring up Postgres+PostGIS, run migrations, seed ~70 demo events across all five regions
 make demo
 
 # Then in two terminals
