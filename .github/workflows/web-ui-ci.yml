@@ -34,7 +34,8 @@ on:
 
 jobs:
   web-checks:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest became 26.04 (2026-11), which Playwright 1.59 can't install browsers on.
+    runs-on: ubuntu-24.04
     services:
       db:
         image: postgis/postgis:16-3.4
