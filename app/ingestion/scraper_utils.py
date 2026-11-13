@@ -226,6 +226,26 @@ def parse_date_range(
     return None, None
 
 
+_TITLE_STATUS_MARKER_RE = re.compile(
+    r"^\W*(postponed|cancell?ed)\b\s*(?:[:\-\u2013\u2014|(*!]|to\b|until\b)",
+    re.IGNORECASE,
+)
+
+
+def status_from_title_marker(title: str | None) -> str | None:
+    """Return the status an editor announced by retitling, e.g. ``POSTPONED: ...``.
+
+    Aggregators often mark a postponement only in the title while their
+    structured data still says scheduled. A marker counts only at the start of
+    the title and followed by a separator, so "Cancelled Plans Comedy" stays
+    a title, not a status.
+    """
+    match = _TITLE_STATUS_MARKER_RE.match(title or "")
+    if not match:
+        return None
+    return "postponed" if match.group(1).lower() == "postponed" else "cancelled"
+
+
 def pick_first_str(obj: dict[str, Any], *keys: str) -> str | None:
     """Return first non-empty string value for given keys."""
     for key in keys:

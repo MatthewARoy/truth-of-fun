@@ -249,3 +249,17 @@ def test_cost_fields_reads_free_with_a_footnote_asterisk() -> None:
     """'FREE*' is how the site marks free-with-conditions; still free."""
     source = FuncheapSFSource(proxy=None)
     assert source._cost_fields("Cost: FREE*")["is_free"] is True
+
+
+def test_status_from_title_marker_reads_leading_markers_only() -> None:
+    from app.ingestion.scraper_utils import status_from_title_marker
+
+    assert status_from_title_marker("POSTPONED: Night Market") == "postponed"
+    assert status_from_title_marker("Postponed – Holiday Showcase") == "postponed"
+    assert status_from_title_marker("POSTPONED TO 2027: Diwali Market") == "postponed"
+    assert status_from_title_marker("** CANCELLED ** Street Fair") == "cancelled"
+    assert status_from_title_marker("CANCELED (rain): Picnic") == "cancelled"
+    assert status_from_title_marker("Cancelled Plans Comedy Night") is None
+    assert status_from_title_marker("Free Show (Previously Postponed)") is None
+    assert status_from_title_marker("") is None
+    assert status_from_title_marker(None) is None

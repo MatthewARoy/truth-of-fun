@@ -15,7 +15,7 @@ from playwright_stealth import Stealth
 
 from app.core.config import get_settings
 from app.ingestion.base import BaseSource
-from app.ingestion.scraper_utils import find_next_page_url
+from app.ingestion.scraper_utils import find_next_page_url, status_from_title_marker
 from app.ingestion.venue_cache import lookup_venue_coordinates
 
 logger = logging.getLogger(__name__)
@@ -381,7 +381,9 @@ class FuncheapSFSource(BaseSource):
             "currency": cost_fields["currency"],
             "is_free": cost_fields["is_free"],
             "image_url": None,
-            "status": self._LD_STATUSES.get(status_name.lower(), "scheduled"),
+            "status": self._LD_STATUSES.get(status_name.lower())
+            or status_from_title_marker(title)
+            or "scheduled",
         }
 
     @staticmethod
@@ -529,7 +531,7 @@ class FuncheapSFSource(BaseSource):
             "currency": cost_fields["currency"],
             "is_free": cost_fields["is_free"],
             "image_url": None,
-            "status": "scheduled",
+            "status": status_from_title_marker(title) or "scheduled",
         }
 
     @staticmethod
