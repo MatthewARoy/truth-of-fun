@@ -197,6 +197,47 @@ def test_index_jsonld_prices_statuses_and_dates() -> None:
     assert payloads["all-day-fair"]["start_time_is_estimated"] is True
 
 
+def test_index_jsonld_title_marker_overrides_a_stale_scheduled_status() -> None:
+    """Funcheap editors postpone by retitling; JSON-LD still says EventScheduled.
+
+    Titles are verbatim from the live 2026-11-13 index.
+    """
+    source = FuncheapSFSource(proxy=None)
+    titled = {
+        "bhangra-night-market": "POSTPONED: Bhangra &#038; Beats Night Market (Yerba Buena Gardens Festival 2026)",
+        "performing-arts-showcase": "POSTPONED &#8211; SF&#8217;s Free Holiday &#8220;Performing Arts Showcase&#8221; (Civic Center)",
+        "diwali-night-market": "POSTPONED TO 2027: SF&#8217;s &#8220;Bhangra &#038; Beats&#8221; Diwali Night Market 2026",
+        "canceled-fair": "CANCELED: Fall Street Fair",
+        "cancelled-plans": "Cancelled Plans Comedy Night",
+        "explicitly-cancelled": "POSTPONED: Show Later Cancelled Outright",
+    }
+    items = []
+    for slug, name in titled.items():
+        item = _ld_event(
+            slug,
+            start="2026-11-13T16:00:00-08:00",
+            status="EventCancelled" if slug == "explicitly-cancelled" else "EventScheduled",
+        )
+        item["name"] = name
+        items.append(item)
+
+    statuses = {
+        p["source_event_id"]: p["status"]
+        for p in source._events_from_index_html(_index_page(DAY, items))
+    }
+
+    assert statuses == {
+        "bhangra-night-market": "postponed",
+        "performing-arts-showcase": "postponed",
+        "diwali-night-market": "postponed",
+        "canceled-fair": "cancelled",
+        # A title that merely starts with the word is not a status marker.
+        "cancelled-plans": "scheduled",
+        # The publisher's explicit status outranks the title.
+        "explicitly-cancelled": "cancelled",
+    }
+
+
 async def test_crawl_follows_each_days_pages_across_the_horizon() -> None:
     comedy = _ld_event(
         "free-sunday-comedy-night-in-downtown-sf-15", start="2026-09-13T19:00:00-07:00"
